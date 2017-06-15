@@ -127,9 +127,10 @@ static Pos screen_to_buffer_pos(int x, int y) {
 
 static int line_visual_width(char *line) {
   int result = 0;
+  int num_chars = array_len(line);
   if (!line)
     return result;
-  for (; *line; ++line) {
+  while (num_chars--) {
     ++result;
     if (*line == '\t') result += G.tab_width;
   }
@@ -353,16 +354,18 @@ int open_file(const char* filename, Buffer *buffer_out) {
     buffer.lines = calloc(buffer.num_lines, sizeof(*buffer.lines));
     fseek(f, 0, SEEK_SET);
     for (row = 0; row < buffer.num_lines; ++row) {
-      int col;
-      for (col = 0; !feof(f); ++col) {
+      while(1) {
         char c = fgetc(f);
-        if (ferror(f)) {
-          display_error("Error when reading from %s: %s", filename, strerror(errno));
-          goto done;
+        if (c == EOF) {
+          if (ferror(f)) {
+            display_error("Error when reading from %s: %s", filename, strerror(errno));
+            goto done;
+          }
+          goto last_line;
         }
-        if (c == '\n' || c == '\r') break;
+        if (c == '\r') fgetc(f);
+        if (c == '\n') break;
         array_push(buffer.lines[row], c);
-        if (feof(f)) goto last_line;
       }
     }
     last_line:;
