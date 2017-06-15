@@ -128,8 +128,7 @@ static Pos screen_to_buffer_pos(int x, int y) {
 static int line_visual_width(char *line) {
   int result = 0;
   int num_chars = array_len(line);
-  if (!line)
-    return result;
+  if (!line) return result;
   while (num_chars--) {
     ++result;
     if (*line == '\t') result += G.tab_width;
