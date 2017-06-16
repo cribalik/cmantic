@@ -126,14 +126,14 @@ static struct State {
   int tab_width;
 } G;
 
-static void render_strn(int x, int y, const char* str, int n) {
+static void render_strn(int x, int y, const char* str, int str_len) {
   if (str)
-    memcpy(&G.render_buffer[G.term_width*y + x], str, n);
+    memcpy(&G.render_buffer[G.term_width*y + x], str, mini(G.term_width - x, str_len));
 }
 
 static void render_str_v(int x, int y, const char* fmt, va_list args) {
   int n = vsnprintf(G.row_buffer, G.term_width, fmt, args);
-  render_strn(x, y, G.row_buffer, mini(G.term_width - x, n));
+  render_strn(x, y, G.row_buffer, n);
 }
 
 static void render_str(int x, int y, const char* fmt, ...) {
@@ -227,11 +227,16 @@ static void term_cursor_move_p(Pos p) {
 }
 
 static void term_inverse_video(int state) {
-  if (state) {
+  static int inv = 0;
+  int val;
+  if (state == -1) inv = !inv;
+  val = state == -1 ? inv : state;
+  if (val) {
     if (write(STDOUT_FILENO, "\x1b[7m", 4) != 4) panic();
   } else {
     if (write(STDOUT_FILENO, "\x1b[m", 3) != 3) panic();
   }
+
 }
 
 static int term_get_dimensions(int *w, int *h) {
@@ -339,7 +344,7 @@ static int open_file(const char* filename, Buffer *buffer_out) {
     Buffer buffer = {0};
     buffer.num_lines = num_lines;
     buffer.lines = 0;
-    array_reserve(buffer.lines, buffer.num_lines);
+    array_resize(buffer.lines, buffer.num_lines);
     fseek(f, 0, SEEK_SET);
     for (row = 0; row < buffer.num_lines; ++row) {
       buffer.lines[row] = 0;
@@ -410,7 +415,7 @@ static void render_pane(Pane *p, int x0, int x1, int y0, int y1) {
 
 static void status_message_set(const char *str) {
   int len = strlen(str);
-  array_reserve(G.menu_buffer, len);
+  array_resize(G.menu_buffer, len);
   memcpy(G.menu_buffer, str, len);
 }
 
@@ -452,7 +457,18 @@ int main(int argc, const char** argv) {
     /* draw document */
     render_pane(&G.main_pane, 0, G.term_width - 1, 0, G.term_height - 2);
 
-    /* TODO: draw status bar */
+    /* Draw menu/status bar */
+    if (G.mode != MODE_MENU) {
+      /* status bar */
+      char *str = "";
+      switch(G.mode) {
+        case MODE_INSERT: str = "INSERT"; break;
+        case MODE_NORMAL: str = "NORMAL"; break;
+        default: break;
+      }
+      status_message_set(str);
+    }
+    render_strn(0, G.term_height - 1, G.menu_buffer, mini(G.term_width, array_len(G.menu_buffer)));
 
     /* render to screen */
     {
@@ -551,10 +567,11 @@ int main(int argc, const char** argv) {
       /* process input */
       switch (G.mode) {
         case MODE_MENU:
-          if (input == KEY_ESCAPE)
-            G.mode = MODE_NORMAL;
-          else if (input == KEY_RETURN)
-            status_message_set("Menu not yet supported");
+          if (input == KEY_ESCAPE) {
+            if (strncmp(G.menu_buffer, ":inv", array_len(G.menu_buffer)) == 0)
+              term_inverse_video(-1);
+            status_message_set("Menu not yet supported"), G.mode = MODE_NORMAL;
+          }
           else if (!key_is_special(input))
             array_push(G.menu_buffer, input);
           break;
@@ -581,13 +598,14 @@ int main(int argc, const char** argv) {
             case KEY_HOME: move_to(0, G.pos_y); break;
 
             case 'o':
-
+              array_insert(G.main_pane.buffer.lines, G.pos_y+1, NULL);
               G.mode = MODE_INSERT;
+              move(0, 1);
               break;
 
             case 'i': G.mode = MODE_INSERT; break;
 
-            case ':': G.mode = MODE_MENU; break;
+            case ':': status_message_set(":"); G.mode = MODE_MENU; break;
           }
           break;
 
@@ -596,11 +614,6 @@ int main(int argc, const char** argv) {
           else if (!key_is_special(input)) {
             Buffer *b = &G.main_pane.buffer;
             array_insert(b->lines[G.pos_y], G.pos_x, input);
-            /*
-            array_push(b->lines[G.pos_y], 0);
-            memmove(b->lines[G.pos_y] + G.pos_x + 1, b->lines[G.pos_y] + G.pos_x, array_len(b->lines[G.pos_y])-G.pos_x-1);
-            b->lines[G.pos_y][G.pos_x] = input;
-            */
             move(1, 0);
           }
           break;
