@@ -30,6 +30,8 @@
   #define DEBUG(stmt)
 #endif
 
+#define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
+
 static void reset_termios_settings();
 static void panic() {
   reset_termios_settings();
@@ -50,13 +52,17 @@ int clampi(int x, int a, int b) {
 typedef enum {
   KEY_UNKNOWN = 0,
   KEY_ESCAPE = '\x1b',
-  KEY_ARROW_UP = 1000,
+
+  KEY_SPECIAL = 1000, /* so we can do c >= KEY_SPECIAL to check for special keys */
+  KEY_ARROW_UP,
   KEY_ARROW_DOWN,
   KEY_ARROW_LEFT,
   KEY_ARROW_RIGHT,
   KEY_END,
   KEY_HOME
 } Key;
+
+static int key_is_special(Key key) {return key >= KEY_SPECIAL;}
 
 typedef struct {
   int x,y;
@@ -76,6 +82,18 @@ typedef struct Buffer {
   int offset_x, offset_y;
 } Buffer;
 
+typedef enum {
+  MODE_NORMAL,
+  MODE_INSERT,
+  MODE_COUNT
+} Mode;
+
+static char *mode_name[] = {
+  "NORMAL",
+  "INSERT"
+};
+STATIC_ASSERT(arrcount(mode_name) == MODE_COUNT, mode_names_covered);
+
 static struct State {
   /* some rendering memory */
   char *render_buffer, *render_buffer_prev, *row_buffer;
@@ -87,6 +105,7 @@ static struct State {
   Buffer current_buffer;
   int pos_x, pos_y;
   int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+  Mode mode;
 
   /* some settings */
   struct termios orig_termios;
@@ -437,7 +456,7 @@ int main(int argc, const char** argv) {
     /*render_str(0, G.term_height - 1, "cursor: %i %i", G.pos_x, G.pos_y);*/
     {
       Pos sp = buffer_to_screen_pos(G.pos_x, G.pos_y);
-      render_str(0, G.term_height-1, "x %i y %i - sx %i sy %i", G.pos_x, G.pos_y, sp.x, sp.y);
+      render_str(0, G.term_height-1, "%s - <x %i y %i - sx %i sy %i>", mode_name[G.mode], G.pos_x, G.pos_y, sp.x, sp.y);
     }
 
     /* render to screen */
@@ -473,7 +492,7 @@ int main(int argc, const char** argv) {
             goto input_done;
           }
 
-          fprintf(stderr, "escape %c\n", c);
+          DEBUG(fprintf(stderr, "escape %c\n", c);)
 
           if (c >= '0' && c <= '9') {
             switch (c) {
@@ -501,34 +520,51 @@ int main(int argc, const char** argv) {
         }
         else {
           input = c;
-          fprintf(stderr, "%c\n", c);
+          DEBUG(fprintf(stderr, "%c\n", c);)
           goto input_done;
         }
       }
       input_done:;
 
       /* process input */
-      {
-        switch (input) {
-          case KEY_UNKNOWN: break;
+      switch (G.mode) {
+        case MODE_NORMAL:
+          switch (input) {
+            case KEY_UNKNOWN: break;
 
-          case KEY_ESCAPE:
-          case 'q': goto done;
+            case KEY_ESCAPE:
+            case 'q': goto done;
 
-          case 'k':
-          case KEY_ARROW_UP: move(0, -1); break;
-          case 'j':
-          case KEY_ARROW_DOWN: move(0, 1); break;
-          case 'h':
-          case KEY_ARROW_LEFT: move(-1, 0); break;
-          case 'l':
-          case KEY_ARROW_RIGHT: move(1, 0); break;
+            case 'k':
+            case KEY_ARROW_UP: move(0, -1); break;
+            case 'j':
+            case KEY_ARROW_DOWN: move(0, 1); break;
+            case 'h':
+            case KEY_ARROW_LEFT: move(-1, 0); break;
+            case 'l':
+            case KEY_ARROW_RIGHT: move(1, 0); break;
 
-          case 'L':
-          case KEY_END: G.ghost_x = -1; move(0, 0); break;
-          case 'H':
-          case KEY_HOME: move_to(0, G.pos_y); break;
-        }
+            case 'L':
+            case KEY_END: G.ghost_x = -1; move(0, 0); break;
+            case 'H':
+            case KEY_HOME: move_to(0, G.pos_y); break;
+
+            case 'i': G.mode = MODE_INSERT; break;
+          }
+          break;
+
+        case MODE_INSERT:
+          if (input == KEY_ESCAPE) G.mode = MODE_NORMAL;
+          else if (!key_is_special(input)) {
+            Buffer *b = &G.current_buffer;
+            array_push(b->lines[G.pos_y], 0);
+            memmove(b->lines[G.pos_y] + G.pos_x + 1, b->lines[G.pos_y] + G.pos_x, array_len(b->lines[G.pos_y])-G.pos_x-1);
+            b->lines[G.pos_y][G.pos_x] = input;
+            move(1, 0);
+          }
+          break;
+
+        case MODE_COUNT: break;
       }
     }
 
