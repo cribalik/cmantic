@@ -1,5 +1,6 @@
 /* TODO:
  *
+ * handle tabs
  * fuzzy search actions
  *
  * load files
@@ -500,6 +501,7 @@ int main(int argc, const char** argv) {
         /* check if we actually need to re-render */
         int dirty = memcmp(row, oldrow, rowsize);
         term_cursor_move(0, r);
+        /* TODO: handle tabs ! */
         if (dirty) {
           if (write(STDOUT_FILENO, row, rowsize) != rowsize) panic();
         }
@@ -628,7 +630,7 @@ int main(int argc, const char** argv) {
             case KEY_ARROW_RIGHT: move(1, 0); break;
 
             case 'L':
-            case KEY_END: G.ghost_x = -1; move(0, 0); break;
+            case KEY_END: G.ghost_x = -1; break;
             case 'H':
             case KEY_HOME: move_to(0, G.pos_y); break;
 
