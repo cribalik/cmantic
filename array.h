@@ -37,7 +37,7 @@
   #define ARRAY_FREE free
 #endif
 
-#define array_insert(a, i, x) (array_push(a, x), memmove((a)+(i)+1, (a)+(i), array_len(a) - (i) - 1), (a)[i] = (x))
+#define array_insert(a, i, x) (array_resize((a), array_len(a)+1), memmove((a)+(i)+1, (a)+(i), (array__n(a) - (i)) * sizeof(*(a))), (a)[i] = (x))
 #define array_len(a) ((a) ? array__n(a) : 0)
 #define array_len_get(a) (array__n(a))
 #define array_push(a, val) ((!(a) || array__n(a) == array__c(a) ? (a)=array__grow(a, sizeof(*(a)), 1) : 0), (a)[array__n(a)++] = val)
@@ -50,6 +50,7 @@
 #define array__c(a) ((int*)(a))[-1]
 #define array__n(a) ((int*)(a))[-2]
 static void* array__grow(void* a, int size, int num) {
+  /* TODO: ensure we are always power of 2 */
   int newc = a ? (num + array__n(a) > array__c(a)*2 ? num + array__n(a) : array__c(a)*2) : (num > ARRAY_INITIAL_SIZE ? num : ARRAY_INITIAL_SIZE);
   int n = a ? array__n(a) : 0;
   a = (int*)ARRAY_REALLOC(a ? &array__n(a) : 0, newc*size + 2*sizeof(int)) + 2;

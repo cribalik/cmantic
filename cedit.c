@@ -1,11 +1,10 @@
 /* TODO:
  *
- * status bar
- * menu
- * save and load files
+ * fuzzy search actions
+ *
+ * load files
  * movement (word, parenthises, block)
  * actions (Delete, Yank, ...)
- * fuzzy search actions
  * add folders
  */
 
@@ -88,10 +87,10 @@ static Pos pos_create(int x, int y) {
 }
 
 typedef struct {
-  int num_lines;
   char** lines;
-  char* filename;
+  const char* filename;
   int offset_x, offset_y;
+  int modified;
 } Buffer;
 
 typedef struct {
@@ -161,20 +160,6 @@ static int line_visual_width(char *line) {
   return result;
 }
 
-static void display_error(const char* fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  render_str_v(G.term_width/2, G.term_height/2, fmt, args);
-  va_end(args);
-}
-
-static void display_message(const char* fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  render_str_v(G.term_width/2, G.term_height/2, fmt, args);
-  va_end(args);
-}
-
 static void move_to(int x, int y) {
   int dx = x - G.pos_x;
   int line_last_pos;
@@ -184,7 +169,7 @@ static void move_to(int x, int y) {
   if (dx == 0) G.pos_x = G.ghost_x;
 
   /* clamp cursor to the buffer dimensions */
-  G.pos_y = clampi(G.pos_y, 0, G.main_pane.buffer.num_lines-1);
+  G.pos_y = clampi(G.pos_y, 0, array_len(G.main_pane.buffer.lines) - 1);
   line_last_pos = line_visual_width(G.main_pane.buffer.lines[G.pos_y]) - 1;
   /* in insert mode, allow cursor to go one past the end of line */
   if (G.mode == MODE_INSERT)
@@ -199,6 +184,25 @@ static void move_to(int x, int y) {
 
 static void move(int x, int y) {
   move_to(G.pos_x + x, G.pos_y + y);
+}
+
+static void status_message_set(const char *fmt, ...) {
+  int res;
+  va_list args;
+
+  va_start(args, fmt);
+  res = vsnprintf(G.menu_buffer, array_len(G.menu_buffer), fmt, args);
+  va_end(args);
+
+
+  if (res >= array_len(G.menu_buffer)) {
+    array_resize(G.menu_buffer, res+1);
+    va_start(args, fmt);
+    res = vsnprintf(G.menu_buffer, array_len(G.menu_buffer), fmt, args);
+    va_end(args);
+  }
+
+  array_resize(G.menu_buffer, res);
 }
 
 
@@ -318,46 +322,41 @@ static int calc_num_chars(int i) {
   return result;
 }
 
+/* grabs ownership of filename */
 static int open_file(const char* filename, Buffer *buffer_out) {
   int result = -1;
   int num_lines = 1;
   FILE* f = 0;
   f = fopen(filename, "r");
-  if (!f) {
-    display_error("Could not open %s: %s", filename, strerror(errno));
-    goto done;
-  }
+  if (!f) goto done;
 
   /* get line count */
   {
     /* TODO: optimize ? */
     while (!feof(f) && !ferror(f)) num_lines += fgetc(f) == '\n';
-    if (ferror(f)) {
-      display_error("Could not open %s: %s", filename, strerror(errno));
-      goto done;
-    }
+    if (ferror(f)) goto done;
     DEBUG(display_message("File has %i rows", num_lines));
   }
 
   {
     int row = 0;
     Buffer buffer = {0};
-    buffer.num_lines = num_lines;
     buffer.lines = 0;
-    array_resize(buffer.lines, buffer.num_lines);
+    buffer.filename = filename;
+    array_resize(buffer.lines, num_lines-1);
     fseek(f, 0, SEEK_SET);
-    for (row = 0; row < buffer.num_lines; ++row) {
+    for (row = 0; row < array_len(buffer.lines)+1; ++row) {
       buffer.lines[row] = 0;
       while(1) {
         char c = fgetc(f);
         if (c == EOF) {
           if (ferror(f)) {
-            display_error("Error when reading from %s: %s", filename, strerror(errno));
+            status_message_set("Error when reading from %s: %s", filename, strerror(errno));
             goto done;
           }
           goto last_line;
         }
-        if (c == '\r') fgetc(f);
+        if (c == '\r') c = fgetc(f);
         if (c == '\n') break;
         array_push(buffer.lines[row], c);
       }
@@ -369,7 +368,7 @@ static int open_file(const char* filename, Buffer *buffer_out) {
   }
 
   done:
-  /* TODO: free buffer_out if we failed */
+  /* TODO: free buffer memory if we failed */
   #if 0
   if (result) {
     if (result.buffer_out.lines) {
@@ -391,8 +390,8 @@ static void render_pane(Pane *p, int x0, int x1, int y0, int y1) {
 
   x1 = mini(x1, G.term_width-1);
 
-  p->gutter_width = calc_num_chars(b->num_lines) + 1;
-  for (line_num = 0; line_num < mini(y1 - y0, b->num_lines); ++line_num) {
+  p->gutter_width = calc_num_chars(array_len(b->lines)) + 1;
+  for (line_num = 0; line_num < mini(y1 - y0, array_len(b->lines)); ++line_num) {
     int num_to_write;
     int x,y;
     char *line;
@@ -413,16 +412,43 @@ static void render_pane(Pane *p, int x0, int x1, int y0, int y1) {
   }
 }
 
-static void status_message_set(const char *str) {
-  int len = strlen(str);
-  array_resize(G.menu_buffer, len);
-  memcpy(G.menu_buffer, str, len);
+static void save_buffer(Buffer *b) {
+  FILE* f;
+  int i;
+
+  assert(b->filename);
+
+  f = fopen(b->filename, "wb");
+  if (!f) {
+    status_message_set("Could not open file %s for writing: %s", b->filename, strerror(errno));
+    return;
+  }
+
+  /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
+  for (i = 0; i < array_len(b->lines); ++i) {
+    unsigned int num_to_write = array_len(b->lines[i]);
+    if (fwrite(b->lines[i], 1, num_to_write, f) != num_to_write) {
+      status_message_set("Failed to write to %s: %s", b->filename, strerror(errno));
+      return;
+    }
+    /* TODO: windows endlines option */
+    fputc('\n', f);
+  }
+
+  b->modified = 0;
+
+  fclose(f);
 }
 
 
 int main(int argc, const char** argv) {
   int err;
   (void) argc, (void)argv;
+
+  if (argc < 2) {
+    fprintf(stderr, "Usage: cedit <file>\n");
+    return 1;
+  }
 
   /* set up terminal */
   term_enable_raw_mode();
@@ -444,9 +470,10 @@ int main(int argc, const char** argv) {
 
   /* open a buffer */
   {
-    const char* filename = "cedit.c";
+    const char* filename = argv[1];
     open_file(filename, &G.main_pane.buffer);
-    if (!err) display_message("%s", filename);
+    if (err) status_message_set("Could not open file %s: %s\n", filename, strerror(errno));
+    if (!err) status_message_set("%s", filename);
   }
 
   while (1) {
@@ -458,16 +485,6 @@ int main(int argc, const char** argv) {
     render_pane(&G.main_pane, 0, G.term_width - 1, 0, G.term_height - 2);
 
     /* Draw menu/status bar */
-    if (G.mode != MODE_MENU) {
-      /* status bar */
-      char *str = "";
-      switch(G.mode) {
-        case MODE_INSERT: str = "INSERT"; break;
-        case MODE_NORMAL: str = "NORMAL"; break;
-        default: break;
-      }
-      status_message_set(str);
-    }
     render_strn(0, G.term_height - 1, G.menu_buffer, mini(G.term_width, array_len(G.menu_buffer)));
 
     /* render to screen */
@@ -568,9 +585,24 @@ int main(int argc, const char** argv) {
       switch (G.mode) {
         case MODE_MENU:
           if (input == KEY_ESCAPE) {
-            if (strncmp(G.menu_buffer, ":inv", array_len(G.menu_buffer)) == 0)
+            #define IS_OPTION(str) strncmp(G.menu_buffer, str, mini(strlen(str), array_len(G.menu_buffer))) == 0
+
+            /* FIXME: this might buffer overrun */
+            if (IS_OPTION(":inv")) {
               term_inverse_video(-1);
-            status_message_set("Menu not yet supported"), G.mode = MODE_NORMAL;
+              status_message_set("");
+            }
+            else if (IS_OPTION(":s")) {
+              save_buffer(&G.main_pane.buffer);
+              /* TODO: write out absolute path, instead of relative */
+              status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer.lines), G.main_pane.buffer.filename);
+            }
+            else if (IS_OPTION(":q")) {
+              goto done;
+            }
+            G.mode = MODE_NORMAL;
+
+            #undef IS_OPTION
           }
           else if (!key_is_special(input))
             array_push(G.menu_buffer, input);
@@ -581,7 +613,10 @@ int main(int argc, const char** argv) {
             case KEY_UNKNOWN: break;
 
             case KEY_ESCAPE:
-            case 'q': goto done;
+            case 'q':
+              if (G.main_pane.buffer.modified) status_message_set("You have unsaved changes. If you really want to exit, use :q");
+              else goto done;
+              break;
 
             case 'k':
             case KEY_ARROW_UP: move(0, -1); break;
@@ -598,7 +633,7 @@ int main(int argc, const char** argv) {
             case KEY_HOME: move_to(0, G.pos_y); break;
 
             case 'o':
-              array_insert(G.main_pane.buffer.lines, G.pos_y+1, NULL);
+              array_insert(G.main_pane.buffer.lines, G.pos_y+1, 0);
               G.mode = MODE_INSERT;
               move(0, 1);
               break;
@@ -610,6 +645,8 @@ int main(int argc, const char** argv) {
           break;
 
         case MODE_INSERT:
+          /* TODO: should not set `modifier` if we just enter and exit insert mode */
+          G.main_pane.buffer.modified = 1;
           if (input == KEY_ESCAPE) G.mode = MODE_NORMAL;
           else if (!key_is_special(input)) {
             Buffer *b = &G.main_pane.buffer;
