@@ -1,4 +1,8 @@
-/* TODO:
+/* CURRENT:
+ *
+ * fix scrolling
+ *
+ * TODO:
  *
  * handle tabs
  * fuzzy search actions
@@ -55,6 +59,7 @@ static int maxi(int a, int b) {
 static int mini(int a, int b) {
   return b < a ? b : a;
 }
+/* a,b inclusive */
 static int clampi(int x, int a, int b) {
   return x < a ? a : (b < x ? b : x);
 }
@@ -79,24 +84,22 @@ static int key_is_special(Key key) {return key >= KEY_SPECIAL;}
 typedef struct {
   int x,y;
 } Pos;
-
-static Pos pos_create(int x, int y) {
-  Pos result;
-  result.x = x;
-  result.y = y;
-  return result;
-}
+typedef struct {
+  int x,y,w,h;
+} Rect;
 
 typedef struct {
-  char** lines;
+  Array(Array(char)) lines;
   const char* filename;
-  int offset_x, offset_y;
+  int pos_x, pos_y;
+#define GHOST_EOL -1
+  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
   int modified;
 } Buffer;
 
 typedef struct {
   int gutter_width;
-  int x, y, w, h;
+  Rect bounds;
   Buffer buffer;
 } Pane;
 
@@ -111,14 +114,11 @@ static struct State {
   /* some rendering memory */
   char *render_buffer, *render_buffer_prev, *row_buffer;
   int term_width, term_height;
-  int gutter_width;
 
   /* some editor state */
   Pane main_pane;
-  int pos_x, pos_y;
-  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
   Mode mode;
-  char* menu_buffer;
+  Array(char) menu_buffer;
 
   /* some settings */
   struct termios orig_termios;
@@ -126,65 +126,120 @@ static struct State {
   int tab_width;
 } G;
 
-static void render_strn(int x, int y, const char* str, int str_len) {
-  if (str)
-    memcpy(&G.render_buffer[G.term_width*y + x], str, mini(G.term_width - x, str_len));
+static void render_strn(int x0, int x1, int y, const char* str, int n) {
+  char * const out = &G.render_buffer[G.term_width*y];
+
+  while (n-- && x0 < x1) {
+    if (*str == '\t') {
+      int num_to_write = mini(G.tab_width, x1 - x0);
+      memset(out + x0, ' ', num_to_write);
+      x0 += num_to_write;
+    }
+    else
+      out[x0++] = *str;
+    ++str;
+  }
 }
 
-static void render_str_v(int x, int y, const char* fmt, va_list args) {
+static void render_str_v(int x0, int x1, int y, const char* fmt, va_list args) {
   int n = vsnprintf(G.row_buffer, G.term_width, fmt, args);
-  render_strn(x, y, G.row_buffer, n);
+  render_strn(x0, x1, y, G.row_buffer, n);
 }
 
-static void render_str(int x, int y, const char* fmt, ...) {
+static void render_str(int x0, int x1, int y, const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
-  render_str_v(x, y, fmt, args);
+  render_str_v(x0, x1, y, fmt, args);
   va_end(args);
 }
 
-static Pos pane_to_screen_pos(Pane *pane, int x, int y) {
-  Pos result;
-  result.x = x + pane->gutter_width;
-  result.y = y;
-  return result;
-}
-
-static int line_visual_width(char *line) {
+static int to_visual_offset(Array(char) line, int x) {
   int result = 0;
-  int num_chars = array_len(line);
+  int i;
+
   if (!line) return result;
-  while (num_chars--) {
+
+  for (i = 0; i < x; ++i) {
     ++result;
-    if (*line == '\t') result += G.tab_width;
+    if (line[i] == '\t')
+      result += G.tab_width-1;
   }
   return result;
 }
 
-static void move_to(int x, int y) {
-  int dx = x - G.pos_x;
-  int line_last_pos;
-  G.pos_x = x;
-  G.pos_y = y;
+/* returns the logical index located visually at x */
+static int from_visual_offset(Array(char) line, int x) {
+  int visual = 0;
+  int i;
 
-  if (dx == 0) G.pos_x = G.ghost_x;
+  if (!line) return 0;
 
-  /* clamp cursor to the buffer dimensions */
-  G.pos_y = clampi(G.pos_y, 0, array_len(G.main_pane.buffer.lines) - 1);
-  line_last_pos = line_visual_width(G.main_pane.buffer.lines[G.pos_y]) - 1;
-  /* in insert mode, allow cursor to go one past the end of line */
-  if (G.mode == MODE_INSERT)
-    ++line_last_pos;
-  line_last_pos = maxi(line_last_pos, 0);
-  G.pos_x = clampi(G.pos_x, 0, line_last_pos);
-  if (dx != 0) G.ghost_x = G.pos_x;
-  if (dx == 0 && G.ghost_x == -1) G.pos_x = line_last_pos;
+  for (i = 0; i < array_len(line); ++i) {
+    ++visual;
+    if (line[i] == '\t')
+      visual += G.tab_width-1;
+    if (visual > x)
+      return i;
+  }
 
-  /* TODO: then offset the window so that it contains the new positions */
+  return i;
+
+  return 0;
 }
 
-static void move(int x, int y) {
-  move_to(G.pos_x + x, G.pos_y + y);
+static int pane_calc_top_visible_row(Pane *pane) {
+  return maxi(0, pane->buffer.pos_y - pane->bounds.h/2);
+}
+
+static int pane_calc_bottom_visible_row(Pane *pane) {
+  return mini(pane_calc_top_visible_row(pane) + pane->bounds.h, array_len(pane->buffer.lines)) - 1;
+}
+
+static Pos pane_to_screen_pos(Pane *pane) {
+  Pos result;
+  Array(char) line = pane->buffer.lines[pane->buffer.pos_y];
+  result.x = pane->bounds.x + to_visual_offset(line, pane->buffer.pos_x) + pane->gutter_width;
+  /* try to center */
+  result.y = pane->bounds.y + pane->buffer.pos_y - pane_calc_top_visible_row(pane);
+  return result;
+}
+
+static void move_to(Buffer *b, int x, int y) {
+  Array(char) old_line;
+  Array(char) new_line;
+  int old_x, dx;
+
+  old_line = b->lines[b->pos_y];
+  old_x = b->pos_x;
+  dx = x - old_x;
+
+  /* y is easy */
+  b->pos_y = clampi(y, 0, array_len(b->lines) - 1);
+
+  new_line = b->lines[b->pos_y];
+
+  /* use ghost pos? */
+  if (dx == 0) {
+    if (b->ghost_x == GHOST_EOL)
+      b->pos_x = array_len(new_line);
+    else
+      b->pos_x = from_visual_offset(new_line, b->ghost_x);
+  }
+  else {
+    int old_vis_x;
+
+    old_vis_x = to_visual_offset(old_line, old_x);
+
+    b->pos_x = from_visual_offset(new_line, old_vis_x) + dx;
+    b->pos_x = clampi(b->pos_x, 0, array_len(new_line));
+
+    b->ghost_x = to_visual_offset(new_line, b->pos_x);
+  }
+
+}
+
+static void move(Buffer *b, int x, int y) {
+  move_to(b, b->pos_x + x, b->pos_y + y);
 }
 
 static void status_message_set(const char *fmt, ...) {
@@ -241,19 +296,17 @@ static void term_inverse_video(int state) {
   } else {
     if (write(STDOUT_FILENO, "\x1b[m", 3) != 3) panic();
   }
-
 }
 
 static int term_get_dimensions(int *w, int *h) {
   struct winsize ws;
   int res = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
   if (res == -1 || !ws.ws_col) {
-    int r;
     /* fall back to moving the cursor to the bottom right and querying its position */
     printf("%s", "\x1b[999C\x1b[999B\x1b[6n");
     fflush(stdout);
-    r = scanf("\x1b[%d;%dR", h, w);
-    if (r != 2 || !*w || !*h) return -1;
+    res = scanf("\x1b[%d;%dR", h, w);
+    if (res != 2 || !*w || !*h) return -1;
   } else {
     *w = ws.ws_col;
     *h = ws.ws_row;
@@ -326,8 +379,9 @@ static int calc_num_chars(int i) {
 /* grabs ownership of filename */
 static int open_file(const char* filename, Buffer *buffer_out) {
   int result = -1;
-  int num_lines = 1;
-  FILE* f = 0;
+  int num_lines = 0;
+  FILE* f;
+
   f = fopen(filename, "r");
   if (!f) goto done;
 
@@ -342,19 +396,16 @@ static int open_file(const char* filename, Buffer *buffer_out) {
   {
     int row = 0;
     Buffer buffer = {0};
-    buffer.lines = 0;
     buffer.filename = filename;
-    array_resize(buffer.lines, num_lines-1);
+    array_resize(buffer.lines, num_lines);
     fseek(f, 0, SEEK_SET);
-    for (row = 0; row < array_len(buffer.lines)+1; ++row) {
+    for (row = 0; row < array_len(buffer.lines); ++row) {
       buffer.lines[row] = 0;
       while(1) {
         char c = fgetc(f);
         if (c == EOF) {
-          if (ferror(f)) {
-            status_message_set("Error when reading from %s: %s", filename, strerror(errno));
+          if (ferror(f))
             goto done;
-          }
           goto last_line;
         }
         if (c == '\r') c = fgetc(f);
@@ -363,7 +414,7 @@ static int open_file(const char* filename, Buffer *buffer_out) {
       }
     }
     last_line:;
-    assert(feof(f));
+    assert(fgetc(f) == EOF);
     result = 0;
     *buffer_out = buffer;
   }
@@ -384,32 +435,44 @@ static int open_file(const char* filename, Buffer *buffer_out) {
   return result;
 }
 
-static void render_pane(Pane *p, int x0, int x1, int y0, int y1) {
+static void render_clear(int x0, int x1, int y) {
+  memset(&G.render_buffer[y*G.term_width + x0], ' ', x1 - x0);
+}
+
+/* x,y: screen bounds for pane */
+static void render_pane(Pane *p) {
   Buffer *b;
-  int line_num;
+  int i, i_end;
+  int x0,x1,y;
+
   b = &p->buffer;
+  x0 = p->bounds.x;
+  x1 = p->bounds.x + p->bounds.w;
+  y = p->bounds.y;
 
-  x1 = mini(x1, G.term_width-1);
-
+  /* recalc gutter width */
   p->gutter_width = calc_num_chars(array_len(b->lines)) + 1;
-  for (line_num = 0; line_num < mini(y1 - y0, array_len(b->lines)); ++line_num) {
-    int num_to_write;
-    int x,y;
-    char *line;
 
-    x = x0;
-    y = y0+line_num;
-    line = b->lines[line_num];
+  /* calc where we start */
+  i = pane_calc_top_visible_row(p);
+  i_end = pane_calc_bottom_visible_row(p);
+  for (; i <= i_end; ++i, ++y) {
+    Array(char) line;
 
-    /* draw gutter */
-    render_str(x, y, "%i", line_num);
+    if (i >= array_len(b->lines))
+      render_clear(x0, x1, y);
+    else {
+      line = b->lines[i];
 
-    if (!line) continue;
-    x += p->gutter_width;
+      /* gutter */
+      render_str(x0, x0+p->gutter_width, y, "%i", i+1);
 
-    num_to_write = mini(x1 - x, line_visual_width(line));
-    if (num_to_write > 0)
-      render_strn(x, y, line, num_to_write);
+      if (!line) continue;
+
+      /* text */
+      /*render_clear(x0, x1, y);*/
+      render_strn(x0 + p->gutter_width, x1, y, line, array_len(line));
+    }
   }
 }
 
@@ -461,7 +524,7 @@ int main(int argc, const char** argv) {
 
   /* set default settings */
   G.read_timeout_ms = 1;
-  G.tab_width = 10;
+  G.tab_width = 8;
 
   /* allocate memory */
   G.render_buffer = malloc(G.term_width * G.term_height);
@@ -472,9 +535,13 @@ int main(int argc, const char** argv) {
   /* open a buffer */
   {
     const char* filename = argv[1];
-    open_file(filename, &G.main_pane.buffer);
+    err = open_file(filename, &G.main_pane.buffer);
     if (err) status_message_set("Could not open file %s: %s\n", filename, strerror(errno));
-    if (!err) status_message_set("%s", filename);
+    if (!err) status_message_set("loaded %s, %i lines", filename, array_len(G.main_pane.buffer.lines));
+    G.main_pane.bounds.x = 0;
+    G.main_pane.bounds.y = 0;
+    G.main_pane.bounds.w = G.term_width - 1;
+    G.main_pane.bounds.h = G.term_height - 2; /* leave room for menu */
   }
 
   while (1) {
@@ -483,32 +550,32 @@ int main(int argc, const char** argv) {
     memset(G.render_buffer, ' ', G.term_width * G.term_height * sizeof(char));
 
     /* draw document */
-    render_pane(&G.main_pane, 0, G.term_width - 1, 0, G.term_height - 2);
+    render_pane(&G.main_pane);
 
     /* Draw menu/status bar */
-    render_strn(0, G.term_height - 1, G.menu_buffer, mini(G.term_width, array_len(G.menu_buffer)));
+    render_strn(0, G.term_width - 1, G.term_height - 1, G.menu_buffer, mini(G.term_width, array_len(G.menu_buffer)));
 
     /* render to screen */
     {
-      int r;
+      int i;
       /* basically write the G.render_buffer to the terminal */
       term_hide_cursor();
       term_cursor_move(0, 0);
-      for (r = 0; r < G.term_height; ++r) {
-        char *row = &G.render_buffer[r*G.term_width];
-        char *oldrow = &G.render_buffer_prev[r*G.term_width];
+      for (i = 0; i < G.term_height; ++i) {
+        char *row = &G.render_buffer[i*G.term_width];
+        char *oldrow = &G.render_buffer_prev[i*G.term_width];
         int rowsize = G.term_width;
         /* check if we actually need to re-render */
         int dirty = memcmp(row, oldrow, rowsize);
-        term_cursor_move(0, r);
-        /* TODO: handle tabs ! */
-        if (dirty) {
-          if (write(STDOUT_FILENO, row, rowsize) != rowsize) panic();
-        }
+        term_cursor_move(0, i);
+
+        if (!dirty) continue;
+        if (write(STDOUT_FILENO, row, rowsize) != rowsize)
+          panic();
       }
       term_show_cursor();
 
-      term_cursor_move_p(pane_to_screen_pos(&G.main_pane, G.pos_x, G.pos_y));
+      term_cursor_move_p(pane_to_screen_pos(&G.main_pane));
       fflush(stdout);
 
       /* swap new and old buffer */
@@ -527,9 +594,9 @@ int main(int argc, const char** argv) {
       {
         unsigned char c;
         int nread;
-        while ((nread = read_timeout(&c, 1, 0)) != 1 && nread != 0) {
-          if (nread == -1 && errno != EAGAIN) goto done;
-        }
+        while ((nread = read_timeout(&c, 1, 0)) != 1 && nread != 0)
+          if (nread == -1 && errno != EAGAIN)
+            goto done;
 
         /* escape sequence? */
         if (c == '\x1b') {
@@ -581,6 +648,7 @@ int main(int argc, const char** argv) {
           goto input_done;
         }
       }
+
       input_done:;
 
       /* process input */
@@ -612,55 +680,82 @@ int main(int argc, const char** argv) {
 
         case MODE_NORMAL:
           switch (input) {
-            case KEY_UNKNOWN: break;
+            case KEY_UNKNOWN:
+              break;
 
             case KEY_ESCAPE:
             case 'q':
-              if (G.main_pane.buffer.modified) status_message_set("You have unsaved changes. If you really want to exit, use :q");
-              else goto done;
+              if (G.main_pane.buffer.modified)
+                status_message_set("You have unsaved changes. If you really want to exit, use :q");
+              else
+                goto done;
               break;
 
             case 'k':
-            case KEY_ARROW_UP: move(0, -1); break;
-            case 'j':
-            case KEY_ARROW_DOWN: move(0, 1); break;
-            case 'h':
-            case KEY_ARROW_LEFT: move(-1, 0); break;
-            case 'l':
-            case KEY_ARROW_RIGHT: move(1, 0); break;
-
-            case 'L':
-            case KEY_END: G.ghost_x = -1; break;
-            case 'H':
-            case KEY_HOME: move_to(0, G.pos_y); break;
-
-            case 'o':
-              array_insert(G.main_pane.buffer.lines, G.pos_y+1, 0);
-              G.mode = MODE_INSERT;
-              move(0, 1);
+            case KEY_ARROW_UP:
+              move(&G.main_pane.buffer, 0, -1);
               break;
 
-            case 'i': G.mode = MODE_INSERT; break;
+            case 'j':
+            case KEY_ARROW_DOWN:
+              move(&G.main_pane.buffer, 0, 1);
+              break;
 
-            case ':': status_message_set(":"); G.mode = MODE_MENU; break;
+            case 'h':
+            case KEY_ARROW_LEFT:
+              move(&G.main_pane.buffer, -1, 0);
+              break;
+
+            case 'l':
+            case KEY_ARROW_RIGHT:
+              move(&G.main_pane.buffer, 1, 0);
+              break;
+
+            case 'L':
+            case KEY_END:
+              G.main_pane.buffer.ghost_x = -1;
+              break;
+
+            case 'H':
+            case KEY_HOME:
+              move_to(&G.main_pane.buffer, 0, G.main_pane.buffer.pos_y);
+              break;
+
+            case 'o':
+              array_insert(G.main_pane.buffer.lines, G.main_pane.buffer.pos_y+1, 0);
+              G.mode = MODE_INSERT;
+              move(&G.main_pane.buffer, 0, 1);
+              break;
+
+            case 'i':
+              G.mode = MODE_INSERT;
+              break;
+
+            case ':':
+              status_message_set(":");
+              G.mode = MODE_MENU;
+              break;
           }
           break;
 
         case MODE_INSERT:
           /* TODO: should not set `modifier` if we just enter and exit insert mode */
-          G.main_pane.buffer.modified = 1;
-          if (input == KEY_ESCAPE) G.mode = MODE_NORMAL;
+          if (input == KEY_ESCAPE)
+            G.mode = MODE_NORMAL;
           else if (!key_is_special(input)) {
             Buffer *b = &G.main_pane.buffer;
-            array_insert(b->lines[G.pos_y], G.pos_x, input);
-            move(1, 0);
+
+            G.main_pane.buffer.modified = 1;
+            array_insert(b->lines[b->pos_y], G.main_pane.buffer.pos_x, input);
+            move(&G.main_pane.buffer, 1, 0);
           }
           break;
 
-        case MODE_COUNT: break;
+        case MODE_COUNT:
+          break;
       }
 
-      move(0, 0); /* update cursor in case anything happened (like changing modes) */
+      move(&G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
     }
 
   }
