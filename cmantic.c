@@ -65,9 +65,10 @@ static int clampi(int x, int a, int b) {
 }
 #define arrcount(arr) (sizeof(arr)/sizeof(*arr))
 
-typedef enum {
+typedef enum Key {
   KEY_UNKNOWN = 0,
   KEY_ESCAPE = '\x1b',
+  KEY_RETURN = '\r',
 
   KEY_SPECIAL = 1000, /* so we can do c >= KEY_SPECIAL to check for special keys */
   KEY_ARROW_UP,
@@ -75,35 +76,40 @@ typedef enum {
   KEY_ARROW_LEFT,
   KEY_ARROW_RIGHT,
   KEY_END,
-  KEY_HOME,
-  KEY_RETURN
+  KEY_HOME
 } Key;
 
-static int key_is_special(Key key) {return key >= KEY_SPECIAL;}
+static int key_is_special(Key key) {
+  return key >= KEY_SPECIAL;
+}
 
-typedef struct {
+typedef struct Pos {
   int x,y;
 } Pos;
-typedef struct {
+
+typedef struct Rect {
   int x,y,w,h;
 } Rect;
 
-typedef struct {
+typedef struct Buffer {
   Array(Array(char)) lines;
   const char* filename;
+
   int pos_x, pos_y;
-#define GHOST_EOL -1
+
+  #define GHOST_EOL -1
   int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+
   int modified;
 } Buffer;
 
-typedef struct {
+typedef struct Pane {
   int gutter_width;
   Rect bounds;
   Buffer buffer;
 } Pane;
 
-typedef enum {
+typedef enum Mode {
   MODE_NORMAL,
   MODE_INSERT,
   MODE_MENU,
@@ -504,6 +510,36 @@ static void save_buffer(Buffer *b) {
   fclose(f);
 }
 
+void render_flush() {
+  int i;
+  /* basically write the G.render_buffer to the terminal */
+  term_hide_cursor();
+  term_cursor_move(0, 0);
+  for (i = 0; i < G.term_height; ++i) {
+    char *row = &G.render_buffer[i*G.term_width];
+    char *oldrow = &G.render_buffer_prev[i*G.term_width];
+    int rowsize = G.term_width;
+    /* check if we actually need to re-render */
+    int dirty = memcmp(row, oldrow, rowsize);
+    term_cursor_move(0, i);
+
+    if (!dirty) continue;
+    if (write(STDOUT_FILENO, row, rowsize) != rowsize)
+      panic();
+  }
+  term_show_cursor();
+
+  term_cursor_move_p(pane_to_screen_pos(&G.main_pane));
+  fflush(stdout);
+
+  /* swap new and old buffer */
+  {
+    void* tmp = G.render_buffer_prev;
+    G.render_buffer_prev = G.render_buffer;
+    G.render_buffer = tmp;
+  }
+}
+
 
 int main(int argc, const char** argv) {
   int err;
@@ -556,35 +592,7 @@ int main(int argc, const char** argv) {
     render_strn(0, G.term_width - 1, G.term_height - 1, G.menu_buffer, mini(G.term_width, array_len(G.menu_buffer)));
 
     /* render to screen */
-    {
-      int i;
-      /* basically write the G.render_buffer to the terminal */
-      term_hide_cursor();
-      term_cursor_move(0, 0);
-      for (i = 0; i < G.term_height; ++i) {
-        char *row = &G.render_buffer[i*G.term_width];
-        char *oldrow = &G.render_buffer_prev[i*G.term_width];
-        int rowsize = G.term_width;
-        /* check if we actually need to re-render */
-        int dirty = memcmp(row, oldrow, rowsize);
-        term_cursor_move(0, i);
-
-        if (!dirty) continue;
-        if (write(STDOUT_FILENO, row, rowsize) != rowsize)
-          panic();
-      }
-      term_show_cursor();
-
-      term_cursor_move_p(pane_to_screen_pos(&G.main_pane));
-      fflush(stdout);
-
-      /* swap new and old buffer */
-      {
-        void* tmp = G.render_buffer_prev;
-        G.render_buffer_prev = G.render_buffer;
-        G.render_buffer = tmp;
-      }
-    }
+    render_flush();
 
     /* get and process input */
     {
@@ -654,28 +662,30 @@ int main(int argc, const char** argv) {
       /* process input */
       switch (G.mode) {
         case MODE_MENU:
-          if (input == KEY_ESCAPE) {
-            #define IS_OPTION(str) strncmp(G.menu_buffer, str, mini(strlen(str), array_len(G.menu_buffer))) == 0
+          if (input == KEY_ESCAPE || input == KEY_RETURN) {
+            #define IS_OPTION(str) strncmp(G.menu_buffer+1, str, array_len(G.menu_buffer)-1) == 0
+
+            assert(G.menu_buffer[0] == ':');
 
             /* FIXME: this might buffer overrun */
-            if (IS_OPTION(":inv")) {
+            if (IS_OPTION("inv")) {
               term_inverse_video(-1);
               status_message_set("");
             }
-            else if (IS_OPTION(":s")) {
+            else if (IS_OPTION("s")) {
               save_buffer(&G.main_pane.buffer);
               /* TODO: write out absolute path, instead of relative */
               status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer.lines), G.main_pane.buffer.filename);
             }
-            else if (IS_OPTION(":q")) {
+            else if (IS_OPTION("q"))
               goto done;
-            }
             G.mode = MODE_NORMAL;
 
             #undef IS_OPTION
           }
           else if (!key_is_special(input))
             array_push(G.menu_buffer, input);
+          /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
           break;
 
         case MODE_NORMAL:
