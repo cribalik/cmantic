@@ -521,9 +521,10 @@ void render_flush() {
     int rowsize = G.term_width;
     /* check if we actually need to re-render */
     int dirty = memcmp(row, oldrow, rowsize);
-    term_cursor_move(0, i);
 
     if (!dirty) continue;
+
+    term_cursor_move(0, i);
     if (write(STDOUT_FILENO, row, rowsize) != rowsize)
       panic();
   }
