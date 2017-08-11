@@ -92,10 +92,26 @@ typedef struct Rect {
   int x,y,w,h;
 } Rect;
 
+typedef char Token;
+typedef struct TokenInfo {
+  Token token;
+  int x;
+} TokenInfo;
+TokenInfo tokeninfo_create(Token token, int x) {
+  TokenInfo t;
+  t.token = token;
+  t.x = x;
+  return t;
+}
+
 typedef struct Buffer {
   Array(Array(char)) lines;
   const char* filename;
   int tab_type; /* 0 for tabs, 1+ for spaces */
+
+  /* parser stuff */
+  Array(Array(TokenInfo)) tokens;
+  Array(Pos) identifiers;
 
   int pos_x, pos_y;
 
@@ -255,7 +271,6 @@ static void move_to(Buffer *b, int x, int y) {
 
     b->ghost_x = to_visual_offset(new_line, b->pos_x);
   }
-
 }
 
 static void move(Buffer *b, int x, int y) {
@@ -279,6 +294,37 @@ static void status_message_set(const char *fmt, ...) {
   }
 
   array_resize(G.menu_buffer, res);
+}
+
+/****** TOKENIZER ******/
+
+static int advance_char(Buffer *b, int *x, int *y) {
+  *x += 1;
+  if (*x >= array_len(b->lines[*y])) {
+    *x = 0;
+    if (*y == array_len(b->lines)-1)
+      return 1;
+  }
+  return 0;
+}
+
+static char buffer_getchar(Buffer *b, int x, int y) {
+  return b->lines[y][x];
+}
+
+enum {
+  TOKEN_EOF = -1,
+  TOKEN_IDENTIFIER = 0
+};
+
+static void token_start(Buffer *b, int *x, int *y) {
+  (void)b, (void)x, (void)y;
+  assert(0);
+}
+
+static Token token_get(Buffer *b, int *x, int *y) {
+  (void)b, (void)x, (void)y;
+  assert(0);
 }
 
 
@@ -397,7 +443,7 @@ static int calc_num_chars(int i) {
 }
 
 /* grabs ownership of filename */
-static int open_file(const char* filename, Buffer *buffer_out) {
+static int file_open(const char* filename, Buffer *buffer_out) {
   int row, num_lines, i;
   Buffer buffer = {0};
   FILE* f;
@@ -441,9 +487,29 @@ static int open_file(const char* filename, Buffer *buffer_out) {
     buffer.lines[0] = 0;
   }
 
+  /* tokenize file */
+  {
+    int x = 0, y = 0, x_prev, y_prev;
+    Token token;
+
+    token_start(&buffer, &x, &y);
+    array_push_n(buffer.tokens, array_len(buffer.lines));
+    memset(buffer.tokens, 0, sizeof(*buffer.tokens) * array_len(buffer.tokens));
+
+    while (1) {
+      x_prev = x;
+      y_prev = y;
+
+      token = token_get(&buffer, &x, &y);
+      if (token == TOKEN_EOF)
+        break;
+
+      array_push(buffer.tokens[y_prev], tokeninfo_create(token, x_prev));
+    }
+  }
+
   /* try to figure out tab type */
   /* TODO: use tokens here instead, so we skip comments */
-
   buffer.tab_type = -1;
   for (i = 0; i < array_len(buffer.lines); ++i) {
     if (!buffer.lines[i])
@@ -473,7 +539,7 @@ static int open_file(const char* filename, Buffer *buffer_out) {
   *buffer_out = buffer;
   return 0;
 
-err:
+  err:
   for (i = 0; i < array_len(buffer.lines); ++i)
     array_free(buffer.lines[i]);
   array_free(buffer.lines);
@@ -554,7 +620,7 @@ static void save_buffer(Buffer *b) {
   fclose(f);
 }
 
-void render_flush() {
+static void render_flush() {
   int i;
   /* basically write the G.render_buffer to the terminal */
   term_hide_cursor();
@@ -585,14 +651,260 @@ void render_flush() {
   }
 }
 
-void mode_normal() {
+static void mode_normal() {
   G.mode = MODE_NORMAL;
   status_message_set("NORMAL");
 }
 
-void mode_insert() {
+static void mode_insert() {
   G.mode = MODE_INSERT;
   status_message_set("INSERT");
+}
+
+static int process_input() {
+  int input;
+
+  /* get input */
+  {
+    unsigned char c;
+    int nread;
+    while ((nread = read_timeout(&c, 1, 0)) != 1 && nread != 0)
+      if (nread == -1 && errno != EAGAIN)
+        return 1;
+
+    /* escape sequence? */
+    if (c == '\x1b') {
+      /* read '[' */
+      nread = read_timeout(&c, 1, G.read_timeout_ms);
+      if (nread == -1 && errno != EAGAIN)
+        return 1;
+      if (nread == 0 || c != '[') {
+        input = KEY_ESCAPE;
+        goto input_done;
+      }
+
+      /* read actual character */
+      nread = read_timeout(&c, 1, G.read_timeout_ms);
+      if (nread == -1 && errno != EAGAIN)
+        return 1;
+      if (nread == 0) {
+        input = KEY_UNKNOWN;
+        goto input_done;
+      }
+
+      DEBUG(fprintf(stderr, "escape %c\n", c);)
+
+      if (c >= '0' && c <= '9') {
+        switch (c) {
+          case '1': input = KEY_HOME; break;
+          case '4': input = KEY_END; break;
+        }
+
+        nread = read_timeout(&c, 1, G.read_timeout_ms);
+        if (nread == -1 && errno != EAGAIN)
+          return 1;
+        if (nread == 0 && c != '~') {
+          input = KEY_UNKNOWN;
+          goto input_done;
+        }
+      } else {
+        switch (c) {
+          case 'A': input = KEY_ARROW_UP; break;
+          case 'B': input = KEY_ARROW_DOWN; break;
+          case 'C': input = KEY_ARROW_RIGHT; break;
+          case 'D': input = KEY_ARROW_LEFT; break;
+          case 'F': input = KEY_END; break;
+          case 'H': input = KEY_HOME; break;
+          default: input = 0; break;
+        }
+      }
+    }
+    else {
+      input = c;
+      DEBUG(fprintf(stderr, "%c\n", c);)
+    }
+  }
+
+  input_done:;
+
+  /* process input */
+  switch (G.mode) {
+    case MODE_MENU:
+      if (input == KEY_RETURN) {
+        #define IS_OPTION(str) strncmp(G.menu_buffer+1, str, array_len(G.menu_buffer)-1) == 0
+
+        assert(G.menu_buffer[0] == ':');
+
+        /* FIXME: this might buffer overrun */
+        if (IS_OPTION("inv")) {
+          term_inverse_video(-1);
+          mode_normal();
+        }
+        else if (IS_OPTION("s")) {
+          save_buffer(&G.main_pane.buffer);
+          /* TODO: write out absolute path, instead of relative */
+          status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer.lines), G.main_pane.buffer.filename);
+          G.mode = MODE_NORMAL;
+        }
+        else if (IS_OPTION("q"))
+          return 1;
+
+        #undef IS_OPTION
+      }
+      else if (input == KEY_ESCAPE)
+        mode_normal();
+      else if (!key_is_special(input))
+        array_push(G.menu_buffer, input);
+      /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
+      break;
+
+    case MODE_NORMAL:
+      switch (input) {
+        case KEY_UNKNOWN:
+          break;
+
+        case KEY_ESCAPE:
+        case 'q':
+          if (G.main_pane.buffer.modified)
+            status_message_set("You have unsaved changes. If you really want to exit, use :q");
+          else
+            return 1;
+          break;
+
+        case 'k':
+        case KEY_ARROW_UP:
+          move(&G.main_pane.buffer, 0, -1);
+          break;
+
+        case 'j':
+        case KEY_ARROW_DOWN:
+          move(&G.main_pane.buffer, 0, 1);
+          break;
+
+        case 'h':
+        case KEY_ARROW_LEFT:
+          move(&G.main_pane.buffer, -1, 0);
+          break;
+
+        case 'l':
+        case KEY_ARROW_RIGHT:
+          move(&G.main_pane.buffer, 1, 0);
+          break;
+
+        case 'L':
+        case KEY_END:
+          G.main_pane.buffer.ghost_x = -1;
+          break;
+
+        case 'H':
+        case KEY_HOME:
+          move_to(&G.main_pane.buffer, 0, G.main_pane.buffer.pos_y);
+          break;
+
+        case 'o':
+          array_insert(G.main_pane.buffer.lines, G.main_pane.buffer.pos_y+1, 0);
+          mode_insert();
+          move(&G.main_pane.buffer, 0, 1);
+          break;
+
+        case 'i':
+          mode_insert();
+          break;
+
+        case ':':
+          status_message_set(":");
+          G.mode = MODE_MENU;
+          break;
+
+        case 'd':
+          G.mode = MODE_DELETE;
+          break;
+      }
+      break;
+
+    case MODE_DELETE:
+      switch (input) {
+        case KEY_ESCAPE:
+          mode_normal();
+          break;
+
+        case 'd': {
+          int y;
+          Buffer *b;
+
+          b = &G.main_pane.buffer;
+          y = G.main_pane.buffer.pos_y;
+
+          #if 1
+          if (array_len(b->lines) == 1 && b->lines[0])
+            array_len_get(b->lines[0]) = 0;
+          else {
+            if (b->lines[y])
+              array_free(b->lines[y]);
+            memmove(b->lines+y, b->lines+y+1, sizeof(*b->lines) * (array_len(b->lines)-y-1));
+            --array_len_get(b->lines);
+          }
+          #endif
+
+          mode_normal();
+        } break;
+      }
+      break;
+
+    case MODE_INSERT: {
+      Buffer *b = &G.main_pane.buffer;
+
+      /* TODO: should not set `modifier` if we just enter and exit insert mode */
+      if (input == KEY_ESCAPE)
+        mode_normal();
+      else if (!key_is_special(input)) {
+        b->modified = 1;
+        array_insert(b->lines[b->pos_y], b->pos_x, input);
+        move(b, 1, 0);
+      } else {
+        switch (input) {
+          case KEY_RETURN: {
+            int left_of_line;
+
+            left_of_line = array_len(b->lines[b->pos_y]) - b->pos_x;
+            array_insert(b->lines, b->pos_y + 1, 0);
+            array_push_n(b->lines[b->pos_y+1], left_of_line);
+            memcpy(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
+            array_len_get(b->lines[b->pos_y]) = b->pos_x;
+
+            b->pos_x = 0;
+            b->ghost_x = 0;
+            ++b->pos_y;
+          } break;
+
+          case KEY_TAB: {
+            int n = b->tab_type;
+
+            if (n == 0) {
+              array_insert(b->lines[b->pos_y], b->pos_x, '\t');
+              move(b, 1, 0);
+            }
+            else {
+              b->modified = 1;
+              /* TODO: optimize? */
+              while (n--)
+                array_insert(b->lines[b->pos_y], b->pos_x, ' ');
+              move(b, b->tab_type, 0);
+            }
+          } break;
+
+          default:
+            break;
+        }
+      }
+    } break;
+
+    case MODE_COUNT:
+      break;
+  }
+
+  move(&G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
+  return 0;
 }
 
 int main(int argc, const char** argv) {
@@ -626,7 +938,7 @@ int main(int argc, const char** argv) {
   /* open a buffer */
   {
     const char* filename = argv[1];
-    err = open_file(filename, &G.main_pane.buffer);
+    err = file_open(filename, &G.main_pane.buffer);
     if (err) {
       status_message_set("Could not open file %s: %s\n", filename, strerror(errno));
       goto done;
@@ -654,250 +966,9 @@ int main(int argc, const char** argv) {
     render_flush();
 
     /* get and process input */
-    {
-      int input;
-
-      /* get input */
-      {
-        unsigned char c;
-        int nread;
-        while ((nread = read_timeout(&c, 1, 0)) != 1 && nread != 0)
-          if (nread == -1 && errno != EAGAIN)
-            goto done;
-
-        /* escape sequence? */
-        if (c == '\x1b') {
-          /* read '[' */
-          nread = read_timeout(&c, 1, G.read_timeout_ms);
-          if (nread == -1 && errno != EAGAIN)
-            goto done;
-          if (nread == 0 || c != '[') {
-            input = KEY_ESCAPE;
-            goto input_done;
-          }
-
-          /* read actual character */
-          nread = read_timeout(&c, 1, G.read_timeout_ms);
-          if (nread == -1 && errno != EAGAIN)
-            goto done;
-          if (nread == 0) {
-            input = KEY_UNKNOWN;
-            goto input_done;
-          }
-
-          DEBUG(fprintf(stderr, "escape %c\n", c);)
-
-          if (c >= '0' && c <= '9') {
-            switch (c) {
-              case '1': input = KEY_HOME; break;
-              case '4': input = KEY_END; break;
-            }
-
-            nread = read_timeout(&c, 1, G.read_timeout_ms);
-            if (nread == -1 && errno != EAGAIN)
-              goto done;
-            if (nread == 0 && c != '~') {
-              input = KEY_UNKNOWN;
-              goto input_done;
-            }
-          } else {
-            switch (c) {
-              case 'A': input = KEY_ARROW_UP; break;
-              case 'B': input = KEY_ARROW_DOWN; break;
-              case 'C': input = KEY_ARROW_RIGHT; break;
-              case 'D': input = KEY_ARROW_LEFT; break;
-              case 'F': input = KEY_END; break;
-              case 'H': input = KEY_HOME; break;
-              default: input = 0; break;
-            }
-          }
-        }
-        else {
-          input = c;
-          DEBUG(fprintf(stderr, "%c\n", c);)
-        }
-      }
-
-      input_done:;
-
-      /* process input */
-      switch (G.mode) {
-        case MODE_MENU:
-          if (input == KEY_RETURN) {
-            #define IS_OPTION(str) strncmp(G.menu_buffer+1, str, array_len(G.menu_buffer)-1) == 0
-
-            assert(G.menu_buffer[0] == ':');
-
-            /* FIXME: this might buffer overrun */
-            if (IS_OPTION("inv")) {
-              term_inverse_video(-1);
-              mode_normal();
-            }
-            else if (IS_OPTION("s")) {
-              save_buffer(&G.main_pane.buffer);
-              /* TODO: write out absolute path, instead of relative */
-              status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer.lines), G.main_pane.buffer.filename);
-              G.mode = MODE_NORMAL;
-            }
-            else if (IS_OPTION("q"))
-              goto done;
-
-            #undef IS_OPTION
-          }
-          else if (input == KEY_ESCAPE)
-            mode_normal();
-          else if (!key_is_special(input))
-            array_push(G.menu_buffer, input);
-          /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
-          break;
-
-        case MODE_NORMAL:
-          switch (input) {
-            case KEY_UNKNOWN:
-              break;
-
-            case KEY_ESCAPE:
-            case 'q':
-              if (G.main_pane.buffer.modified)
-                status_message_set("You have unsaved changes. If you really want to exit, use :q");
-              else
-                goto done;
-              break;
-
-            case 'k':
-            case KEY_ARROW_UP:
-              move(&G.main_pane.buffer, 0, -1);
-              break;
-
-            case 'j':
-            case KEY_ARROW_DOWN:
-              move(&G.main_pane.buffer, 0, 1);
-              break;
-
-            case 'h':
-            case KEY_ARROW_LEFT:
-              move(&G.main_pane.buffer, -1, 0);
-              break;
-
-            case 'l':
-            case KEY_ARROW_RIGHT:
-              move(&G.main_pane.buffer, 1, 0);
-              break;
-
-            case 'L':
-            case KEY_END:
-              G.main_pane.buffer.ghost_x = -1;
-              break;
-
-            case 'H':
-            case KEY_HOME:
-              move_to(&G.main_pane.buffer, 0, G.main_pane.buffer.pos_y);
-              break;
-
-            case 'o':
-              array_insert(G.main_pane.buffer.lines, G.main_pane.buffer.pos_y+1, 0);
-              mode_insert();
-              move(&G.main_pane.buffer, 0, 1);
-              break;
-
-            case 'i':
-              mode_insert();
-              break;
-
-            case ':':
-              status_message_set(":");
-              G.mode = MODE_MENU;
-              break;
-
-            case 'd':
-              G.mode = MODE_DELETE;
-              break;
-          }
-          break;
-
-        case MODE_DELETE:
-          switch (input) {
-            case KEY_ESCAPE:
-              mode_normal();
-              break;
-
-            case 'd': {
-              int y;
-              Buffer *b;
-
-              b = &G.main_pane.buffer;
-              y = G.main_pane.buffer.pos_y;
-
-              #if 1
-              if (array_len(b->lines) == 1 && b->lines[0])
-                array_len_get(b->lines[0]) = 0;
-              else {
-                if (b->lines[y])
-                  array_free(b->lines[y]);
-                memmove(b->lines+y, b->lines+y+1, sizeof(*b->lines) * (array_len(b->lines)-y-1));
-                --array_len_get(b->lines);
-              }
-              #endif
-
-              mode_normal();
-            } break;
-          }
-          break;
-
-        case MODE_INSERT: {
-          Buffer *b = &G.main_pane.buffer;
-
-          /* TODO: should not set `modifier` if we just enter and exit insert mode */
-          if (input == KEY_ESCAPE)
-            mode_normal();
-          else if (!key_is_special(input)) {
-            b->modified = 1;
-            array_insert(b->lines[b->pos_y], b->pos_x, input);
-            move(b, 1, 0);
-          } else {
-            switch (input) {
-              case KEY_RETURN: {
-                int left_of_line;
-
-                left_of_line = array_len(b->lines[b->pos_y]) - b->pos_x;
-                array_insert(b->lines, b->pos_y + 1, 0);
-                array_push_n(b->lines[b->pos_y+1], left_of_line);
-                memcpy(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
-                array_len_get(b->lines[b->pos_y]) = b->pos_x;
-
-                b->pos_x = 0;
-                b->ghost_x = 0;
-                ++b->pos_y;
-              } break;
-
-              case KEY_TAB: {
-                int n = b->tab_type;
-
-                if (n == 0) {
-                  array_insert(b->lines[b->pos_y], b->pos_x, '\t');
-                  move(b, 1, 0);
-                }
-                else {
-                  b->modified = 1;
-                  /* TODO: optimize? */
-                  while (n--)
-                    array_insert(b->lines[b->pos_y], b->pos_x, ' ');
-                  move(b, b->tab_type, 0);
-                }
-              } break;
-
-              default:
-                break;
-            }
-          }
-        } break;
-
-        case MODE_COUNT:
-          break;
-      }
-
-      move(&G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
-    }
+    err = process_input();
+    if (err)
+      break;
 
   }
 
