@@ -1,7 +1,5 @@
 /* CURRENT:
  *
- * fix scrolling
- *
  * TODO:
  *
  * handle tabs
@@ -81,7 +79,7 @@ typedef enum Key {
 } Key;
 
 static int key_is_special(Key key) {
-  return key == KEY_ESCAPE || key == KEY_RETURN || key >= KEY_SPECIAL || key == KEY_TAB;
+  return key == KEY_ESCAPE || key == KEY_RETURN || key == KEY_TAB || key >= KEY_SPECIAL;
 }
 
 typedef struct Pos {
@@ -91,6 +89,15 @@ typedef struct Pos {
 typedef struct Rect {
   int x,y,w,h;
 } Rect;
+
+Rect rect_create(int x, int y, int w, int h) {
+  Rect result;
+  result.x = x;
+  result.y = y;
+  result.w = w;
+  result.h = h;
+  return result;
+}
 
 typedef char Token;
 typedef struct TokenInfo {
@@ -111,7 +118,6 @@ typedef struct Buffer {
 
   /* parser stuff */
   Array(Array(TokenInfo)) tokens;
-  Array(Pos) identifiers;
 
   int pos_x, pos_y;
 
@@ -121,10 +127,90 @@ typedef struct Buffer {
   int modified;
 } Buffer;
 
+static void buffer_empty(Buffer *b) {
+  int i;
+
+  for (i = 0; i < array_len(b->lines); ++i)
+    array_free(b->lines[i]);
+
+  array_resize(b->lines, 1);
+}
+
+static void buffer_truncate_to_n_lines(Buffer *b, int n) {
+  int i;
+
+  if (n >= array_len(b->lines))
+    return;
+
+  for (i = n; i < array_len(b->lines); ++i)
+    array_free(b->lines[i]);
+  array_resize(b->lines, n);
+}
+
+static int buffer_advance(Buffer *b, int *x, int *y) {
+  ++(*x);
+  if (*x >= array_len(b->lines[*y])) {
+    *x = 0;
+    ++(*y);
+    while (*y < array_len(b->lines) && !b->lines[*y])
+      ++(*y);
+    if (*y >= array_len(b->lines))
+      return 1;
+  }
+  return 0;
+}
+
+static char buffer_getchar(Buffer *b, int x, int y) {
+  return b->lines[y][x];
+}
+
+static void move(Buffer *b, int x, int y);
+static void buffer_insert_char(Buffer *b, char ch) {
+  b->modified = 1;
+  array_insert(b->lines[b->pos_y], b->pos_x, ch);
+  move(b, 1, 0);
+}
+
+static void buffer_insert_tab(Buffer *b) {
+  int n = b->tab_type;
+
+  b->modified = 1;
+  if (n == 0) {
+    array_insert(b->lines[b->pos_y], b->pos_x, '\t');
+    move(b, 1, 0);
+  }
+  else {
+    /* TODO: optimize? */
+    while (n--)
+      array_insert(b->lines[b->pos_y], b->pos_x, ' ');
+    move(b, b->tab_type, 0);
+  }
+}
+
+static void buffer_insert_newline(Buffer *b) {
+  int left_of_line;
+
+  left_of_line = array_len(b->lines[b->pos_y]) - b->pos_x;
+  array_insert(b->lines, b->pos_y + 1, 0);
+  array_push_n(b->lines[b->pos_y+1], left_of_line);
+  memcpy(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
+  array_len_get(b->lines[b->pos_y]) = b->pos_x;
+
+  b->pos_x = 0;
+  b->ghost_x = 0;
+  ++b->pos_y;
+}
+
+static void buffer_insert_newline_below(Buffer *b) {
+  b->modified = 1;
+  array_insert(b->lines, b->pos_y+1, 0);
+  move(b, 0, 1);
+}
+
 typedef struct Pane {
   int gutter_width;
   Rect bounds;
-  Buffer buffer;
+  Buffer *buffer;
 } Pane;
 
 typedef enum Mode {
@@ -132,6 +218,8 @@ typedef enum Mode {
   MODE_INSERT,
   MODE_MENU,
   MODE_DELETE,
+  MODE_GOTO,
+  MODE_SEARCH,
   MODE_COUNT
 } Mode;
 
@@ -141,9 +229,12 @@ static struct State {
   int term_width, term_height;
 
   /* some editor state */
-  Pane main_pane;
+  Pane main_pane,
+       bottom_pane;
+  Buffer menu_buffer,
+         search_buffer,
+         message_buffer;
   Mode mode;
-  Array(char) menu_buffer;
 
   /* some settings */
   struct termios orig_termios;
@@ -154,6 +245,9 @@ static struct State {
 
 static void render_strn(int x0, int x1, int y, const char* str, int n) {
   char *out = &G.render_buffer[G.term_width*y];
+
+  if (!str)
+    return;
 
   while (n-- && x0 < x1) {
     if (*str == '\t') {
@@ -214,25 +308,25 @@ static int from_visual_offset(Array(char) line, int x) {
 }
 
 static int pane_calc_top_visible_row(Pane *pane) {
-  return maxi(0, pane->buffer.pos_y - pane->bounds.h/2);
+  return maxi(0, pane->buffer->pos_y - pane->bounds.h/2);
 }
 
 static int pane_calc_bottom_visible_row(Pane *pane) {
-  return mini(pane_calc_top_visible_row(pane) + pane->bounds.h, array_len(pane->buffer.lines)) - 1;
+  return mini(pane_calc_top_visible_row(pane) + pane->bounds.h, array_len(pane->buffer->lines)) - 1;
 }
 
 static int pane_calc_left_visible_column(Pane *pane) {
-  return maxi(0, to_visual_offset(pane->buffer.lines[pane->buffer.pos_y], pane->buffer.pos_x) - (pane->bounds.w - pane->gutter_width - 3));
+  return maxi(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos_y], pane->buffer->pos_x) - (pane->bounds.w - pane->gutter_width - 3));
 }
 
 static Pos pane_to_screen_pos(Pane *pane) {
   Pos result = {0};
   Array(char) line;
 
-  line = pane->buffer.lines[pane->buffer.pos_y];
-  result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, pane->buffer.pos_x) - pane_calc_left_visible_column(pane);
+  line = pane->buffer->lines[pane->buffer->pos_y];
+  result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, pane->buffer->pos_x) - pane_calc_left_visible_column(pane);
   /* try to center */
-  result.y = pane->bounds.y + pane->buffer.pos_y - pane_calc_top_visible_row(pane);
+  result.y = pane->bounds.y + pane->buffer->pos_y - pane_calc_top_visible_row(pane);
   return result;
 }
 
@@ -278,53 +372,80 @@ static void move(Buffer *b, int x, int y) {
 }
 
 static void status_message_set(const char *fmt, ...) {
-  int res;
+  int n;
   va_list args;
 
+  buffer_truncate_to_n_lines(&G.message_buffer, 1);
+  array_resize(G.message_buffer.lines[0], G.term_width-1);
+
   va_start(args, fmt);
-  res = vsnprintf(G.menu_buffer, array_len(G.menu_buffer), fmt, args);
+  n = vsnprintf(G.message_buffer.lines[0], array_len(G.message_buffer.lines[0]), fmt, args);
   va_end(args);
 
-
-  if (res >= array_len(G.menu_buffer)) {
-    array_resize(G.menu_buffer, res+1);
-    va_start(args, fmt);
-    res = vsnprintf(G.menu_buffer, array_len(G.menu_buffer), fmt, args);
-    va_end(args);
-  }
-
-  array_resize(G.menu_buffer, res);
+  n = mini(n, array_len(G.message_buffer.lines[0]));
+  array_resize(G.message_buffer.lines[0], n);
 }
 
-/****** TOKENIZER ******/
-
-static int advance_char(Buffer *b, int *x, int *y) {
-  *x += 1;
-  if (*x >= array_len(b->lines[*y])) {
-    *x = 0;
-    if (*y == array_len(b->lines)-1)
-      return 1;
-  }
-  return 0;
-}
-
-static char buffer_getchar(Buffer *b, int x, int y) {
-  return b->lines[y][x];
-}
+/****** @TOKENIZER ******/
 
 enum {
   TOKEN_EOF = -1,
-  TOKEN_IDENTIFIER = 0
+  TOKEN_IDENTIFIER = -2,
+  TOKEN_NUMBER = -3
 };
 
-static void token_start(Buffer *b, int *x, int *y) {
-  (void)b, (void)x, (void)y;
-  assert(0);
+static void tokenizer_push_token(Array(Array(TokenInfo)) *tokens, int x, int y, Token token) {
+  if (array_len(*tokens) < y)
+    array_resize(*tokens, y+1);
+  array_push((*tokens)[y], tokeninfo_create(token, x));
 }
 
-static Token token_get(Buffer *b, int *x, int *y) {
-  (void)b, (void)x, (void)y;
-  assert(0);
+static void tokenize(Buffer *b) {
+  int x = 0, y = 0, i;
+
+  /* reset old tokens */
+  for (i = 0; i < array_len(b->tokens); ++i)
+    array_free(b->tokens[i]);
+  array_resize(b->tokens, array_len(b->lines));
+  for (i = 0; i < array_len(b->tokens); ++i)
+    b->tokens[i] = 0;
+
+  for (;;) {
+    /* whitespace */
+    while (isspace(buffer_getchar(b, x, y)))
+      if (buffer_advance(b, &x, &y))
+        return;
+
+    /* TODO: how do we handle comments ? */
+
+    /* identifier */
+    if (isalpha(buffer_getchar(b, x, y))) {
+      /* TODO: predefined keywords */
+      tokenizer_push_token(&b->tokens, x, y, TOKEN_IDENTIFIER);
+      while (isalnum(buffer_getchar(b, x, y)))
+        if (buffer_advance(b, &x, &y))
+          return;
+    }
+
+    /* number */
+    else if (isdigit(buffer_getchar(b, x, y))) {
+      tokenizer_push_token(&b->tokens, x, y, TOKEN_NUMBER);
+      while (isdigit(buffer_getchar(b, x, y)))
+        if (buffer_advance(b, &x, &y))
+          return;
+      if (buffer_getchar(b, x, y) == '.')
+        while (isdigit(buffer_getchar(b, x, y)))
+          if (buffer_advance(b, &x, &y))
+            return;
+    }
+
+    /* single char token */
+    else {
+      tokenizer_push_token(&b->tokens, x, y, buffer_getchar(b, x, y));
+      if (buffer_advance(b, &x, &y))
+        return;
+    }
+  }
 }
 
 
@@ -336,6 +457,10 @@ static void term_clear_screen() {
 
 static void term_hide_cursor() {
   if (write(STDOUT_FILENO, "\x1b[?25l", 6) != 6) panic();
+}
+
+static void term_clear_line() {
+  if (write(STDOUT_FILENO, "\x1b[2K", 4) != 4) panic();
 }
 
 static void term_show_cursor() {
@@ -487,26 +612,7 @@ static int file_open(const char* filename, Buffer *buffer_out) {
     buffer.lines[0] = 0;
   }
 
-  /* tokenize file */
-  {
-    int x = 0, y = 0, x_prev, y_prev;
-    Token token;
-
-    token_start(&buffer, &x, &y);
-    array_push_n(buffer.tokens, array_len(buffer.lines));
-    memset(buffer.tokens, 0, sizeof(*buffer.tokens) * array_len(buffer.tokens));
-
-    while (1) {
-      x_prev = x;
-      y_prev = y;
-
-      token = token_get(&buffer, &x, &y);
-      if (token == TOKEN_EOF)
-        break;
-
-      array_push(buffer.tokens[y_prev], tokeninfo_create(token, x_prev));
-    }
-  }
+  tokenize(&buffer);
 
   /* try to figure out tab type */
   /* TODO: use tokens here instead, so we skip comments */
@@ -552,19 +658,22 @@ static void render_clear(int x0, int x1, int y) {
 }
 
 /* x,y: screen bounds for pane */
-static void render_pane(Pane *p) {
+static void render_pane(Pane *p, int draw_gutter) {
   Buffer *b;
   int i, i_end;
   int x0,x1,y;
   int line_offset_x;
 
-  b = &p->buffer;
+  b = p->buffer;
   x0 = p->bounds.x;
   x1 = p->bounds.x + p->bounds.w;
   y = p->bounds.y;
 
   /* recalc gutter width */
-  p->gutter_width = calc_num_chars(array_len(b->lines)) + 1;
+  if (draw_gutter)
+    p->gutter_width = calc_num_chars(array_len(b->lines)) + 1;
+  else
+    p->gutter_width = 0;
 
   line_offset_x = pane_calc_left_visible_column(p);
 
@@ -635,6 +744,7 @@ static void render_flush() {
     if (!dirty) continue;
 
     term_cursor_move(0, i);
+    term_clear_line();
     if (write(STDOUT_FILENO, row, rowsize) != rowsize)
       panic();
   }
@@ -659,6 +769,13 @@ static void mode_normal() {
 static void mode_insert() {
   G.mode = MODE_INSERT;
   status_message_set("INSERT");
+}
+
+static void mode_menu() {
+  G.mode = MODE_MENU;
+
+  buffer_truncate_to_n_lines(&G.menu_buffer, 1);
+  array_resize(G.menu_buffer.lines[0], 0);
 }
 
 static int process_input() {
@@ -730,31 +847,36 @@ static int process_input() {
   /* process input */
   switch (G.mode) {
     case MODE_MENU:
-      if (input == KEY_RETURN) {
-        #define IS_OPTION(str) strncmp(G.menu_buffer+1, str, array_len(G.menu_buffer)-1) == 0
+      if (input == KEY_RETURN && array_len(G.menu_buffer.lines[0]) > 0) {
+        Array(char) line;
 
-        assert(G.menu_buffer[0] == ':');
+        line = G.menu_buffer.lines[0];
+        #define IS_OPTION(str) (array_len(line) == strlen(str) && strncmp(line, str, array_len(line)) == 0)
 
         /* FIXME: this might buffer overrun */
         if (IS_OPTION("inv")) {
           term_inverse_video(-1);
           mode_normal();
         }
-        else if (IS_OPTION("s")) {
-          save_buffer(&G.main_pane.buffer);
+        else if (IS_OPTION("save")) {
+          save_buffer(G.main_pane.buffer);
           /* TODO: write out absolute path, instead of relative */
-          status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer.lines), G.main_pane.buffer.filename);
+          status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer->lines), G.main_pane.buffer->filename);
           G.mode = MODE_NORMAL;
         }
-        else if (IS_OPTION("q"))
+        else if (IS_OPTION("quit") || IS_OPTION("exit"))
           return 1;
+        else {
+          status_message_set("Unknown option %i '%.*s'", array_len(G.menu_buffer.lines[0]), array_len(G.menu_buffer.lines[0]), G.menu_buffer.lines[0]);
+          G.mode = MODE_NORMAL;
+        }
 
         #undef IS_OPTION
       }
       else if (input == KEY_ESCAPE)
         mode_normal();
       else if (!key_is_special(input))
-        array_push(G.menu_buffer, input);
+        array_push(G.menu_buffer.lines[0], input);
       /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
       break;
 
@@ -765,7 +887,7 @@ static int process_input() {
 
         case KEY_ESCAPE:
         case 'q':
-          if (G.main_pane.buffer.modified)
+          if (G.main_pane.buffer->modified)
             status_message_set("You have unsaved changes. If you really want to exit, use :q");
           else
             return 1;
@@ -773,38 +895,41 @@ static int process_input() {
 
         case 'k':
         case KEY_ARROW_UP:
-          move(&G.main_pane.buffer, 0, -1);
+          move(G.main_pane.buffer, 0, -1);
           break;
 
         case 'j':
         case KEY_ARROW_DOWN:
-          move(&G.main_pane.buffer, 0, 1);
+          move(G.main_pane.buffer, 0, 1);
           break;
 
         case 'h':
         case KEY_ARROW_LEFT:
-          move(&G.main_pane.buffer, -1, 0);
+          move(G.main_pane.buffer, -1, 0);
           break;
 
         case 'l':
         case KEY_ARROW_RIGHT:
-          move(&G.main_pane.buffer, 1, 0);
+          move(G.main_pane.buffer, 1, 0);
           break;
 
         case 'L':
         case KEY_END:
-          G.main_pane.buffer.ghost_x = -1;
+          G.main_pane.buffer->ghost_x = -1;
           break;
 
         case 'H':
         case KEY_HOME:
-          move_to(&G.main_pane.buffer, 0, G.main_pane.buffer.pos_y);
+          move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos_y);
+          break;
+
+        case 'g':
+          G.mode = MODE_GOTO;
           break;
 
         case 'o':
-          array_insert(G.main_pane.buffer.lines, G.main_pane.buffer.pos_y+1, 0);
+          buffer_insert_newline_below(G.main_pane.buffer);
           mode_insert();
-          move(&G.main_pane.buffer, 0, 1);
           break;
 
         case 'i':
@@ -812,8 +937,7 @@ static int process_input() {
           break;
 
         case ':':
-          status_message_set(":");
-          G.mode = MODE_MENU;
+          mode_menu();
           break;
 
         case 'd':
@@ -822,6 +946,25 @@ static int process_input() {
       }
       break;
 
+    case MODE_GOTO:
+      switch (input) {
+        case 't':
+          move_to(G.main_pane.buffer, 0, 0);
+          break;
+        case 'b':
+          move_to(G.main_pane.buffer, 0, array_len(G.main_pane.buffer->lines)-1);
+          break;
+      }
+      G.mode = MODE_NORMAL;
+      break;
+
+    case MODE_SEARCH:
+      if (key_is_special(input)) {
+        G.mode = MODE_NORMAL;
+        break;
+      }
+      buffer_insert_char(G.bottom_pane.buffer, input);
+      break;
     case MODE_DELETE:
       switch (input) {
         case KEY_ESCAPE:
@@ -832,8 +975,8 @@ static int process_input() {
           int y;
           Buffer *b;
 
-          b = &G.main_pane.buffer;
-          y = G.main_pane.buffer.pos_y;
+          b = G.main_pane.buffer;
+          y = G.main_pane.buffer->pos_y;
 
           #if 1
           if (array_len(b->lines) == 1 && b->lines[0])
@@ -852,45 +995,21 @@ static int process_input() {
       break;
 
     case MODE_INSERT: {
-      Buffer *b = &G.main_pane.buffer;
+      Buffer *b = G.main_pane.buffer;
 
       /* TODO: should not set `modifier` if we just enter and exit insert mode */
       if (input == KEY_ESCAPE)
         mode_normal();
       else if (!key_is_special(input)) {
-        b->modified = 1;
-        array_insert(b->lines[b->pos_y], b->pos_x, input);
-        move(b, 1, 0);
+        buffer_insert_char(b, input);
       } else {
         switch (input) {
-          case KEY_RETURN: {
-            int left_of_line;
-
-            left_of_line = array_len(b->lines[b->pos_y]) - b->pos_x;
-            array_insert(b->lines, b->pos_y + 1, 0);
-            array_push_n(b->lines[b->pos_y+1], left_of_line);
-            memcpy(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
-            array_len_get(b->lines[b->pos_y]) = b->pos_x;
-
-            b->pos_x = 0;
-            b->ghost_x = 0;
-            ++b->pos_y;
-          } break;
+          case KEY_RETURN:
+            buffer_insert_newline(b);
+            break;
 
           case KEY_TAB: {
-            int n = b->tab_type;
-
-            if (n == 0) {
-              array_insert(b->lines[b->pos_y], b->pos_x, '\t');
-              move(b, 1, 0);
-            }
-            else {
-              b->modified = 1;
-              /* TODO: optimize? */
-              while (n--)
-                array_insert(b->lines[b->pos_y], b->pos_x, ' ');
-              move(b, b->tab_type, 0);
-            }
+            buffer_insert_tab(b);
           } break;
 
           default:
@@ -903,21 +1022,12 @@ static int process_input() {
       break;
   }
 
-  move(&G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
+  move(G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
   return 0;
 }
 
-int main(int argc, const char** argv) {
+void state_init() {
   int err;
-  (void) argc, (void)argv;
-
-  if (argc < 2) {
-    fprintf(stderr, "Usage: cedit <file>\n");
-    return 1;
-  }
-
-  /* set up terminal */
-  term_enable_raw_mode();
 
   /* read terminal dimensions */
   err = term_get_dimensions(&G.term_width, &G.term_height);
@@ -935,16 +1045,37 @@ int main(int argc, const char** argv) {
   memset(G.render_buffer, ' ', sizeof(char) * G.term_width * G.term_height);
   G.row_buffer = malloc(sizeof(char) * G.term_width);
 
+  buffer_empty(&G.menu_buffer);
+  buffer_empty(&G.search_buffer);
+  buffer_empty(&G.message_buffer);
+  G.bottom_pane.bounds = rect_create(0, G.term_height-1, G.term_width-1, 1);
+}
+
+int main(int argc, const char** argv) {
+  int err;
+  (void) argc, (void)argv;
+
+  if (argc < 2) {
+    fprintf(stderr, "Usage: cedit <file>\n");
+    return 1;
+  }
+
+  /* set up terminal */
+  term_enable_raw_mode();
+
+  state_init();
+
   /* open a buffer */
   {
     const char* filename = argv[1];
-    err = file_open(filename, &G.main_pane.buffer);
+    G.main_pane.buffer = malloc(sizeof(*G.main_pane.buffer));
+    err = file_open(filename, G.main_pane.buffer);
     if (err) {
       status_message_set("Could not open file %s: %s\n", filename, strerror(errno));
       goto done;
     }
     if (!err)
-      status_message_set("loaded %s, %i lines", filename, array_len(G.main_pane.buffer.lines));
+      status_message_set("loaded %s, %i lines", filename, array_len(G.main_pane.buffer->lines));
     G.main_pane.bounds.x = 0;
     G.main_pane.bounds.y = 0;
     G.main_pane.bounds.w = G.term_width - 1;
@@ -957,10 +1088,11 @@ int main(int argc, const char** argv) {
     memset(G.render_buffer, ' ', G.term_width * G.term_height * sizeof(char));
 
     /* draw document */
-    render_pane(&G.main_pane);
+    render_pane(&G.main_pane, 1);
 
     /* Draw menu/status bar */
-    render_strn(0, G.term_width - 1, G.term_height - 1, G.menu_buffer, mini(G.term_width, array_len(G.menu_buffer)));
+    G.bottom_pane.buffer = G.mode == MODE_MENU ? &G.menu_buffer : &G.message_buffer;
+    render_pane(&G.bottom_pane, 0);
 
     /* render to screen */
     render_flush();
