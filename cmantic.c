@@ -369,7 +369,7 @@ static Pos pane_to_screen_pos(Pane *pane) {
   return result;
 }
 
-static void move_to(Buffer *b, int x, int y) {
+static void buffer_move_to(Buffer *b, int x, int y) {
   Array(char) old_line;
   Array(char) new_line;
   int old_x, dx;
@@ -407,7 +407,7 @@ static void move_to(Buffer *b, int x, int y) {
 }
 
 static void buffer_move(Buffer *b, int x, int y) {
-  move_to(b, b->pos_x + x, b->pos_y + y);
+  buffer_move_to(b, b->pos_x + x, b->pos_y + y);
 }
 
 static void status_message_set(const char *fmt, ...) {
@@ -959,7 +959,7 @@ static int process_input() {
 
         case 'H':
         case KEY_HOME:
-          move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos_y);
+          buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos_y);
           break;
 
         case 'g':
@@ -988,10 +988,10 @@ static int process_input() {
     case MODE_GOTO:
       switch (input) {
         case 't':
-          move_to(G.main_pane.buffer, 0, 0);
+          buffer_move_to(G.main_pane.buffer, 0, 0);
           break;
         case 'b':
-          move_to(G.main_pane.buffer, 0, array_len(G.main_pane.buffer->lines)-1);
+          buffer_move_to(G.main_pane.buffer, 0, array_len(G.main_pane.buffer->lines)-1);
           break;
       }
       G.mode = MODE_NORMAL;
