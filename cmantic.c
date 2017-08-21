@@ -2,7 +2,7 @@
  *
  * TODO:
  *
- * handle tabs
+ * Formalize key binding sets (for example, menu, searching, and regular buffers)
  * fuzzy search actions
  *
  * load files
@@ -68,6 +68,7 @@ typedef enum Key {
   KEY_ESCAPE = '\x1b',
   KEY_RETURN = '\r',
   KEY_TAB = '\t',
+  KEY_BACKSPACE = 127,
 
   KEY_SPECIAL = 1000, /* so we can do c >= KEY_SPECIAL to check for special keys */
   KEY_ARROW_UP,
@@ -79,7 +80,7 @@ typedef enum Key {
 } Key;
 
 static int key_is_special(Key key) {
-  return key == KEY_ESCAPE || key == KEY_RETURN || key == KEY_TAB || key >= KEY_SPECIAL;
+  return key == KEY_ESCAPE || key == KEY_RETURN || key == KEY_TAB || key == KEY_BACKSPACE || key >= KEY_SPECIAL;
 }
 
 typedef struct Pos {
@@ -127,6 +128,14 @@ typedef struct Buffer {
   int modified;
 } Buffer;
 
+static void buffer_goto_endline(Buffer *b) {
+  b->ghost_x = -1;
+}
+
+static void buffer_goto_x(Buffer *b, int x) {
+  b->ghost_x = x;
+}
+
 static void buffer_empty(Buffer *b) {
   int i;
 
@@ -147,7 +156,7 @@ static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   array_resize(b->lines, n);
 }
 
-static int buffer_advance(Buffer *b, int *x, int *y) {
+static int buffer_advance_xy(Buffer *b, int *x, int *y) {
   ++(*x);
   if (*x >= array_len(b->lines[*y])) {
     *x = 0;
@@ -164,11 +173,41 @@ static char buffer_getchar(Buffer *b, int x, int y) {
   return b->lines[y][x];
 }
 
-static void move(Buffer *b, int x, int y);
+static void buffer_move(Buffer *b, int x, int y);
 static void buffer_insert_char(Buffer *b, char ch) {
   b->modified = 1;
   array_insert(b->lines[b->pos_y], b->pos_x, ch);
-  move(b, 1, 0);
+  buffer_move(b, 1, 0);
+}
+
+static void buffer_delete_line_at(Buffer *b, int y) {
+  array_free(b->lines[y]);
+  if (array_len(b->lines) == 1)
+    return;
+  array_remove_slow(b->lines, y);
+}
+
+static void buffer_delete_line(Buffer *b) {
+  buffer_delete_line_at(b, b->pos_y);
+}
+
+static void buffer_delete_char(Buffer *b) {
+  if (b->pos_x == 0) {
+    int i;
+
+    if (b->pos_y == 0)
+      return;
+
+    buffer_move(b, 0, -1);
+    buffer_goto_x(b, array_len(b->lines[b->pos_y]));
+    for (i = 0; i < array_len(b->lines[b->pos_y+1]); ++i)
+      array_push(b->lines[b->pos_y], b->lines[b->pos_y+1][i]);
+    buffer_delete_line_at(b, b->pos_y+1);
+  }
+  else {
+    buffer_move(b, -1, 0);
+    array_remove_slow(b->lines[b->pos_y], b->pos_x);
+  }
 }
 
 static void buffer_insert_tab(Buffer *b) {
@@ -177,13 +216,13 @@ static void buffer_insert_tab(Buffer *b) {
   b->modified = 1;
   if (n == 0) {
     array_insert(b->lines[b->pos_y], b->pos_x, '\t');
-    move(b, 1, 0);
+    buffer_move(b, 1, 0);
   }
   else {
     /* TODO: optimize? */
     while (n--)
       array_insert(b->lines[b->pos_y], b->pos_x, ' ');
-    move(b, b->tab_type, 0);
+    buffer_move(b, b->tab_type, 0);
   }
 }
 
@@ -204,7 +243,7 @@ static void buffer_insert_newline(Buffer *b) {
 static void buffer_insert_newline_below(Buffer *b) {
   b->modified = 1;
   array_insert(b->lines, b->pos_y+1, 0);
-  move(b, 0, 1);
+  buffer_move(b, 0, 1);
 }
 
 typedef struct Pane {
@@ -354,7 +393,7 @@ static void move_to(Buffer *b, int x, int y) {
   else {
     int old_vis_x;
 
-    /* move visually down/up */
+    /* buffer_move visually down/up */
     /* TODO: only need to do this if dy != 0 */
     old_vis_x = to_visual_offset(old_line, old_x);
     b->pos_x = from_visual_offset(new_line, old_vis_x);
@@ -367,7 +406,7 @@ static void move_to(Buffer *b, int x, int y) {
   }
 }
 
-static void move(Buffer *b, int x, int y) {
+static void buffer_move(Buffer *b, int x, int y) {
   move_to(b, b->pos_x + x, b->pos_y + y);
 }
 
@@ -413,7 +452,7 @@ static void tokenize(Buffer *b) {
   for (;;) {
     /* whitespace */
     while (isspace(buffer_getchar(b, x, y)))
-      if (buffer_advance(b, &x, &y))
+      if (buffer_advance_xy(b, &x, &y))
         return;
 
     /* TODO: how do we handle comments ? */
@@ -423,7 +462,7 @@ static void tokenize(Buffer *b) {
       /* TODO: predefined keywords */
       tokenizer_push_token(&b->tokens, x, y, TOKEN_IDENTIFIER);
       while (isalnum(buffer_getchar(b, x, y)))
-        if (buffer_advance(b, &x, &y))
+        if (buffer_advance_xy(b, &x, &y))
           return;
     }
 
@@ -431,18 +470,18 @@ static void tokenize(Buffer *b) {
     else if (isdigit(buffer_getchar(b, x, y))) {
       tokenizer_push_token(&b->tokens, x, y, TOKEN_NUMBER);
       while (isdigit(buffer_getchar(b, x, y)))
-        if (buffer_advance(b, &x, &y))
+        if (buffer_advance_xy(b, &x, &y))
           return;
       if (buffer_getchar(b, x, y) == '.')
         while (isdigit(buffer_getchar(b, x, y)))
-          if (buffer_advance(b, &x, &y))
+          if (buffer_advance_xy(b, &x, &y))
             return;
     }
 
     /* single char token */
     else {
       tokenizer_push_token(&b->tokens, x, y, buffer_getchar(b, x, y));
-      if (buffer_advance(b, &x, &y))
+      if (buffer_advance_xy(b, &x, &y))
         return;
     }
   }
@@ -888,34 +927,34 @@ static int process_input() {
         case KEY_ESCAPE:
         case 'q':
           if (G.main_pane.buffer->modified)
-            status_message_set("You have unsaved changes. If you really want to exit, use :q");
+            status_message_set("You have unsaved changes. If you really want to exit, use :quit");
           else
             return 1;
           break;
 
         case 'k':
         case KEY_ARROW_UP:
-          move(G.main_pane.buffer, 0, -1);
+          buffer_move(G.main_pane.buffer, 0, -1);
           break;
 
         case 'j':
         case KEY_ARROW_DOWN:
-          move(G.main_pane.buffer, 0, 1);
+          buffer_move(G.main_pane.buffer, 0, 1);
           break;
 
         case 'h':
         case KEY_ARROW_LEFT:
-          move(G.main_pane.buffer, -1, 0);
+          buffer_move(G.main_pane.buffer, -1, 0);
           break;
 
         case 'l':
         case KEY_ARROW_RIGHT:
-          move(G.main_pane.buffer, 1, 0);
+          buffer_move(G.main_pane.buffer, 1, 0);
           break;
 
         case 'L':
         case KEY_END:
-          G.main_pane.buffer->ghost_x = -1;
+          buffer_goto_endline(G.main_pane.buffer);
           break;
 
         case 'H':
@@ -971,26 +1010,10 @@ static int process_input() {
           mode_normal();
           break;
 
-        case 'd': {
-          int y;
-          Buffer *b;
-
-          b = G.main_pane.buffer;
-          y = G.main_pane.buffer->pos_y;
-
-          #if 1
-          if (array_len(b->lines) == 1 && b->lines[0])
-            array_len_get(b->lines[0]) = 0;
-          else {
-            if (b->lines[y])
-              array_free(b->lines[y]);
-            memmove(b->lines+y, b->lines+y+1, sizeof(*b->lines) * (array_len(b->lines)-y-1));
-            --array_len_get(b->lines);
-          }
-          #endif
-
+        case 'd':
+          buffer_delete_line(G.main_pane.buffer);
           mode_normal();
-        } break;
+          break;
       }
       break;
 
@@ -1008,9 +1031,13 @@ static int process_input() {
             buffer_insert_newline(b);
             break;
 
-          case KEY_TAB: {
+          case KEY_TAB:
             buffer_insert_tab(b);
-          } break;
+            break;
+
+          case KEY_BACKSPACE:
+            buffer_delete_char(b);
+            break;
 
           default:
             break;
@@ -1022,7 +1049,7 @@ static int process_input() {
       break;
   }
 
-  move(G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
+  buffer_move(G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
   return 0;
 }
 

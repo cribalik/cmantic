@@ -49,6 +49,10 @@
 #define array_free(a) (((a) ? ARRAY_FREE(&array__n(a)),0 : 0), (a) = 0)
 #define array_cap(a) ((a) ? array__c(a) : 0)
 #define array_resize(a, n) ((n) > array_len(a) ? array_push_n(a, (n) - array_len(a)) : ((a) ? (array__n(a) = (n)) : 0))
+/* Preserves ordering */
+#define array_remove_slow(a, i) ((a) && array__n(a) > 0 ? memmove((a)+(i), (a)+(i)+1, sizeof(*(a)) * (array__n(a)-i-1)), --array__n(a) : 0)
+/* Swaps in the last element */
+#define array_remove_fast(a, i) ((a) && array__n(a) > 0 ? (a)[i] = (a)[array__n(a)--],0 : 0)
 
 /* Internals */
 #define array__c(a) ((int*)(a))[-1]
