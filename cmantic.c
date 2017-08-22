@@ -269,7 +269,7 @@ typedef struct Pane {
   int gutter_width;
   Rect bounds;
   Buffer *buffer;
-  Color background_color;
+  Color background_color, font_color;
 } Pane;
 
 typedef enum Mode {
@@ -800,6 +800,7 @@ static void render_pane(Pane *p, int draw_gutter) {
   line_offset_x = pane_calc_left_visible_column(p);
 
   render_set_background_color(p->background_color, x0, y);
+  render_set_font_color(p->font_color, x0, y);
 
   /* calc where we start */
   i = pane_calc_top_visible_row(p);
@@ -819,7 +820,6 @@ static void render_pane(Pane *p, int draw_gutter) {
         continue;
 
       /* text */
-      /*render_clear(x0, x1, y);*/
       render_strn(x0 + p->gutter_width, x1, y, line + line_offset_x, array_len(line) - line_offset_x);
     }
   }
@@ -856,7 +856,8 @@ static void save_buffer(Buffer *b) {
 static void render_flush() {
   int i;
   Array(char) *tmp_render_buffer = &G.renderer.tmp_render_buffer;
-  RenderColorEntry *bcolor, *bcolor_end;
+  RenderColorEntry *bcolor, *bcolor_end,
+                   *fcolor, *fcolor_end;
 
   array_resize(*tmp_render_buffer, 0);
 
@@ -875,23 +876,30 @@ static void render_flush() {
         render_color_entry_cmp);
   bcolor = G.renderer.background_colors;
   bcolor_end = bcolor + array_len(G.renderer.background_colors);
+  fcolor = G.renderer.font_colors;
+  fcolor_end = fcolor + array_len(G.renderer.font_colors);
 
   for (i = 0; i < G.renderer.term_height; ++i) {
     char *row;
     int x = 0;
 
     /* TODO: dirty checking with hashes of row buffer */
+    /* TODO: optimize for special case of scrolling down/up */
     row = G.renderer.screen_buffer + i*G.renderer.term_width;
 
-    while (bcolor < bcolor_end && bcolor->y == i) {
-      if (bcolor->x > x) {
-        array_push(*tmp_render_buffer, row[x]);
-        ++x;
+    while ((fcolor < fcolor_end && fcolor->y == i) || (bcolor < bcolor_end && bcolor->y == i)) {
+      if (fcolor < fcolor_end && fcolor->y == i && fcolor->x <= x) {
+        TermColor tc = term_fcolor(fcolor->color);
+        array_push_a(*tmp_render_buffer, tc.str, tc.len);
+        ++fcolor;
       }
-      else {
+      else if (bcolor < bcolor_end && bcolor->y == i && bcolor->x <= x) {
         TermColor tc = term_bcolor(bcolor->color);
         array_push_a(*tmp_render_buffer, tc.str, tc.len);
         ++bcolor;
+      } else {
+        array_push(*tmp_render_buffer, row[x]);
+        ++x;
       }
     }
     array_push_a(*tmp_render_buffer, row, G.renderer.term_width-x);
@@ -1176,7 +1184,10 @@ void state_init() {
   buffer_empty(&G.menu_buffer);
   buffer_empty(&G.search_buffer);
   buffer_empty(&G.message_buffer);
-  G.bottom_pane.background_color = COLOR_RED;
+  G.main_pane.background_color = COLOR_BLACK;
+  G.main_pane.font_color = COLOR_WHITE;
+  G.bottom_pane.background_color = COLOR_MAGENTA;
+  G.bottom_pane.font_color = COLOR_BLACK;
   G.bottom_pane.bounds = rect_create(0, G.renderer.term_height-1, G.renderer.term_width-1, 1);
 }
 
