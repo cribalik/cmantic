@@ -3,7 +3,10 @@
  * TODO:
  *
  * Formalize key binding sets (for example, menu, searching, and regular buffers)
- * fuzzy search actions
+ * Pane coloring
+ * Color highlighting
+ * Token search
+ * Action search
  *
  * load files
  * movement (word, parenthises, block)
@@ -44,6 +47,7 @@
 #endif
 
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
+#define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
 
 static void term_reset_to_default_settings();
 static void panic() {
@@ -100,7 +104,13 @@ Rect rect_create(int x, int y, int w, int h) {
   return result;
 }
 
-typedef char Token;
+typedef enum {
+  TOKEN_EOF = -1,
+  TOKEN_IDENTIFIER = -2,
+  TOKEN_NUMBER = -3,
+  TOKEN_STRING = -4
+} Token;
+
 typedef struct TokenInfo {
   Token token;
   int x;
@@ -128,12 +138,9 @@ typedef struct Buffer {
   int modified;
 } Buffer;
 
+static void buffer_move_to(Buffer *b, int x, int y);
 static void buffer_goto_endline(Buffer *b) {
   b->ghost_x = -1;
-}
-
-static void buffer_goto_x(Buffer *b, int x) {
-  b->ghost_x = x;
 }
 
 static void buffer_empty(Buffer *b) {
@@ -198,8 +205,9 @@ static void buffer_delete_char(Buffer *b) {
     if (b->pos_y == 0)
       return;
 
+    /* move up and right */
     buffer_move(b, 0, -1);
-    buffer_goto_x(b, array_len(b->lines[b->pos_y]));
+    buffer_move_to(b, array_len(b->lines[b->pos_y]), b->pos_y);
     for (i = 0; i < array_len(b->lines[b->pos_y+1]); ++i)
       array_push(b->lines[b->pos_y], b->lines[b->pos_y+1][i]);
     buffer_delete_line_at(b, b->pos_y+1);
@@ -231,8 +239,7 @@ static void buffer_insert_newline(Buffer *b) {
 
   left_of_line = array_len(b->lines[b->pos_y]) - b->pos_x;
   array_insert(b->lines, b->pos_y + 1, 0);
-  array_push_n(b->lines[b->pos_y+1], left_of_line);
-  memcpy(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
+  array_push_a(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
   array_len_get(b->lines[b->pos_y]) = b->pos_x;
 
   b->pos_x = 0;
@@ -246,10 +253,23 @@ static void buffer_insert_newline_below(Buffer *b) {
   buffer_move(b, 0, 1);
 }
 
+typedef enum {
+  COLOR_BLACK,
+  COLOR_RED,
+  COLOR_GREEN,
+  COLOR_YELLOW,
+  COLOR_BLUE,
+  COLOR_MAGENTA,
+  COLOR_CYAN,
+  COLOR_WHITE,
+  COLOR_COUNT
+} Color;
+
 typedef struct Pane {
   int gutter_width;
   Rect bounds;
   Buffer *buffer;
+  Color background_color;
 } Pane;
 
 typedef enum Mode {
@@ -262,10 +282,37 @@ typedef enum Mode {
   MODE_COUNT
 } Mode;
 
+typedef struct {
+  Color color;
+  int x, y;
+} RenderColorEntry;
+RenderColorEntry render_color_entry_create(Color color, int x, int y) {
+  RenderColorEntry result;
+  result.color = color;
+  result.x = x;
+  result.y = y;
+  return result;
+}
+
+static int render_color_entry_cmp(const void *aa, const void *bb) {
+  const RenderColorEntry *a = aa;
+  const RenderColorEntry *b = bb;
+  if (a->y < b->y)
+    return -1;
+  if (b->y < a->y)
+    return 1;
+  return a->x - b->x;
+}
+
 static struct State {
   /* some rendering memory */
-  char *render_buffer, *render_buffer_prev, *row_buffer;
-  int term_width, term_height;
+  struct Renderer {
+    char *screen_buffer;
+    Array(char) tmp_render_buffer;
+    Array(RenderColorEntry) font_colors;
+    Array(RenderColorEntry) background_colors;
+    int term_width, term_height;
+  } renderer;
 
   /* some editor state */
   Pane main_pane,
@@ -283,7 +330,7 @@ static struct State {
 } G;
 
 static void render_strn(int x0, int x1, int y, const char* str, int n) {
-  char *out = &G.render_buffer[G.term_width*y];
+  char *out = &G.renderer.screen_buffer[G.renderer.term_width*y];
 
   if (!str)
     return;
@@ -301,8 +348,11 @@ static void render_strn(int x0, int x1, int y, const char* str, int n) {
 }
 
 static void render_str_v(int x0, int x1, int y, const char* fmt, va_list args) {
-  int n = vsnprintf(G.row_buffer, G.term_width, fmt, args);
-  render_strn(x0, x1, y, G.row_buffer, n);
+  int n;
+
+  array_resize(G.renderer.tmp_render_buffer, x1-x0+1);
+  n = vsnprintf(G.renderer.tmp_render_buffer, x1-x0+1, fmt, args);
+  render_strn(x0, x1, y, G.renderer.tmp_render_buffer, n);
 }
 
 static void render_str(int x0, int x1, int y, const char* fmt, ...) {
@@ -415,7 +465,7 @@ static void status_message_set(const char *fmt, ...) {
   va_list args;
 
   buffer_truncate_to_n_lines(&G.message_buffer, 1);
-  array_resize(G.message_buffer.lines[0], G.term_width-1);
+  array_resize(G.message_buffer.lines[0], G.renderer.term_width-1);
 
   va_start(args, fmt);
   n = vsnprintf(G.message_buffer.lines[0], array_len(G.message_buffer.lines[0]), fmt, args);
@@ -426,12 +476,6 @@ static void status_message_set(const char *fmt, ...) {
 }
 
 /****** @TOKENIZER ******/
-
-enum {
-  TOKEN_EOF = -1,
-  TOKEN_IDENTIFIER = -2,
-  TOKEN_NUMBER = -3
-};
 
 static void tokenizer_push_token(Array(Array(TokenInfo)) *tokens, int x, int y, Token token) {
   if (array_len(*tokens) < y)
@@ -489,6 +533,37 @@ static void tokenize(Buffer *b) {
 
 
 /****** TERMINAL STUFF !!DO NOT USE OUTSIDE OF RENDERER!! ******/
+
+typedef struct {const char *str; int len;} TermColor;
+static TermColor term_fcolors[] = {
+  {"\x1b[30m", 5}, /* COLOR_BLACK  */
+  {"\x1b[31m", 5}, /* COLOR_RED    */
+  {"\x1b[32m", 5}, /* COLOR_GREEN  */
+  {"\x1b[33m", 5}, /* COLOR_YELLOW */
+  {"\x1b[34m", 5}, /* COLOR_BLUE   */
+  {"\x1b[35m", 5}, /* COLOR_MAGENTA*/
+  {"\x1b[36m", 5}, /* COLOR_CYAN   */
+  {"\x1b[37m", 5}, /* COLOR_WHITE  */
+};
+STATIC_ASSERT(ARRAY_LEN(term_fcolors) == COLOR_COUNT, all_term_font_colors_defined);
+static TermColor term_fcolor(Color color) {
+  return term_fcolors[color];
+}
+
+static TermColor term_bcolors[] = {
+  {"\x1b[40m", 5}, /* COLOR_BLACK  */
+  {"\x1b[41m", 5}, /* COLOR_RED    */
+  {"\x1b[42m", 5}, /* COLOR_GREEN  */
+  {"\x1b[43m", 5}, /* COLOR_YELLOW */
+  {"\x1b[44m", 5}, /* COLOR_BLUE   */
+  {"\x1b[45m", 5}, /* COLOR_MAGENTA*/
+  {"\x1b[46m", 5}, /* COLOR_CYAN   */
+  {"\x1b[47m", 5}, /* COLOR_WHITE  */
+};
+STATIC_ASSERT(ARRAY_LEN(term_bcolors) == COLOR_COUNT, all_term_background_colors_defined);
+static TermColor term_bcolor(Color color) {
+  return term_bcolors[color];
+}
 
 static void term_clear_screen() {
   if (write(STDOUT_FILENO, "\x1b[2J", 4) != 4) panic();
@@ -693,7 +768,15 @@ static int file_open(const char* filename, Buffer *buffer_out) {
 }
 
 static void render_clear(int x0, int x1, int y) {
-  memset(&G.render_buffer[y*G.term_width + x0], ' ', x1 - x0);
+  memset(&G.renderer.screen_buffer[y*G.renderer.term_width + x0], ' ', x1 - x0);
+}
+
+static void render_set_font_color(Color color, int x, int y) {
+  array_push(G.renderer.font_colors, render_color_entry_create(color, x, y));
+}
+
+static void render_set_background_color(Color color, int x, int y) {
+  array_push(G.renderer.background_colors, render_color_entry_create(color, x, y));
 }
 
 /* x,y: screen bounds for pane */
@@ -715,6 +798,8 @@ static void render_pane(Pane *p, int draw_gutter) {
     p->gutter_width = 0;
 
   line_offset_x = pane_calc_left_visible_column(p);
+
+  render_set_background_color(p->background_color, x0, y);
 
   /* calc where we start */
   i = pane_calc_top_visible_row(p);
@@ -770,34 +855,53 @@ static void save_buffer(Buffer *b) {
 
 static void render_flush() {
   int i;
-  /* basically write the G.render_buffer to the terminal */
+  Array(char) *tmp_render_buffer = &G.renderer.tmp_render_buffer;
+  RenderColorEntry *bcolor, *bcolor_end;
+
+  array_resize(*tmp_render_buffer, 0);
+
+  /* basically write the G.renderer.screen_buffer to the terminal */
   term_hide_cursor();
   term_cursor_move(0, 0);
-  for (i = 0; i < G.term_height; ++i) {
-    char *row = &G.render_buffer[i*G.term_width];
-    char *oldrow = &G.render_buffer_prev[i*G.term_width];
-    int rowsize = G.term_width;
-    /* check if we actually need to re-render */
-    int dirty = memcmp(row, oldrow, rowsize);
 
-    if (!dirty) continue;
+  /* sort the list of color commands */
+  qsort(G.renderer.background_colors,
+        array_len(G.renderer.background_colors),
+        sizeof(*G.renderer.background_colors),
+        render_color_entry_cmp);
+  qsort(G.renderer.font_colors,
+        array_len(G.renderer.font_colors),
+        sizeof(*G.renderer.font_colors),
+        render_color_entry_cmp);
+  bcolor = G.renderer.background_colors;
+  bcolor_end = bcolor + array_len(G.renderer.background_colors);
 
-    term_cursor_move(0, i);
-    term_clear_line();
-    if (write(STDOUT_FILENO, row, rowsize) != rowsize)
-      panic();
+  for (i = 0; i < G.renderer.term_height; ++i) {
+    char *row;
+    int x = 0;
+
+    /* TODO: dirty checking with hashes of row buffer */
+    row = G.renderer.screen_buffer + i*G.renderer.term_width;
+
+    while (bcolor < bcolor_end && bcolor->y == i) {
+      if (bcolor->x > x) {
+        array_push(*tmp_render_buffer, row[x]);
+        ++x;
+      }
+      else {
+        TermColor tc = term_bcolor(bcolor->color);
+        array_push_a(*tmp_render_buffer, tc.str, tc.len);
+        ++bcolor;
+      }
+    }
+    array_push_a(*tmp_render_buffer, row, G.renderer.term_width-x);
   }
-  term_show_cursor();
-
+  term_cursor_move(0, 0);
+  if (write(STDOUT_FILENO, *tmp_render_buffer, array_len(*tmp_render_buffer)) != array_len(*tmp_render_buffer))
+    panic();
   term_cursor_move_p(pane_to_screen_pos(&G.main_pane));
+  term_show_cursor();
   fflush(stdout);
-
-  /* swap new and old buffer */
-  {
-    void* tmp = G.render_buffer_prev;
-    G.render_buffer_prev = G.render_buffer;
-    G.render_buffer = tmp;
-  }
 }
 
 static void mode_normal() {
@@ -1057,9 +1161,9 @@ void state_init() {
   int err;
 
   /* read terminal dimensions */
-  err = term_get_dimensions(&G.term_width, &G.term_height);
+  err = term_get_dimensions(&G.renderer.term_width, &G.renderer.term_height);
   if (err) panic();
-  DEBUG(fprintf(stderr, "terminal dimensions: %i %i\n", G.term_width, G.term_height););
+  DEBUG(fprintf(stderr, "terminal dimensions: %i %i\n", G.renderer.term_width, G.renderer.term_height););
 
   /* set default settings */
   G.read_timeout_ms = 1;
@@ -1067,15 +1171,13 @@ void state_init() {
   G.default_tab_type = 4;
 
   /* allocate memory */
-  G.render_buffer = malloc(G.term_width * G.term_height);
-  G.render_buffer_prev = malloc(G.term_width * G.term_height);
-  memset(G.render_buffer, ' ', sizeof(char) * G.term_width * G.term_height);
-  G.row_buffer = malloc(sizeof(char) * G.term_width);
+  G.renderer.screen_buffer = malloc(sizeof(*G.renderer.screen_buffer) * G.renderer.term_width * G.renderer.term_height);
 
   buffer_empty(&G.menu_buffer);
   buffer_empty(&G.search_buffer);
   buffer_empty(&G.message_buffer);
-  G.bottom_pane.bounds = rect_create(0, G.term_height-1, G.term_width-1, 1);
+  G.bottom_pane.background_color = COLOR_RED;
+  G.bottom_pane.bounds = rect_create(0, G.renderer.term_height-1, G.renderer.term_width-1, 1);
 }
 
 int main(int argc, const char** argv) {
@@ -1105,14 +1207,14 @@ int main(int argc, const char** argv) {
       status_message_set("loaded %s, %i lines", filename, array_len(G.main_pane.buffer->lines));
     G.main_pane.bounds.x = 0;
     G.main_pane.bounds.y = 0;
-    G.main_pane.bounds.w = G.term_width - 1;
-    G.main_pane.bounds.h = G.term_height - 2; /* leave room for menu */
+    G.main_pane.bounds.w = G.renderer.term_width - 1;
+    G.main_pane.bounds.h = G.renderer.term_height - 2; /* leave room for menu */
   }
 
   while (1) {
 
     /* clear rendering buffer */
-    memset(G.render_buffer, ' ', G.term_width * G.term_height * sizeof(char));
+    memset(G.renderer.screen_buffer, ' ', G.renderer.term_width * G.renderer.term_height * sizeof(*G.renderer.screen_buffer));
 
     /* draw document */
     render_pane(&G.main_pane, 1);
