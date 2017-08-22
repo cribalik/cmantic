@@ -1,11 +1,10 @@
-/* CURRENT:
+/* CURRENT: Search
  *
  * TODO:
  *
- * Formalize key binding sets (for example, menu, searching, and regular buffers)
- * Pane coloring
- * Color highlighting
  * Token search
+ * Formalize key binding sets (for example, menu, searching, and regular buffers)
+ * Color highlighting
  * Action search
  *
  * load files
@@ -55,11 +54,14 @@ static void panic() {
   abort();
 }
 
-static int maxi(int a, int b) {
+static int at_least(int a, int b) {
   return a < b ? b : a;
 }
-static int mini(int a, int b) {
+static int at_most(int a, int b) {
   return b < a ? b : a;
+}
+static int between(int x, int a, int b) {
+  return x >= a && x <= b;
 }
 /* a,b inclusive */
 static int clampi(int x, int a, int b) {
@@ -150,10 +152,13 @@ static void buffer_empty(Buffer *b) {
     array_free(b->lines[i]);
 
   array_resize(b->lines, 1);
+  b->pos_x = b->pos_y = 0;
 }
 
 static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   int i;
+
+  n = at_least(n, 1);
 
   if (n >= array_len(b->lines))
     return;
@@ -161,6 +166,7 @@ static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   for (i = n; i < array_len(b->lines); ++i)
     array_free(b->lines[i]);
   array_resize(b->lines, n);
+  b->pos_y = at_most(b->pos_y, n-1);
 }
 
 static int buffer_advance_xy(Buffer *b, int *x, int *y) {
@@ -168,9 +174,9 @@ static int buffer_advance_xy(Buffer *b, int *x, int *y) {
   if (*x >= array_len(b->lines[*y])) {
     *x = 0;
     ++(*y);
-    while (*y < array_len(b->lines) && !b->lines[*y])
+    while (!b->lines[*y] && *y < array_len(b->lines))
       ++(*y);
-    if (*y >= array_len(b->lines))
+    if (*y == array_len(b->lines))
       return 1;
   }
   return 0;
@@ -178,6 +184,25 @@ static int buffer_advance_xy(Buffer *b, int *x, int *y) {
 
 static char buffer_getchar(Buffer *b, int x, int y) {
   return b->lines[y][x];
+}
+
+static int buffer_find(Buffer *b, char *str, int n) {
+  int x,y;
+
+  if (!n)
+    return 0;
+
+  x = b->pos_x;
+  y = b->pos_y;
+
+  for (;;) {
+    if (between(x, 0, array_len(b->lines[y])-n) && strncmp(str, b->lines[y]+x, n) == 0) {
+      buffer_move_to(b, x, y);
+      return 0;
+    }
+    if (buffer_advance_xy(b, &x, &y))
+      return 1;
+  }
 }
 
 static void buffer_move(Buffer *b, int x, int y);
@@ -322,6 +347,10 @@ static struct State {
          message_buffer;
   Mode mode;
 
+  /* search state */
+  int search_failed;
+  int search_begin_x, search_begin_y;
+
   /* some settings */
   struct termios orig_termios;
   int read_timeout_ms;
@@ -337,7 +366,7 @@ static void render_strn(int x0, int x1, int y, const char* str, int n) {
 
   while (n-- && x0 < x1) {
     if (*str == '\t') {
-      int num_to_write = mini(G.tab_width, x1 - x0);
+      int num_to_write = at_most(G.tab_width, x1 - x0);
       memset(out + x0, ' ', num_to_write);
       x0 += num_to_write;
     }
@@ -397,15 +426,15 @@ static int from_visual_offset(Array(char) line, int x) {
 }
 
 static int pane_calc_top_visible_row(Pane *pane) {
-  return maxi(0, pane->buffer->pos_y - pane->bounds.h/2);
+  return at_least(0, pane->buffer->pos_y - pane->bounds.h/2);
 }
 
 static int pane_calc_bottom_visible_row(Pane *pane) {
-  return mini(pane_calc_top_visible_row(pane) + pane->bounds.h, array_len(pane->buffer->lines)) - 1;
+  return at_most(pane_calc_top_visible_row(pane) + pane->bounds.h, array_len(pane->buffer->lines)) - 1;
 }
 
 static int pane_calc_left_visible_column(Pane *pane) {
-  return maxi(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos_y], pane->buffer->pos_x) - (pane->bounds.w - pane->gutter_width - 3));
+  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos_y], pane->buffer->pos_x) - (pane->bounds.w - pane->gutter_width - 3));
 }
 
 static Pos pane_to_screen_pos(Pane *pane) {
@@ -471,7 +500,7 @@ static void status_message_set(const char *fmt, ...) {
   n = vsnprintf(G.message_buffer.lines[0], array_len(G.message_buffer.lines[0]), fmt, args);
   va_end(args);
 
-  n = mini(n, array_len(G.message_buffer.lines[0]));
+  n = at_most(n, array_len(G.message_buffer.lines[0]));
   array_resize(G.message_buffer.lines[0], n);
 }
 
@@ -912,21 +941,44 @@ static void render_flush() {
   fflush(stdout);
 }
 
-static void mode_normal() {
+static void mode_search() {
+  G.mode = MODE_SEARCH;
+  G.search_begin_x = G.main_pane.buffer->pos_x;
+  G.search_begin_y = G.main_pane.buffer->pos_y;
+  G.search_failed = 0;
+  G.bottom_pane.buffer = &G.search_buffer;
+  buffer_empty(&G.search_buffer);
+}
+
+static void mode_goto() {
+  G.mode = MODE_GOTO;
+  G.bottom_pane.buffer = &G.message_buffer;
+  status_message_set("goto...");
+}
+
+static void mode_delete() {
+  G.mode = MODE_DELETE;
+  G.bottom_pane.buffer = &G.message_buffer;
+  status_message_set("delete...");
+}
+
+static void mode_normal(int set_message) {
   G.mode = MODE_NORMAL;
-  status_message_set("NORMAL");
+  G.bottom_pane.buffer = &G.message_buffer;
+  if (set_message)
+    status_message_set("NORMAL");
 }
 
 static void mode_insert() {
   G.mode = MODE_INSERT;
+  G.bottom_pane.buffer = &G.message_buffer;
   status_message_set("INSERT");
 }
 
 static void mode_menu() {
   G.mode = MODE_MENU;
-
-  buffer_truncate_to_n_lines(&G.menu_buffer, 1);
-  array_resize(G.menu_buffer.lines[0], 0);
+  G.bottom_pane.buffer = &G.menu_buffer;
+  buffer_empty(&G.menu_buffer);
 }
 
 static int process_input() {
@@ -1007,25 +1059,25 @@ static int process_input() {
         /* FIXME: this might buffer overrun */
         if (IS_OPTION("inv")) {
           term_inverse_video(-1);
-          mode_normal();
+          mode_normal(1);
         }
         else if (IS_OPTION("save")) {
           save_buffer(G.main_pane.buffer);
           /* TODO: write out absolute path, instead of relative */
           status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer->lines), G.main_pane.buffer->filename);
-          G.mode = MODE_NORMAL;
+          mode_normal(0);
         }
         else if (IS_OPTION("quit") || IS_OPTION("exit"))
           return 1;
         else {
-          status_message_set("Unknown option %i '%.*s'", array_len(G.menu_buffer.lines[0]), array_len(G.menu_buffer.lines[0]), G.menu_buffer.lines[0]);
-          G.mode = MODE_NORMAL;
+          status_message_set("Unknown option '%.*s'", array_len(G.menu_buffer.lines[0]), G.menu_buffer.lines[0]);
+          mode_normal(0);
         }
 
         #undef IS_OPTION
       }
       else if (input == KEY_ESCAPE)
-        mode_normal();
+        mode_normal(1);
       else if (!key_is_special(input))
         array_push(G.menu_buffer.lines[0], input);
       /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
@@ -1074,8 +1126,12 @@ static int process_input() {
           buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos_y);
           break;
 
+        case ' ':
+          mode_search();
+          break;
+
         case 'g':
-          G.mode = MODE_GOTO;
+          mode_goto();
           break;
 
         case 'o':
@@ -1092,7 +1148,7 @@ static int process_input() {
           break;
 
         case 'd':
-          G.mode = MODE_DELETE;
+          mode_delete();
           break;
       }
       break;
@@ -1109,22 +1165,35 @@ static int process_input() {
       G.mode = MODE_NORMAL;
       break;
 
-    case MODE_SEARCH:
+    case MODE_SEARCH: {
+      Array(char) search;
+
+      G.bottom_pane.buffer = &G.search_buffer;
+
       if (key_is_special(input)) {
-        G.mode = MODE_NORMAL;
+        if (G.search_failed) {
+          buffer_move_to(G.main_pane.buffer, G.search_begin_x, G.search_begin_y);
+          mode_normal(0);
+          status_message_set("Did not find occurance of %*s, jumping back to (%i,%i)", array_len(G.search_buffer.lines[0]), G.search_buffer.lines[0], G.search_begin_x, G.search_begin_y);
+        } else
+          mode_normal(1);
         break;
       }
-      buffer_insert_char(G.bottom_pane.buffer, input);
-      break;
+      buffer_insert_char(&G.search_buffer, input);
+      search = G.search_buffer.lines[0];
+      G.search_failed = buffer_find(G.main_pane.buffer,
+                               search,
+                               array_len(search));
+    } break;
     case MODE_DELETE:
       switch (input) {
         case KEY_ESCAPE:
-          mode_normal();
+          mode_normal(1);
           break;
 
         case 'd':
           buffer_delete_line(G.main_pane.buffer);
-          mode_normal();
+          mode_normal(1);
           break;
       }
       break;
@@ -1134,7 +1203,7 @@ static int process_input() {
 
       /* TODO: should not set `modifier` if we just enter and exit insert mode */
       if (input == KEY_ESCAPE)
-        mode_normal();
+        mode_normal(1);
       else if (!key_is_special(input)) {
         buffer_insert_char(b, input);
       } else {
@@ -1189,6 +1258,7 @@ void state_init() {
   G.bottom_pane.background_color = COLOR_MAGENTA;
   G.bottom_pane.font_color = COLOR_BLACK;
   G.bottom_pane.bounds = rect_create(0, G.renderer.term_height-1, G.renderer.term_width-1, 1);
+  G.bottom_pane.buffer = &G.message_buffer;
 }
 
 int main(int argc, const char** argv) {
@@ -1231,7 +1301,6 @@ int main(int argc, const char** argv) {
     render_pane(&G.main_pane, 1);
 
     /* Draw menu/status bar */
-    G.bottom_pane.buffer = G.mode == MODE_MENU ? &G.menu_buffer : &G.message_buffer;
     render_pane(&G.bottom_pane, 0);
 
     /* render to screen */
