@@ -2,10 +2,12 @@
  *
  * TODO:
  *
- * Token search
- * Formalize key binding sets (for example, menu, searching, and regular buffers)
+ * Token autocomplete
+ * Search backwards
+ * Colorize search results in view
  * Color highlighting
  * Action search
+ * Draw custom marker instead of using terminals marker
  *
  * load files
  * movement (word, parenthises, block)
@@ -60,9 +62,6 @@ static int at_least(int a, int b) {
 static int at_most(int a, int b) {
   return b < a ? b : a;
 }
-static int between(int x, int a, int b) {
-  return x >= a && x <= b;
-}
 /* a,b inclusive */
 static int clampi(int x, int a, int b) {
   return x < a ? a : (b < x ? b : x);
@@ -88,10 +87,6 @@ typedef enum Key {
 static int key_is_special(Key key) {
   return key == KEY_ESCAPE || key == KEY_RETURN || key == KEY_TAB || key == KEY_BACKSPACE || key >= KEY_SPECIAL;
 }
-
-typedef struct Pos {
-  int x,y;
-} Pos;
 
 typedef struct Rect {
   int x,y,w,h;
@@ -124,6 +119,12 @@ TokenInfo tokeninfo_create(Token token, int x) {
   return t;
 }
 
+typedef struct {
+  #define GHOST_EOL -1
+  int x, y;
+  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+} Pos;
+
 typedef struct Buffer {
   Array(Array(char)) lines;
   const char* filename;
@@ -132,17 +133,14 @@ typedef struct Buffer {
   /* parser stuff */
   Array(Array(TokenInfo)) tokens;
 
-  int pos_x, pos_y;
-
-  #define GHOST_EOL -1
-  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+  Pos pos;
 
   int modified;
 } Buffer;
 
 static void buffer_move_to(Buffer *b, int x, int y);
 static void buffer_goto_endline(Buffer *b) {
-  b->ghost_x = -1;
+  b->pos.ghost_x = -1;
 }
 
 static void buffer_empty(Buffer *b) {
@@ -152,7 +150,8 @@ static void buffer_empty(Buffer *b) {
     array_free(b->lines[i]);
 
   array_resize(b->lines, 1);
-  b->pos_x = b->pos_y = 0;
+  b->lines[0] = 0;
+  b->pos.x = b->pos.y = 0;
 }
 
 static void buffer_truncate_to_n_lines(Buffer *b, int n) {
@@ -166,7 +165,7 @@ static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   for (i = n; i < array_len(b->lines); ++i)
     array_free(b->lines[i]);
   array_resize(b->lines, n);
-  b->pos_y = at_most(b->pos_y, n-1);
+  b->pos.y = at_most(b->pos.y, n-1);
 }
 
 static int buffer_advance_xy(Buffer *b, int *x, int *y) {
@@ -174,11 +173,48 @@ static int buffer_advance_xy(Buffer *b, int *x, int *y) {
   if (*x >= array_len(b->lines[*y])) {
     *x = 0;
     ++(*y);
-    while (!b->lines[*y] && *y < array_len(b->lines))
+    while (*y < array_len(b->lines) && array_len(b->lines[*y]) == 0)
       ++(*y);
-    if (*y == array_len(b->lines))
+    if (*y == array_len(b->lines)) {
+      --(*y);
       return 1;
+    }
   }
+  return 0;
+}
+
+static int buffer_advance(Buffer *b) {
+  int r;
+
+  r = buffer_advance_xy(b, &b->pos.x, &b->pos.y);
+  if (r)
+    return r;
+  b->pos.ghost_x = b->pos.x;
+  return 0;
+}
+
+static int buffer_advance_r_xy(Buffer *b, int *x, int *y) {
+  --(*x);
+  if (*x < 0) {
+    --(*y);
+    while (!b->lines[*y] && *y > 0)
+      --(*y);
+    if (*y <= 0) {
+      *x = array_len(b->lines[0]);
+      return 1;
+    }
+    *x = array_len(b->lines[*y]);
+  }
+  return 0;
+}
+
+static int buffer_advance_r(Buffer *b) {
+  int r;
+
+  r = buffer_advance_r_xy(b, &b->pos.x, &b->pos.y);
+  if (r)
+    return r;
+  b->pos.ghost_x = b->pos.x;
   return 0;
 }
 
@@ -186,29 +222,52 @@ static char buffer_getchar(Buffer *b, int x, int y) {
   return b->lines[y][x];
 }
 
-static int buffer_find(Buffer *b, char *str, int n) {
-  int x,y;
+static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
+  char *h, *hend;
 
-  if (!n)
+  if (!needle_len || haystack_len < needle_len)
     return 0;
 
-  x = b->pos_x;
-  y = b->pos_y;
+  h = haystack;
+  hend = h + haystack_len - needle_len + 1;
 
-  for (;;) {
-    if (between(x, 0, array_len(b->lines[y])-n) && strncmp(str, b->lines[y]+x, n) == 0) {
-      buffer_move_to(b, x, y);
-      return 0;
-    }
-    if (buffer_advance_xy(b, &x, &y))
-      return 1;
+  for (; h < hend; ++h)
+    if (memcmp(needle, h, needle_len) == 0)
+      return h;
+  return 0;
+}
+
+static void status_message_set(const char *fmt, ...);
+static int buffer_find(Buffer *b, char *str, int n) {
+  int x, y;
+
+  if (!n)
+    return 1;
+
+  x = b->pos.x;
+  y = b->pos.y;
+
+  for (; y < array_len(b->lines); ++y, x = 0) {
+    char *p;
+    if (x >= array_len(b->lines[y]))
+      continue;
+
+    p = memmem(str, n, b->lines[y]+x, array_len(b->lines[y])-x);
+    if (!p)
+      continue;
+
+    x = p - b->lines[y];
+    buffer_move_to(b, x, y);
+    status_message_set("jumping to (%i,%i), but arrived at (%i, %i)", x, y, b->pos.x, b->pos.y);
+    return 0;
   }
+  return 1;
 }
 
 static void buffer_move(Buffer *b, int x, int y);
 static void buffer_insert_char(Buffer *b, char ch) {
   b->modified = 1;
-  array_insert(b->lines[b->pos_y], b->pos_x, ch);
+  array_insert(b->lines[b->pos.y], b->pos.x, ch);
   buffer_move(b, 1, 0);
 }
 
@@ -220,26 +279,26 @@ static void buffer_delete_line_at(Buffer *b, int y) {
 }
 
 static void buffer_delete_line(Buffer *b) {
-  buffer_delete_line_at(b, b->pos_y);
+  buffer_delete_line_at(b, b->pos.y);
 }
 
 static void buffer_delete_char(Buffer *b) {
-  if (b->pos_x == 0) {
+  if (b->pos.x == 0) {
     int i;
 
-    if (b->pos_y == 0)
+    if (b->pos.y == 0)
       return;
 
     /* move up and right */
     buffer_move(b, 0, -1);
-    buffer_move_to(b, array_len(b->lines[b->pos_y]), b->pos_y);
-    for (i = 0; i < array_len(b->lines[b->pos_y+1]); ++i)
-      array_push(b->lines[b->pos_y], b->lines[b->pos_y+1][i]);
-    buffer_delete_line_at(b, b->pos_y+1);
+    buffer_move_to(b, array_len(b->lines[b->pos.y]), b->pos.y);
+    for (i = 0; i < array_len(b->lines[b->pos.y+1]); ++i)
+      array_push(b->lines[b->pos.y], b->lines[b->pos.y+1][i]);
+    buffer_delete_line_at(b, b->pos.y+1);
   }
   else {
     buffer_move(b, -1, 0);
-    array_remove_slow(b->lines[b->pos_y], b->pos_x);
+    array_remove_slow(b->lines[b->pos.y], b->pos.x);
   }
 }
 
@@ -248,13 +307,13 @@ static void buffer_insert_tab(Buffer *b) {
 
   b->modified = 1;
   if (n == 0) {
-    array_insert(b->lines[b->pos_y], b->pos_x, '\t');
+    array_insert(b->lines[b->pos.y], b->pos.x, '\t');
     buffer_move(b, 1, 0);
   }
   else {
     /* TODO: optimize? */
     while (n--)
-      array_insert(b->lines[b->pos_y], b->pos_x, ' ');
+      array_insert(b->lines[b->pos.y], b->pos.x, ' ');
     buffer_move(b, b->tab_type, 0);
   }
 }
@@ -262,19 +321,19 @@ static void buffer_insert_tab(Buffer *b) {
 static void buffer_insert_newline(Buffer *b) {
   int left_of_line;
 
-  left_of_line = array_len(b->lines[b->pos_y]) - b->pos_x;
-  array_insert(b->lines, b->pos_y + 1, 0);
-  array_push_a(b->lines[b->pos_y+1], b->lines[b->pos_y] + b->pos_x, left_of_line);
-  array_len_get(b->lines[b->pos_y]) = b->pos_x;
+  left_of_line = array_len(b->lines[b->pos.y]) - b->pos.x;
+  array_insert(b->lines, b->pos.y + 1, 0);
+  array_push_a(b->lines[b->pos.y+1], b->lines[b->pos.y] + b->pos.x, left_of_line);
+  array_len_get(b->lines[b->pos.y]) = b->pos.x;
 
-  b->pos_x = 0;
-  b->ghost_x = 0;
-  ++b->pos_y;
+  b->pos.x = 0;
+  b->pos.ghost_x = 0;
+  ++b->pos.y;
 }
 
 static void buffer_insert_newline_below(Buffer *b) {
   b->modified = 1;
-  array_insert(b->lines, b->pos_y+1, 0);
+  array_insert(b->lines, b->pos.y+1, 0);
   buffer_move(b, 0, 1);
 }
 
@@ -349,7 +408,7 @@ static struct State {
 
   /* search state */
   int search_failed;
-  int search_begin_x, search_begin_y;
+  Pos search_begin_pos;
 
   /* some settings */
   struct termios orig_termios;
@@ -426,7 +485,7 @@ static int from_visual_offset(Array(char) line, int x) {
 }
 
 static int pane_calc_top_visible_row(Pane *pane) {
-  return at_least(0, pane->buffer->pos_y - pane->bounds.h/2);
+  return at_least(0, pane->buffer->pos.y - pane->bounds.h/2);
 }
 
 static int pane_calc_bottom_visible_row(Pane *pane) {
@@ -434,40 +493,47 @@ static int pane_calc_bottom_visible_row(Pane *pane) {
 }
 
 static int pane_calc_left_visible_column(Pane *pane) {
-  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos_y], pane->buffer->pos_x) - (pane->bounds.w - pane->gutter_width - 3));
+  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->bounds.w - pane->gutter_width - 3));
 }
 
 static Pos pane_to_screen_pos(Pane *pane) {
   Pos result = {0};
   Array(char) line;
 
-  line = pane->buffer->lines[pane->buffer->pos_y];
-  result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, pane->buffer->pos_x) - pane_calc_left_visible_column(pane);
+  line = pane->buffer->lines[pane->buffer->pos.y];
+  result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, pane->buffer->pos.x) - pane_calc_left_visible_column(pane);
   /* try to center */
-  result.y = pane->bounds.y + pane->buffer->pos_y - pane_calc_top_visible_row(pane);
+  result.y = pane->bounds.y + pane->buffer->pos.y - pane_calc_top_visible_row(pane);
   return result;
 }
 
 static void buffer_move_to(Buffer *b, int x, int y) {
+  y = clampi(y, 0, array_len(b->lines)-1);
+  b->pos.y = y;
+  x = clampi(x, 0, array_len(b->lines[y]));
+  b->pos.x = x;
+  b->pos.ghost_x = x;
+}
+
+static void buffer_move(Buffer *b, int dx, int dy) {
   Array(char) old_line;
   Array(char) new_line;
-  int old_x, dx;
+  int old_x;
 
-  old_line = b->lines[b->pos_y];
-  old_x = b->pos_x;
-  dx = x - old_x;
+  old_line = b->lines[b->pos.y];
+  old_x = b->pos.x;
 
   /* y is easy */
-  b->pos_y = clampi(y, 0, array_len(b->lines) - 1);
+  b->pos.y = clampi(b->pos.y + dy, 0, array_len(b->lines) - 1);
 
-  new_line = b->lines[b->pos_y];
+  new_line = b->lines[b->pos.y];
 
   /* use ghost pos? */
   if (dx == 0) {
-    if (b->ghost_x == GHOST_EOL)
-      b->pos_x = array_len(new_line);
+    if (b->pos.ghost_x == GHOST_EOL)
+      b->pos.x = array_len(new_line);
     else
-      b->pos_x = from_visual_offset(new_line, b->ghost_x);
+      b->pos.x = from_visual_offset(new_line, b->pos.ghost_x);
   }
   else {
     int old_vis_x;
@@ -475,18 +541,14 @@ static void buffer_move_to(Buffer *b, int x, int y) {
     /* buffer_move visually down/up */
     /* TODO: only need to do this if dy != 0 */
     old_vis_x = to_visual_offset(old_line, old_x);
-    b->pos_x = from_visual_offset(new_line, old_vis_x);
+    b->pos.x = from_visual_offset(new_line, old_vis_x);
 
-    b->pos_x = clampi(b->pos_x, 0, array_len(new_line));
+    b->pos.x = clampi(b->pos.x, 0, array_len(new_line));
 
-    b->pos_x += dx;
+    b->pos.x += dx;
 
-    b->ghost_x = to_visual_offset(new_line, b->pos_x);
+    b->pos.ghost_x = to_visual_offset(new_line, b->pos.x);
   }
-}
-
-static void buffer_move(Buffer *b, int x, int y) {
-  buffer_move_to(b, b->pos_x + x, b->pos_y + y);
 }
 
 static void status_message_set(const char *fmt, ...) {
@@ -943,8 +1005,7 @@ static void render_flush() {
 
 static void mode_search() {
   G.mode = MODE_SEARCH;
-  G.search_begin_x = G.main_pane.buffer->pos_x;
-  G.search_begin_y = G.main_pane.buffer->pos_y;
+  G.search_begin_pos = G.main_pane.buffer->pos;
   G.search_failed = 0;
   G.bottom_pane.buffer = &G.search_buffer;
   buffer_empty(&G.search_buffer);
@@ -953,32 +1014,60 @@ static void mode_search() {
 static void mode_goto() {
   G.mode = MODE_GOTO;
   G.bottom_pane.buffer = &G.message_buffer;
-  status_message_set("goto...");
+  status_message_set("goto");
 }
 
 static void mode_delete() {
   G.mode = MODE_DELETE;
   G.bottom_pane.buffer = &G.message_buffer;
-  status_message_set("delete...");
+  status_message_set("delete");
 }
 
 static void mode_normal(int set_message) {
   G.mode = MODE_NORMAL;
   G.bottom_pane.buffer = &G.message_buffer;
   if (set_message)
-    status_message_set("NORMAL");
+    status_message_set("normal");
 }
 
 static void mode_insert() {
   G.mode = MODE_INSERT;
   G.bottom_pane.buffer = &G.message_buffer;
-  status_message_set("INSERT");
+  status_message_set("insert");
 }
 
 static void mode_menu() {
   G.mode = MODE_MENU;
   G.bottom_pane.buffer = &G.menu_buffer;
   buffer_empty(&G.menu_buffer);
+}
+
+static void insert_default(Pane *p, int input) {
+  Buffer *b = p->buffer;
+
+  /* TODO: should not set `modifier` if we just enter and exit insert mode */
+  if (input == KEY_ESCAPE)
+    mode_normal(1);
+  else if (!key_is_special(input)) {
+    buffer_insert_char(b, input);
+  } else {
+    switch (input) {
+      case KEY_RETURN:
+        buffer_insert_newline(b);
+        break;
+
+      case KEY_TAB:
+        buffer_insert_tab(b);
+        break;
+
+      case KEY_BACKSPACE:
+        buffer_delete_char(b);
+        break;
+
+      default:
+        break;
+    }
+  }
 }
 
 static int process_input() {
@@ -1050,6 +1139,7 @@ static int process_input() {
   /* process input */
   switch (G.mode) {
     case MODE_MENU:
+      G.bottom_pane.buffer = &G.menu_buffer;
       if (input == KEY_RETURN && array_len(G.menu_buffer.lines[0]) > 0) {
         Array(char) line;
 
@@ -1078,8 +1168,8 @@ static int process_input() {
       }
       else if (input == KEY_ESCAPE)
         mode_normal(1);
-      else if (!key_is_special(input))
-        array_push(G.menu_buffer.lines[0], input);
+      else
+        insert_default(&G.bottom_pane, input);
       /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
       break;
 
@@ -1088,7 +1178,6 @@ static int process_input() {
         case KEY_UNKNOWN:
           break;
 
-        case KEY_ESCAPE:
         case 'q':
           if (G.main_pane.buffer->modified)
             status_message_set("You have unsaved changes. If you really want to exit, use :quit");
@@ -1123,8 +1212,20 @@ static int process_input() {
 
         case 'H':
         case KEY_HOME:
-          buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos_y);
+          buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos.y);
           break;
+
+        case 'n': {
+          int err;
+          Pos old_pos;
+
+          old_pos = G.main_pane.buffer->pos;
+
+          buffer_advance(G.main_pane.buffer);
+          err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], array_len(G.search_buffer.lines[0]));
+          if (err)
+            G.main_pane.buffer->pos = old_pos;
+        } break;
 
         case ' ':
           mode_search();
@@ -1162,69 +1263,45 @@ static int process_input() {
           buffer_move_to(G.main_pane.buffer, 0, array_len(G.main_pane.buffer->lines)-1);
           break;
       }
-      G.mode = MODE_NORMAL;
+      mode_normal(1);
       break;
 
-    case MODE_SEARCH: {
-      Array(char) search;
-
+    case MODE_SEARCH:
       G.bottom_pane.buffer = &G.search_buffer;
 
-      if (key_is_special(input)) {
+      if (input == KEY_RETURN || input == KEY_ESCAPE) {
         if (G.search_failed) {
-          buffer_move_to(G.main_pane.buffer, G.search_begin_x, G.search_begin_y);
+          G.main_pane.buffer->pos = G.search_begin_pos;
           mode_normal(0);
-          status_message_set("Did not find occurance of %*s, jumping back to (%i,%i)", array_len(G.search_buffer.lines[0]), G.search_buffer.lines[0], G.search_begin_x, G.search_begin_y);
         } else
           mode_normal(1);
-        break;
       }
-      buffer_insert_char(&G.search_buffer, input);
-      search = G.search_buffer.lines[0];
-      G.search_failed = buffer_find(G.main_pane.buffer,
-                               search,
-                               array_len(search));
-    } break;
+      else {
+        Array(char) search;
+        insert_default(&G.bottom_pane, input);
+        search = G.search_buffer.lines[0];
+        G.search_failed = buffer_find(G.main_pane.buffer,
+                                 search,
+                                 array_len(search));
+      }
+      break;
+
     case MODE_DELETE:
       switch (input) {
-        case KEY_ESCAPE:
-          mode_normal(1);
-          break;
-
         case 'd':
           buffer_delete_line(G.main_pane.buffer);
           mode_normal(1);
           break;
+
+        default:
+          mode_normal(1);
+          break;
       }
       break;
 
-    case MODE_INSERT: {
-      Buffer *b = G.main_pane.buffer;
-
-      /* TODO: should not set `modifier` if we just enter and exit insert mode */
-      if (input == KEY_ESCAPE)
-        mode_normal(1);
-      else if (!key_is_special(input)) {
-        buffer_insert_char(b, input);
-      } else {
-        switch (input) {
-          case KEY_RETURN:
-            buffer_insert_newline(b);
-            break;
-
-          case KEY_TAB:
-            buffer_insert_tab(b);
-            break;
-
-          case KEY_BACKSPACE:
-            buffer_delete_char(b);
-            break;
-
-          default:
-            break;
-        }
-      }
-    } break;
+    case MODE_INSERT:
+      insert_default(&G.main_pane, input);
+      break;
 
     case MODE_COUNT:
       break;
@@ -1255,11 +1332,26 @@ void state_init() {
   buffer_empty(&G.message_buffer);
   G.main_pane.background_color = COLOR_BLACK;
   G.main_pane.font_color = COLOR_WHITE;
-  G.bottom_pane.background_color = COLOR_MAGENTA;
+  G.bottom_pane.background_color = COLOR_RED;
   G.bottom_pane.font_color = COLOR_BLACK;
   G.bottom_pane.bounds = rect_create(0, G.renderer.term_height-1, G.renderer.term_width-1, 1);
   G.bottom_pane.buffer = &G.message_buffer;
 }
+
+#ifdef DEBUG
+static void test() {
+  assert(memmem("a", 1, "a", 1));
+  assert(!memmem("", 0, "", 0));
+  assert(!memmem("", 0, "ab", 2));
+  assert(!memmem("a", 1, "z", 1));
+  assert(memmem("aa", 2, "baa", 3));
+  assert(memmem("aa", 2, "aab", 3));
+  assert(memmem("aa", 2, "baab", 4));
+  assert(!memmem("aa", 2, "a", 1));
+  assert(memmem("abcd", 4, "abcd", 4));
+  assert(memmem("abcd", 4, "xabcdy", 6));
+}
+#endif
 
 int main(int argc, const char** argv) {
   int err;
@@ -1269,6 +1361,8 @@ int main(int argc, const char** argv) {
     fprintf(stderr, "Usage: cedit <file>\n");
     return 1;
   }
+
+  test();
 
   /* set up terminal */
   term_enable_raw_mode();
