@@ -1,13 +1,14 @@
-/* CURRENT: Search
+/* CURRENT: Draw custom cursor
  *
  * TODO:
  *
+ * 
  * Token autocomplete
  * Search backwards
  * Colorize search results in view
  * Color highlighting
  * Action search
- * Draw custom marker instead of using terminals marker
+ * Undo
  *
  * load files
  * movement (word, parenthises, block)
@@ -31,7 +32,8 @@
 
 /* @debug */
 #if 0
-  #define DEBUG(stmt) stmt
+  #define DEBUG
+  #define IF_DEBUG(stmt) stmt
   static void* debug_malloc(unsigned long size, int line, const char* file) {
     struct Header {
       int line;
@@ -44,7 +46,7 @@
   }
   #define malloc(size) debug_malloc(size, __LINE__, __FILE__)
 #else
-  #define DEBUG(stmt)
+  #define IF_DEBUG(stmt)
 #endif
 
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
@@ -366,21 +368,51 @@ typedef enum Mode {
   MODE_COUNT
 } Mode;
 
+typedef enum {
+  STYLE_COMMAND_FOREGROUND_COLOR,
+  STYLE_COMMAND_BACKGROUND_COLOR,
+  STYLE_COMMAND_MARKER_BEGIN,
+  STYLE_COMMAND_MARKER_END
+  /*
+  STYLE_COMMAND_BOLD,
+  STYLE_COMMAND_ITALIC,
+  */
+} StyleCommandType;
+
 typedef struct {
-  Color color;
+  StyleCommandType type;
   int x, y;
-} RenderColorEntry;
-RenderColorEntry render_color_entry_create(Color color, int x, int y) {
-  RenderColorEntry result;
-  result.color = color;
-  result.x = x;
-  result.y = y;
-  return result;
+  Color color;
+} StyleCommand;
+StyleCommand style_command_fcolor(Color color, int x, int y) {
+  StyleCommand c;
+  c.color = color;
+  c.type = STYLE_COMMAND_FOREGROUND_COLOR;
+  c.x = x;
+  c.y = y;
+  return c;
 }
 
-static int render_color_entry_cmp(const void *aa, const void *bb) {
-  const RenderColorEntry *a = aa;
-  const RenderColorEntry *b = bb;
+StyleCommand style_command_bcolor(Color color, int x, int y) {
+  StyleCommand c;
+  c.type = STYLE_COMMAND_BACKGROUND_COLOR;
+  c.color = color;
+  c.x = x;
+  c.y = y;
+  return c;
+}
+
+StyleCommand style_command_create(StyleCommandType type, int x, int y) {
+  StyleCommand c;
+  c.type = type;
+  c.x = x;
+  c.y = y;
+  return c;
+}
+
+static int style_command_cmp(const void *aa, const void *bb) {
+  const StyleCommand *a = aa;
+  const StyleCommand *b = bb;
   if (a->y < b->y)
     return -1;
   if (b->y < a->y)
@@ -393,8 +425,7 @@ static struct State {
   struct Renderer {
     char *screen_buffer;
     Array(char) tmp_render_buffer;
-    Array(RenderColorEntry) font_colors;
-    Array(RenderColorEntry) background_colors;
+    Array(StyleCommand) style_commands;
     int term_width, term_height;
   } renderer;
 
@@ -625,8 +656,8 @@ static void tokenize(Buffer *b) {
 
 /****** TERMINAL STUFF !!DO NOT USE OUTSIDE OF RENDERER!! ******/
 
-typedef struct {const char *str; int len;} TermColor;
-static TermColor term_fcolors[] = {
+typedef struct {const char *str; int len;} TermCommand;
+static TermCommand term_fcolors[] = {
   {"\x1b[30m", 5}, /* COLOR_BLACK  */
   {"\x1b[31m", 5}, /* COLOR_RED    */
   {"\x1b[32m", 5}, /* COLOR_GREEN  */
@@ -636,12 +667,7 @@ static TermColor term_fcolors[] = {
   {"\x1b[36m", 5}, /* COLOR_CYAN   */
   {"\x1b[37m", 5}, /* COLOR_WHITE  */
 };
-STATIC_ASSERT(ARRAY_LEN(term_fcolors) == COLOR_COUNT, all_term_font_colors_defined);
-static TermColor term_fcolor(Color color) {
-  return term_fcolors[color];
-}
-
-static TermColor term_bcolors[] = {
+static TermCommand term_bcolors[] = {
   {"\x1b[40m", 5}, /* COLOR_BLACK  */
   {"\x1b[41m", 5}, /* COLOR_RED    */
   {"\x1b[42m", 5}, /* COLOR_GREEN  */
@@ -651,9 +677,40 @@ static TermColor term_bcolors[] = {
   {"\x1b[46m", 5}, /* COLOR_CYAN   */
   {"\x1b[47m", 5}, /* COLOR_WHITE  */
 };
+STATIC_ASSERT(ARRAY_LEN(term_fcolors) == COLOR_COUNT, all_term_font_colors_defined);
 STATIC_ASSERT(ARRAY_LEN(term_bcolors) == COLOR_COUNT, all_term_background_colors_defined);
-static TermColor term_bcolor(Color color) {
-  return term_bcolors[color];
+static TermCommand term_stylecommand(StyleCommand cmd) {
+  TermCommand result = {0};
+  switch (cmd.type) {
+    case STYLE_COMMAND_BACKGROUND_COLOR:
+      result = term_bcolors[cmd.color];
+      break;
+
+    case STYLE_COMMAND_FOREGROUND_COLOR:
+      result = term_fcolors[cmd.color];
+      break;
+
+    case STYLE_COMMAND_MARKER_BEGIN:
+      result.str = "\x1b[7m";
+      result.len = 4;
+      break;
+
+    case STYLE_COMMAND_MARKER_END:
+      result.str = "\x1b[27m";
+      result.len = 5;
+      break;
+
+    /* case STYLE_COMMAND_ITALIC:
+    case STYLE_COMMAND_BOLD:
+      result.len = 0;
+      break;
+      */
+    default:
+      IF_DEBUG((printf("Unknown color type %i\n", cmd.type), exit(1)));
+      result.len = 0;
+      break;
+  }
+  return result;
 }
 
 static void term_clear_screen() {
@@ -730,6 +787,7 @@ static void term_enable_raw_mode() {
                            | ISTRIP /* don't strip the 8th bit of each input byte */);
 
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_termios);
+  term_hide_cursor();
 }
 
 static void term_reset_to_default_settings() {
@@ -790,7 +848,7 @@ static int file_open(const char* filename, Buffer *buffer_out) {
     fclose(f);
     return -1;
   }
-  DEBUG(display_message("File has %i rows", num_lines));
+  IF_DEBUG(status_message_set("File has %i rows", num_lines));
 
   if (num_lines > 0) {
     array_resize(buffer.lines, num_lines);
@@ -863,11 +921,17 @@ static void render_clear(int x0, int x1, int y) {
 }
 
 static void render_set_font_color(Color color, int x, int y) {
-  array_push(G.renderer.font_colors, render_color_entry_create(color, x, y));
+  array_push(G.renderer.style_commands, style_command_fcolor(color, x, y));
 }
 
 static void render_set_background_color(Color color, int x, int y) {
-  array_push(G.renderer.background_colors, render_color_entry_create(color, x, y));
+  array_push(G.renderer.style_commands, style_command_bcolor(color, x, y));
+}
+
+static void render_marker(Pane *p) {
+  Pos pos = pane_to_screen_pos(p);
+  array_push(G.renderer.style_commands, style_command_create(STYLE_COMMAND_MARKER_BEGIN, pos.x, pos.y));
+  array_push(G.renderer.style_commands, style_command_create(STYLE_COMMAND_MARKER_END, pos.x+1, pos.y));
 }
 
 /* x,y: screen bounds for pane */
@@ -947,28 +1011,20 @@ static void save_buffer(Buffer *b) {
 static void render_flush() {
   int i;
   Array(char) *tmp_render_buffer = &G.renderer.tmp_render_buffer;
-  RenderColorEntry *bcolor, *bcolor_end,
-                   *fcolor, *fcolor_end;
+  StyleCommand *styles, *styles_end;
 
   array_resize(*tmp_render_buffer, 0);
 
   /* basically write the G.renderer.screen_buffer to the terminal */
-  term_hide_cursor();
   term_cursor_move(0, 0);
 
   /* sort the list of color commands */
-  qsort(G.renderer.background_colors,
-        array_len(G.renderer.background_colors),
-        sizeof(*G.renderer.background_colors),
-        render_color_entry_cmp);
-  qsort(G.renderer.font_colors,
-        array_len(G.renderer.font_colors),
-        sizeof(*G.renderer.font_colors),
-        render_color_entry_cmp);
-  bcolor = G.renderer.background_colors;
-  bcolor_end = bcolor + array_len(G.renderer.background_colors);
-  fcolor = G.renderer.font_colors;
-  fcolor_end = fcolor + array_len(G.renderer.font_colors);
+  qsort(G.renderer.style_commands,
+        array_len(G.renderer.style_commands),
+        sizeof(*G.renderer.style_commands),
+        style_command_cmp);
+  styles = G.renderer.style_commands;
+  styles_end = styles + array_len(G.renderer.style_commands);
 
   for (i = 0; i < G.renderer.term_height; ++i) {
     char *row;
@@ -978,29 +1034,27 @@ static void render_flush() {
     /* TODO: optimize for special case of scrolling down/up */
     row = G.renderer.screen_buffer + i*G.renderer.term_width;
 
-    while ((fcolor < fcolor_end && fcolor->y == i) || (bcolor < bcolor_end && bcolor->y == i)) {
-      if (fcolor < fcolor_end && fcolor->y == i && fcolor->x <= x) {
-        TermColor tc = term_fcolor(fcolor->color);
+    while (styles < styles_end && styles->y == i) {
+      if (styles < styles_end && styles->y == i && styles->x <= x) {
+        TermCommand tc = term_stylecommand(*styles);
         array_push_a(*tmp_render_buffer, tc.str, tc.len);
-        ++fcolor;
+        ++styles;
       }
-      else if (bcolor < bcolor_end && bcolor->y == i && bcolor->x <= x) {
-        TermColor tc = term_bcolor(bcolor->color);
-        array_push_a(*tmp_render_buffer, tc.str, tc.len);
-        ++bcolor;
-      } else {
+      else {
         array_push(*tmp_render_buffer, row[x]);
         ++x;
       }
     }
-    array_push_a(*tmp_render_buffer, row, G.renderer.term_width-x);
+    array_push_a(*tmp_render_buffer, row+x, G.renderer.term_width-x);
   }
   term_cursor_move(0, 0);
   if (write(STDOUT_FILENO, *tmp_render_buffer, array_len(*tmp_render_buffer)) != array_len(*tmp_render_buffer))
     panic();
   term_cursor_move_p(pane_to_screen_pos(&G.main_pane));
-  term_show_cursor();
   fflush(stdout);
+
+  memset(G.renderer.screen_buffer, ' ', G.renderer.term_width * G.renderer.term_height * sizeof(*G.renderer.screen_buffer));
+  array_resize(G.renderer.style_commands, 0);
 }
 
 static void mode_search() {
@@ -1101,7 +1155,7 @@ static int process_input() {
         goto input_done;
       }
 
-      DEBUG(fprintf(stderr, "escape %c\n", c);)
+      IF_DEBUG(fprintf(stderr, "escape %c\n", c);)
 
       if (c >= '0' && c <= '9') {
         switch (c) {
@@ -1130,7 +1184,7 @@ static int process_input() {
     }
     else {
       input = c;
-      DEBUG(fprintf(stderr, "%c\n", c);)
+      IF_DEBUG(fprintf(stderr, "%c\n", c);)
     }
   }
 
@@ -1317,22 +1371,24 @@ void state_init() {
   /* read terminal dimensions */
   err = term_get_dimensions(&G.renderer.term_width, &G.renderer.term_height);
   if (err) panic();
-  DEBUG(fprintf(stderr, "terminal dimensions: %i %i\n", G.renderer.term_width, G.renderer.term_height););
+  IF_DEBUG(fprintf(stderr, "terminal dimensions: %i %i\n", G.renderer.term_width, G.renderer.term_height););
 
   /* set default settings */
   G.read_timeout_ms = 1;
   G.tab_width = 4;
   G.default_tab_type = 4;
 
-  /* allocate memory */
+  /* init screen buffer */
   G.renderer.screen_buffer = malloc(sizeof(*G.renderer.screen_buffer) * G.renderer.term_width * G.renderer.term_height);
+  memset(G.renderer.screen_buffer, ' ', G.renderer.term_width * G.renderer.term_height * sizeof(*G.renderer.screen_buffer));
 
+  /* init predefined buffers */
   buffer_empty(&G.menu_buffer);
   buffer_empty(&G.search_buffer);
   buffer_empty(&G.message_buffer);
   G.main_pane.background_color = COLOR_BLACK;
   G.main_pane.font_color = COLOR_WHITE;
-  G.bottom_pane.background_color = COLOR_RED;
+  G.bottom_pane.background_color = COLOR_CYAN;
   G.bottom_pane.font_color = COLOR_BLACK;
   G.bottom_pane.bounds = rect_create(0, G.renderer.term_height-1, G.renderer.term_width-1, 1);
   G.bottom_pane.buffer = &G.message_buffer;
@@ -1362,7 +1418,7 @@ int main(int argc, const char** argv) {
     return 1;
   }
 
-  test();
+  IF_DEBUG(test());
 
   /* set up terminal */
   term_enable_raw_mode();
@@ -1388,14 +1444,16 @@ int main(int argc, const char** argv) {
 
   while (1) {
 
-    /* clear rendering buffer */
-    memset(G.renderer.screen_buffer, ' ', G.renderer.term_width * G.renderer.term_height * sizeof(*G.renderer.screen_buffer));
-
     /* draw document */
     render_pane(&G.main_pane, 1);
 
     /* Draw menu/status bar */
     render_pane(&G.bottom_pane, 0);
+
+    /* Draw markers */
+    render_marker(&G.main_pane);
+    if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
+      render_marker(&G.bottom_pane);
 
     /* render to screen */
     render_flush();
@@ -1404,7 +1462,6 @@ int main(int argc, const char** argv) {
     err = process_input();
     if (err)
       break;
-
   }
 
   done:
