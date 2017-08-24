@@ -1,14 +1,15 @@
-/* CURRENT: Draw custom cursor
+/* CURRENT: The style command method is too weird (you need to have a stack and push and pop styles)
+ * Instead, keep a color/style per pixel
  *
  * TODO:
  *
- * 
  * Token autocomplete
  * Search backwards
  * Colorize search results in view
  * Color highlighting
  * Action search
  * Undo
+ * Multiple cursors
  *
  * load files
  * movement (word, parenthises, block)
@@ -61,9 +62,11 @@ static void panic() {
 static int at_least(int a, int b) {
   return a < b ? b : a;
 }
+#define max(a, b) at_least(a, b)
 static int at_most(int a, int b) {
   return b < a ? b : a;
 }
+#define min(a, b) at_most(a, b)
 /* a,b inclusive */
 static int clampi(int x, int a, int b) {
   return x < a ? a : (b < x ? b : x);
@@ -134,11 +137,20 @@ typedef struct Buffer {
 
   /* parser stuff */
   Array(Array(TokenInfo)) tokens;
+  Array(char*) identifiers;
 
   Pos pos;
 
   int modified;
 } Buffer;
+
+static int buffer_numlines(Buffer *b) {
+  return array_len(b->lines);
+}
+
+static int buffer_linesize(Buffer *b, int y) {
+  return array_len(b->lines[y]);
+}
 
 static void buffer_move_to(Buffer *b, int x, int y);
 static void buffer_goto_endline(Buffer *b) {
@@ -220,6 +232,10 @@ static int buffer_advance_r(Buffer *b) {
   return 0;
 }
 
+static char *buffer_getstr_p(Buffer *b, Pos p) {
+  return &b->lines[p.y][p.x];
+}
+
 static char buffer_getchar(Buffer *b, int x, int y) {
   return b->lines[y][x];
 }
@@ -249,12 +265,12 @@ static int buffer_find(Buffer *b, char *str, int n) {
   x = b->pos.x;
   y = b->pos.y;
 
-  for (; y < array_len(b->lines); ++y, x = 0) {
+  for (; y < buffer_numlines(b); ++y, x = 0) {
     char *p;
-    if (x >= array_len(b->lines[y]))
+    if (x >= buffer_linesize(b, y))
       continue;
 
-    p = memmem(str, n, b->lines[y]+x, array_len(b->lines[y])-x);
+    p = memmem(str, n, b->lines[y]+x, buffer_linesize(b, y)-x);
     if (!p)
       continue;
 
@@ -318,6 +334,15 @@ static void buffer_insert_tab(Buffer *b) {
       array_insert(b->lines[b->pos.y], b->pos.x, ' ');
     buffer_move(b, b->tab_type, 0);
   }
+}
+
+static void buffer_push_line(Buffer *b, const char *str) {
+  int y;
+
+  y = buffer_numlines(b);
+  array_push(b->lines, 0);
+  array_push_n(b->lines[y], (int)strlen(str));
+  strcpy(b->lines[y], str);
 }
 
 static void buffer_insert_newline(Buffer *b) {
@@ -431,11 +456,17 @@ static struct State {
 
   /* some editor state */
   Pane main_pane,
-       bottom_pane;
+       bottom_pane,
+       dropdown_pane;
   Buffer menu_buffer,
          search_buffer,
-         message_buffer;
+         message_buffer,
+         dropdown_buffer;
   Mode mode;
+
+  /* dropdown state */
+  Pos dropdown_pos; /* where dropdown was initialized */
+  int dropdown_visible;
 
   /* search state */
   int search_failed;
@@ -446,6 +477,7 @@ static struct State {
   int read_timeout_ms;
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
+  int dropdown_size;
 } G;
 
 static void render_strn(int x0, int x1, int y, const char* str, int n) {
@@ -520,26 +552,30 @@ static int pane_calc_top_visible_row(Pane *pane) {
 }
 
 static int pane_calc_bottom_visible_row(Pane *pane) {
-  return at_most(pane_calc_top_visible_row(pane) + pane->bounds.h, array_len(pane->buffer->lines)) - 1;
+  return at_most(pane_calc_top_visible_row(pane) + pane->bounds.h, buffer_numlines(pane->buffer)) - 1;
 }
 
 static int pane_calc_left_visible_column(Pane *pane) {
   return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->bounds.w - pane->gutter_width - 3));
 }
 
-static Pos pane_to_screen_pos(Pane *pane) {
+static Pos pane_to_screen_pos_xy(Pane *pane, int x, int y) {
   Pos result = {0};
   Array(char) line;
 
-  line = pane->buffer->lines[pane->buffer->pos.y];
-  result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, pane->buffer->pos.x) - pane_calc_left_visible_column(pane);
+  line = pane->buffer->lines[y];
+  result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, x) - pane_calc_left_visible_column(pane);
   /* try to center */
-  result.y = pane->bounds.y + pane->buffer->pos.y - pane_calc_top_visible_row(pane);
+  result.y = pane->bounds.y + y - pane_calc_top_visible_row(pane);
   return result;
 }
 
+static Pos pane_to_screen_pos(Pane *pane) {
+  return pane_to_screen_pos_xy(pane, pane->buffer->pos.x, pane->buffer->pos.y);
+}
+
 static void buffer_move_to(Buffer *b, int x, int y) {
-  y = clampi(y, 0, array_len(b->lines)-1);
+  y = clampi(y, 0, buffer_numlines(b)-1);
   b->pos.y = y;
   x = clampi(x, 0, array_len(b->lines[y]));
   b->pos.x = x;
@@ -590,28 +626,28 @@ static void status_message_set(const char *fmt, ...) {
   array_resize(G.message_buffer.lines[0], G.renderer.term_width-1);
 
   va_start(args, fmt);
-  n = vsnprintf(G.message_buffer.lines[0], array_len(G.message_buffer.lines[0]), fmt, args);
+  n = vsnprintf(G.message_buffer.lines[0], buffer_linesize(&G.message_buffer, 0), fmt, args);
   va_end(args);
 
-  n = at_most(n, array_len(G.message_buffer.lines[0]));
+  n = at_most(n, buffer_linesize(&G.message_buffer, 0));
   array_resize(G.message_buffer.lines[0], n);
 }
 
 /****** @TOKENIZER ******/
 
 static void tokenizer_push_token(Array(Array(TokenInfo)) *tokens, int x, int y, Token token) {
-  if (array_len(*tokens) < y)
-    array_resize(*tokens, y+1);
+  array_reserve(*tokens, y+1);
   array_push((*tokens)[y], tokeninfo_create(token, x));
 }
 
 static void tokenize(Buffer *b) {
+  static Array(char) identifier_buffer;
   int x = 0, y = 0, i;
 
   /* reset old tokens */
   for (i = 0; i < array_len(b->tokens); ++i)
     array_free(b->tokens[i]);
-  array_resize(b->tokens, array_len(b->lines));
+  array_resize(b->tokens, buffer_numlines(b));
   for (i = 0; i < array_len(b->tokens); ++i)
     b->tokens[i] = 0;
 
@@ -625,11 +661,28 @@ static void tokenize(Buffer *b) {
 
     /* identifier */
     if (isalpha(buffer_getchar(b, x, y))) {
+      char c, *str;
+
+      array_resize(identifier_buffer, 0);
       /* TODO: predefined keywords */
       tokenizer_push_token(&b->tokens, x, y, TOKEN_IDENTIFIER);
-      while (isalnum(buffer_getchar(b, x, y)))
+
+      while (isalnum(c = buffer_getchar(b, x, y))) {
+        array_push(identifier_buffer, c);
         if (buffer_advance_xy(b, &x, &y))
-          return;
+          break;
+      }
+      array_push(identifier_buffer, 0);
+      /* check if identifier already exists */
+      for (i = 0; i < array_len(b->identifiers); ++i)
+        if (strcmp(identifier_buffer, b->identifiers[i]) == 0)
+          goto identifier_done;
+
+      str = malloc(array_len(identifier_buffer));
+      strcpy(str, identifier_buffer);
+      array_push(b->identifiers, str);
+
+      identifier_done:;
     }
 
     /* number */
@@ -650,6 +703,7 @@ static void tokenize(Buffer *b) {
       if (buffer_advance_xy(b, &x, &y))
         return;
     }
+
   }
 }
 
@@ -958,7 +1012,7 @@ static void render_pane(Pane *p, int draw_gutter) {
 
   /* recalc gutter width */
   if (draw_gutter)
-    p->gutter_width = calc_num_chars(array_len(b->lines)) + 1;
+    p->gutter_width = calc_num_chars(buffer_numlines(b)) + 1;
   else
     p->gutter_width = 0;
 
@@ -973,20 +1027,21 @@ static void render_pane(Pane *p, int draw_gutter) {
   for (; i <= i_end; ++i, ++y) {
     Array(char) line;
 
-    if (i >= array_len(b->lines))
+    if (i >= buffer_numlines(b)) {
       render_clear(x0, x1, y);
-    else {
-      line = b->lines[i];
-
-      /* gutter */
-      render_str(x0, x0+p->gutter_width, y, "%i", i+1);
-
-      if (!line || array_len(line) <= line_offset_x)
-        continue;
-
-      /* text */
-      render_strn(x0 + p->gutter_width, x1, y, line + line_offset_x, array_len(line) - line_offset_x);
+      continue;
     }
+
+    line = b->lines[i];
+
+    /* gutter */
+    render_str(x0, x0+p->gutter_width, y, "%i", i+1);
+
+    if (!line || array_len(line) <= line_offset_x)
+      continue;
+
+    /* text */
+    render_strn(x0 + p->gutter_width, x1, y, line + line_offset_x, array_len(line) - line_offset_x);
   }
 }
 
@@ -1003,7 +1058,7 @@ static void save_buffer(Buffer *b) {
   }
 
   /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
-  for (i = 0; i < array_len(b->lines); ++i) {
+  for (i = 0; i < buffer_numlines(b); ++i) {
     unsigned int num_to_write = array_len(b->lines[i]);
     if (fwrite(b->lines[i], 1, num_to_write, f) != num_to_write) {
       status_message_set("Failed to write to %s: %s", b->filename, strerror(errno));
@@ -1090,6 +1145,9 @@ static void mode_delete() {
 static void mode_normal(int set_message) {
   G.mode = MODE_NORMAL;
   G.bottom_pane.buffer = &G.message_buffer;
+
+  G.dropdown_visible = 0;
+
   if (set_message)
     status_message_set("normal");
 }
@@ -1097,6 +1155,7 @@ static void mode_normal(int set_message) {
 static void mode_insert() {
   G.mode = MODE_INSERT;
   G.bottom_pane.buffer = &G.message_buffer;
+  G.dropdown_visible = 0;
   status_message_set("insert");
 }
 
@@ -1106,6 +1165,67 @@ static void mode_menu() {
   buffer_empty(&G.menu_buffer);
 }
 
+static void dropdown_render(Pane *active_pane) {
+  int i, max_width, input_len;
+  char *input_str;
+  Array(char*) identifiers;
+  Buffer *active_buffer;
+  Pos p;
+
+  active_buffer = active_pane->buffer;
+  identifiers = active_buffer->identifiers;
+
+  /* this shouldn't happen.. but just to be safe */
+  if (G.dropdown_pos.y != active_pane->buffer->pos.y) {
+    G.dropdown_visible = 0;
+    return;
+  }
+
+  /* find matching identifiers */
+  input_str = buffer_getstr_p(active_pane->buffer, G.dropdown_pos);
+  input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
+  buffer_empty(&G.dropdown_buffer);
+  for (i = 0, max_width = 0; i < array_len(identifiers); ++i) {
+    if (strncmp(input_str, identifiers[i], input_len))
+      continue;
+
+    buffer_push_line(&G.dropdown_buffer, identifiers[i]);
+    max_width = max(max_width, strlen(identifiers[i]));
+
+    if (buffer_numlines(&G.dropdown_buffer) == G.dropdown_size)
+      break;
+  }
+
+  /* position pane */
+  p = pane_to_screen_pos_xy(active_pane, G.dropdown_pos.x, G.dropdown_pos.y);
+  G.dropdown_pane.bounds.x = p.x;
+  G.dropdown_pane.bounds.y = p.y+1;
+  G.dropdown_pane.bounds.h = buffer_numlines(&G.dropdown_buffer);
+  G.dropdown_pane.bounds.w = max_width;
+
+  if (G.dropdown_visible)
+    render_pane(&G.dropdown_pane, 0);
+}
+
+static void dropdown_update(Pane *active_pane, int input) {
+
+  if (!G.dropdown_visible) {
+    if (!isalpha(input))
+      goto dropdown_hide;
+
+    G.dropdown_pos = active_pane->buffer->pos;
+  }
+  else
+    if (!isalnum(input))
+      goto dropdown_hide;
+
+  G.dropdown_visible = 1;
+  return;
+
+  dropdown_hide:
+  G.dropdown_visible = 0;
+}
+
 static void insert_default(Pane *p, int input) {
   Buffer *b = p->buffer;
 
@@ -1113,6 +1233,7 @@ static void insert_default(Pane *p, int input) {
   if (input == KEY_ESCAPE)
     mode_normal(1);
   else if (!key_is_special(input)) {
+    dropdown_update(&G.main_pane, input);
     buffer_insert_char(b, input);
   } else {
     switch (input) {
@@ -1204,7 +1325,7 @@ static int process_input() {
   switch (G.mode) {
     case MODE_MENU:
       G.bottom_pane.buffer = &G.menu_buffer;
-      if (input == KEY_RETURN && array_len(G.menu_buffer.lines[0]) > 0) {
+      if (input == KEY_RETURN && buffer_linesize(&G.menu_buffer, 0) > 0) {
         Array(char) line;
 
         line = G.menu_buffer.lines[0];
@@ -1218,13 +1339,13 @@ static int process_input() {
         else if (IS_OPTION("save")) {
           save_buffer(G.main_pane.buffer);
           /* TODO: write out absolute path, instead of relative */
-          status_message_set("Wrote %i lines to %s", array_len(G.main_pane.buffer->lines), G.main_pane.buffer->filename);
+          status_message_set("Wrote %i lines to %s", buffer_numlines(G.main_pane.buffer), G.main_pane.buffer->filename);
           mode_normal(0);
         }
         else if (IS_OPTION("quit") || IS_OPTION("exit"))
           return 1;
         else {
-          status_message_set("Unknown option '%.*s'", array_len(G.menu_buffer.lines[0]), G.menu_buffer.lines[0]);
+          status_message_set("Unknown option '%.*s'", buffer_linesize(&G.menu_buffer, 0), G.menu_buffer.lines[0]);
           mode_normal(0);
         }
 
@@ -1286,7 +1407,7 @@ static int process_input() {
           old_pos = G.main_pane.buffer->pos;
 
           buffer_advance(G.main_pane.buffer);
-          err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], array_len(G.search_buffer.lines[0]));
+          err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0));
           if (err)
             G.main_pane.buffer->pos = old_pos;
         } break;
@@ -1324,7 +1445,7 @@ static int process_input() {
           buffer_move_to(G.main_pane.buffer, 0, 0);
           break;
         case 'b':
-          buffer_move_to(G.main_pane.buffer, 0, array_len(G.main_pane.buffer->lines)-1);
+          buffer_move_to(G.main_pane.buffer, 0, buffer_numlines(G.main_pane.buffer)-1);
           break;
       }
       mode_normal(1);
@@ -1387,6 +1508,7 @@ void state_init() {
   G.read_timeout_ms = 1;
   G.tab_width = 4;
   G.default_tab_type = 4;
+  G.dropdown_size = 7;
 
   /* init screen buffer */
   G.renderer.screen_buffer = malloc(sizeof(*G.renderer.screen_buffer) * G.renderer.term_width * G.renderer.term_height);
@@ -1396,12 +1518,25 @@ void state_init() {
   buffer_empty(&G.menu_buffer);
   buffer_empty(&G.search_buffer);
   buffer_empty(&G.message_buffer);
+  buffer_empty(&G.dropdown_buffer);
+
   G.main_pane.background_color = COLOR_BLACK;
   G.main_pane.font_color = COLOR_WHITE;
+
   G.bottom_pane.background_color = COLOR_CYAN;
   G.bottom_pane.font_color = COLOR_BLACK;
   G.bottom_pane.bounds = rect_create(0, G.renderer.term_height-1, G.renderer.term_width-1, 1);
   G.bottom_pane.buffer = &G.message_buffer;
+
+  G.dropdown_pane.buffer = &G.dropdown_buffer;
+  G.dropdown_pane.background_color = COLOR_BLUE;
+  G.dropdown_pane.font_color = COLOR_BLACK;
+
+  G.main_pane.bounds.x = 0;
+  G.main_pane.bounds.y = 0;
+  G.main_pane.bounds.w = G.renderer.term_width - 1;
+  G.main_pane.bounds.h = G.renderer.term_height - 2; /* leave room for menu */
+
 }
 
 #ifdef DEBUG
@@ -1445,11 +1580,7 @@ int main(int argc, const char** argv) {
       goto done;
     }
     if (!err)
-      status_message_set("loaded %s, %i lines", filename, array_len(G.main_pane.buffer->lines));
-    G.main_pane.bounds.x = 0;
-    G.main_pane.bounds.y = 0;
-    G.main_pane.bounds.w = G.renderer.term_width - 1;
-    G.main_pane.bounds.h = G.renderer.term_height - 2; /* leave room for menu */
+      status_message_set("loaded %s, %i lines", filename, buffer_numlines(G.main_pane.buffer));
   }
 
   while (1) {
@@ -1457,8 +1588,11 @@ int main(int argc, const char** argv) {
     /* draw document */
     render_pane(&G.main_pane, 1);
 
-    /* Draw menu/status bar */
+    /* draw menu/status bar */
     render_pane(&G.bottom_pane, 0);
+
+    /* draw dropdown ? */
+    dropdown_render(&G.main_pane);
 
     /* Draw markers */
     render_marker(&G.main_pane);
