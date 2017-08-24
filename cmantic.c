@@ -739,6 +739,10 @@ static void term_cursor_move_p(Pos p) {
   term_cursor_move(p.x, p.y);
 }
 
+static void term_reset_video() {
+  if (write(STDOUT_FILENO, "\x1b[0m", 4) != 4) panic();
+}
+
 static void term_inverse_video(int state) {
   static int inv = 0;
   int val;
@@ -791,10 +795,16 @@ static void term_enable_raw_mode() {
 }
 
 static void term_reset_to_default_settings() {
+  static int panicking = 0;
+  /* to prevent recursion in term_* functions */
+  if (panicking)
+    return;
+  panicking = 1;
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &G.orig_termios);
   term_clear_screen();
   term_show_cursor();
   term_cursor_move(0,0);
+  term_reset_video();
 }
 
 /* returns:
