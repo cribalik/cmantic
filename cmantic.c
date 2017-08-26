@@ -1,9 +1,8 @@
-/* CURRENT: The style command method is too weird (you need to have a stack and push and pop styles)
- * Instead, keep a color/style per pixel
+/* CURRENT: Fuzzy autocomplete
  *
  * TODO:
  *
- * Token autocomplete
+ * Autocomplete other buffers
  * Search backwards
  * Colorize search results in view
  * Color highlighting
@@ -59,6 +58,21 @@ STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
 static void array_push_str(Array(char) *a, const char *str) {
   for (; *str; ++str)
     array_push(*a, *str);
+}
+
+static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
+  char *h, *hend;
+
+  if (!needle_len || haystack_len < needle_len)
+    return 0;
+
+  h = haystack;
+  hend = h + haystack_len - needle_len + 1;
+
+  for (; h < hend; ++h)
+    if (memcmp(needle, h, needle_len) == 0)
+      return h;
+  return 0;
 }
 
 static void term_reset_to_default_settings();
@@ -160,13 +174,14 @@ static int buffer_linesize(Buffer *b, int y) {
   return array_len(b->lines[y]);
 }
 
-static void buffer_move_to(Buffer *b, int x, int y);
 static void buffer_goto_endline(Buffer *b) {
   b->pos.ghost_x = -1;
 }
 
 static void buffer_empty(Buffer *b) {
   int i;
+
+  b->modified = 1;
 
   for (i = 0; i < array_len(b->lines); ++i)
     array_free(b->lines[i]);
@@ -179,6 +194,7 @@ static void buffer_empty(Buffer *b) {
 static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   int i;
 
+  b->modified = 1;
   n = at_least(n, 1);
 
   if (n >= array_len(b->lines))
@@ -240,6 +256,14 @@ static int buffer_advance_r(Buffer *b) {
   return 0;
 }
 
+static Array(char) buffer_getline(Buffer *b, int y) {
+  return b->lines[y];
+}
+
+static char *buffer_getstr(Buffer *b, int x, int y) {
+  return &b->lines[y][x];
+}
+
 static char *buffer_getstr_p(Buffer *b, Pos p) {
   return &b->lines[p.y][p.x];
 }
@@ -248,22 +272,10 @@ static char buffer_getchar(Buffer *b, int x, int y) {
   return b->lines[y][x];
 }
 
-static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
-  char *h, *hend;
-
-  if (!needle_len || haystack_len < needle_len)
-    return 0;
-
-  h = haystack;
-  hend = h + haystack_len - needle_len + 1;
-
-  for (; h < hend; ++h)
-    if (memcmp(needle, h, needle_len) == 0)
-      return h;
-  return 0;
-}
-
+static void buffer_move_to(Buffer *b, int x, int y);
+static void buffer_move(Buffer *b, int x, int y);
 static void status_message_set(const char *fmt, ...);
+
 static int buffer_find(Buffer *b, char *str, int n) {
   int x, y;
 
@@ -290,6 +302,20 @@ static int buffer_find(Buffer *b, char *str, int n) {
   return 1;
 }
 
+
+static void buffer_insert_str(Buffer *b, int x, int y, const char *str, int n) {
+  b->modified = 1;
+  array_insert_a(b->lines[y], x, str, n);
+  buffer_move(b, n, 0);
+}
+
+static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, int n) {
+  b->modified = 1;
+  array_remove_slow_n(b->lines[y], x0, x1-x0);
+  buffer_move_to(b, x0, y);
+  buffer_insert_str(b, x0, y, str, n);
+}
+
 static void buffer_move(Buffer *b, int x, int y);
 static void buffer_insert_char(Buffer *b, char ch) {
   b->modified = 1;
@@ -298,6 +324,7 @@ static void buffer_insert_char(Buffer *b, char ch) {
 }
 
 static void buffer_delete_line_at(Buffer *b, int y) {
+  b->modified = 1;
   array_free(b->lines[y]);
   if (array_len(b->lines) == 1)
     return;
@@ -309,6 +336,7 @@ static void buffer_delete_line(Buffer *b) {
 }
 
 static void buffer_delete_char(Buffer *b) {
+  b->modified = 1;
   if (b->pos.x == 0) {
     int i;
 
@@ -349,19 +377,23 @@ static int buffer_isempty(Buffer *b) {
 }
 
 static void buffer_push_line(Buffer *b, const char *str) {
-  int y;
+  int y, l;
 
+  b->modified = 1;
   y = buffer_numlines(b);
   if (!buffer_isempty(b))
     array_push(b->lines, 0);
   else
     y = 0;
-  array_push_n(b->lines[y], (int)strlen(str));
-  strcpy(b->lines[y], str);
+  l = strlen(str);
+  array_push_n(b->lines[y], l);
+  memcpy(b->lines[y], str, l);
 }
 
 static void buffer_insert_newline(Buffer *b) {
   int left_of_line;
+
+  b->modified = 1;
 
   left_of_line = array_len(b->lines[b->pos.y]) - b->pos.x;
   array_insert(b->lines, b->pos.y + 1, 0);
@@ -458,6 +490,37 @@ static struct State {
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
   int dropdown_size;
 } G;
+
+static void buffer_guess_tab_type(Buffer *b) {
+  int i;
+  /* try to figure out tab type */
+  /* TODO: use tokens here instead, so we skip comments */
+  b->tab_type = -1;
+  for (i = 0; i < array_len(b->lines); ++i) {
+    if (!b->lines[i])
+      continue;
+
+    if (b->lines[i][0] == '\t') {
+      b->tab_type = 0;
+    }
+    else if (b->lines[i][0] == ' ') {
+      int num_spaces = 0;
+      int j;
+
+      for (j = 0; j < array_len(b->lines[i]) && b->lines[i][j] == ' '; ++j)
+        ++num_spaces;
+
+      if (j == array_len(b->lines[i]))
+        continue;
+
+      b->tab_type = num_spaces;
+    }
+    else
+      continue;
+  }
+  if (b->tab_type == -1)
+    b->tab_type = G.default_tab_type;
+}
 
 static void render_strn(int x0, int x1, int y, const char* str, int n) {
   Pixel *row = &G.screen_buffer[G.term_width*y];
@@ -634,6 +697,7 @@ static void tokenize(Buffer *b) {
     b->tokens[i] = 0;
 
   for (;;) {
+    Array(char) row;
     /* whitespace */
     while (isspace(buffer_getchar(b, x, y)))
       if (buffer_advance_xy(b, &x, &y))
@@ -642,17 +706,18 @@ static void tokenize(Buffer *b) {
     /* TODO: how do we handle comments ? */
 
     /* identifier */
-    if (isalpha(buffer_getchar(b, x, y))) {
-      char c, *str;
+    row = buffer_getline(b, y);
+    if (isalpha(row[x]) || row[x] == '_') {
+      char *str;
 
       array_resize(identifier_buffer, 0);
       /* TODO: predefined keywords */
       tokenizer_push_token(&b->tokens, x, y, TOKEN_IDENTIFIER);
 
-      while (isalnum(c = buffer_getchar(b, x, y))) {
-        array_push(identifier_buffer, c);
-        if (buffer_advance_xy(b, &x, &y))
+      for (; x < array_len(row); ++x) {
+        if (!isalnum(row[x]) && row[x] != '_')
           break;
+        array_push(identifier_buffer, row[x]);
       }
       array_push(identifier_buffer, 0);
       /* check if identifier already exists */
@@ -668,24 +733,22 @@ static void tokenize(Buffer *b) {
     }
 
     /* number */
-    else if (isdigit(buffer_getchar(b, x, y))) {
+    else if (isdigit(row[x])) {
       tokenizer_push_token(&b->tokens, x, y, TOKEN_NUMBER);
-      while (isdigit(buffer_getchar(b, x, y)))
-        if (buffer_advance_xy(b, &x, &y))
-          return;
+      for (; x < array_len(row) && isdigit(row[x]); ++x);
       if (buffer_getchar(b, x, y) == '.')
-        while (isdigit(buffer_getchar(b, x, y)))
-          if (buffer_advance_xy(b, &x, &y))
-            return;
+        for (; x < array_len(row) && isdigit(row[x]); ++x);
     }
 
     /* single char token */
     else {
-      tokenizer_push_token(&b->tokens, x, y, buffer_getchar(b, x, y));
+      tokenizer_push_token(&b->tokens, x, y, row[x]);
       if (buffer_advance_xy(b, &x, &y))
         return;
     }
 
+    if (x == array_len(row))
+      buffer_advance_xy(b, &x, &y);
   }
 }
 
@@ -897,41 +960,17 @@ static int file_open(const char* filename, Buffer *buffer_out) {
 
   tokenize(&buffer);
 
-  /* try to figure out tab type */
-  /* TODO: use tokens here instead, so we skip comments */
-  buffer.tab_type = -1;
-  for (i = 0; i < array_len(buffer.lines); ++i) {
-    if (!buffer.lines[i])
-      continue;
-
-    if (buffer.lines[i][0] == '\t') {
-      buffer.tab_type = 0;
-    }
-    else if (buffer.lines[i][0] == ' ') {
-      int num_spaces = 0;
-      int j;
-
-      for (j = 0; j < array_len(buffer.lines[i]) && buffer.lines[i][j] == ' '; ++j)
-        ++num_spaces;
-
-      if (j == array_len(buffer.lines[i]))
-        continue;
-
-      buffer.tab_type = num_spaces;
-    }
-    else
-      continue;
-  }
-  if (buffer.tab_type == -1)
-    buffer.tab_type = G.default_tab_type;
+  buffer_guess_tab_type(&buffer);
 
   *buffer_out = buffer;
+  fclose(f);
   return 0;
 
   err:
   for (i = 0; i < array_len(buffer.lines); ++i)
     array_free(buffer.lines[i]);
   array_free(buffer.lines);
+  fclose(f);
 
   return -1;
 }
@@ -1152,9 +1191,9 @@ static void dropdown_render(Pane *active_pane) {
   }
 
   /* find matching identifiers */
+  buffer_empty(&G.dropdown_buffer);
   input_str = buffer_getstr_p(active_pane->buffer, G.dropdown_pos);
   input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
-  buffer_empty(&G.dropdown_buffer);
   for (i = 0, max_width = 0; i < array_len(identifiers); ++i) {
     if (strncmp(input_str, identifiers[i], input_len))
       continue;
@@ -1173,20 +1212,20 @@ static void dropdown_render(Pane *active_pane) {
   G.dropdown_pane.bounds.h = buffer_numlines(&G.dropdown_buffer);
   G.dropdown_pane.bounds.w = max_width + 5;
 
-  if (G.dropdown_visible)
+  if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
     render_pane(&G.dropdown_pane, 0);
 }
 
 static void dropdown_update(Pane *active_pane, int input) {
 
   if (!G.dropdown_visible) {
-    if (!isalpha(input))
+    if (!isalpha(input) && input != '_')
       goto dropdown_hide;
 
     G.dropdown_pos = active_pane->buffer->pos;
   }
   else
-    if (!isalnum(input))
+    if (!isalnum(input) && input != '_')
       goto dropdown_hide;
 
   G.dropdown_visible = 1;
@@ -1211,9 +1250,22 @@ static void insert_default(Pane *p, int input) {
         buffer_insert_newline(b);
         break;
 
-      case KEY_TAB:
-        buffer_insert_tab(b);
-        break;
+      case KEY_TAB: {
+        if (G.dropdown_visible) {
+          char *str;
+          int l;
+
+          if (buffer_isempty(&G.dropdown_buffer))
+            break;
+
+          str = G.dropdown_buffer.lines[0];
+          l = buffer_linesize(&G.dropdown_buffer, 0);
+          buffer_replace(b, G.dropdown_pos.x, b->pos.x, b->pos.y, str, l);
+          G.dropdown_visible = 0;
+        }
+        else
+          buffer_insert_tab(b);
+      } break;
 
       case KEY_BACKSPACE:
         buffer_delete_char(b);
@@ -1499,7 +1551,7 @@ static void state_init() {
   G.bottom_pane.buffer = &G.message_buffer;
 
   G.dropdown_pane.buffer = &G.dropdown_buffer;
-  G.dropdown_pane.background_color = COLOR_BLUE;
+  G.dropdown_pane.background_color = COLOR_MAGENTA;
   G.dropdown_pane.font_color = COLOR_BLACK;
 
   G.main_pane.bounds = rect_create(0, 0, G.term_width-1, G.term_height-1);

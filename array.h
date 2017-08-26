@@ -34,10 +34,11 @@
 #define Array(type) type*
 
 #define array_insert(a, i, x) (array_resize((a), array_len(a)+1), memmove((a)+(i)+1, (a)+(i), (array__n(a) - (i)) * sizeof(*(a))), (a)[i] = (x))
+#define array_insert_a(a, i, val, n) (array_resize((a), array_len(a)+(n)), memmove((a)+(i)+(n), (a)+(i), (array__n(a)-(n)-(i)) * sizeof(*(a))), memcpy((a)+(i), val, (n)*sizeof(*(val))))
 #define array_len(a) ((a) ? array__n(a) : 0)
 #define array_len_get(a) (array__n(a))
 #define array_push(a, val) ((!(a) || array__n(a) == array__c(a) ? (a)=array__grow(a, sizeof(*(a)), 1) : 0), (a)[array__n(a)++] = val)
-#define array_push_a(a, val, n) (array_resize(a, array_len(a)+(n)), memcpy((a)+array_len(a)-(n), val, n * sizeof(*(val))))
+#define array_push_a(a, val, n) (array_resize(a, array_len(a)+(n)), memcpy((a)+array__n(a)-(n), val, (n) * sizeof(*(val))))
 #define array_push_n(a, n) ((!(a) || array__n(a)+(n) >= array__c(a) ? (a)=array__grow(a, sizeof(*(a)), (n)) : 0), array__n(a) += (n))
 #define array_last(a) (!(a) ? 0 : (a)+array__n(a)-1)
 #define array_free(a) (((a) ? ARRAY_FREE(&array__n(a)),0 : 0), (a) = 0)
@@ -46,6 +47,7 @@
 #define array_reserve(a, n) ((n) > array_len(a) ? array_resize((a), (n)) : 0)
 /* Preserves ordering */
 #define array_remove_slow(a, i) ((a) && array__n(a) > 0 ? memmove((a)+(i), (a)+(i)+1, sizeof(*(a)) * (array__n(a)-i-1)), --array__n(a) : 0)
+#define array_remove_slow_n(a, i, n) ((a) && array__n(a) > 0 ? memmove((a)+(i), (a)+(i)+(n), sizeof(*(a)) * (array__n(a)-i-(n))), array__n(a)-=(n) : 0)
 /* Swaps in the last element */
 #define array_remove_fast(a, i) ((a) && array__n(a) > 0 ? (a)[i] = (a)[array__n(a)--],0 : 0)
 
