@@ -1045,7 +1045,7 @@ static void render_pane(Pane *p, int draw_gutter) {
     line = b->lines[i];
 
     /* gutter */
-    render_str(x0, x0+p->gutter_width, y, "%i", i+1);
+    render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, i+1);
 
     if (!line || array_len(line) <= line_offset_x)
       continue;
@@ -1091,7 +1091,12 @@ static void screen_buffer_reset() {
   }
 }
 
-static void resize(int w, int h) {
+static void check_terminal_resize() {
+  int w,h;
+  term_get_dimensions(&w, &h);
+  if (w == G.term_width && h == G.term_height)
+    return;
+
   G.term_width = w;
   G.term_height = h;
   free(G.screen_buffer);
@@ -1102,7 +1107,7 @@ static void resize(int w, int h) {
 }
 
 static void render_flush() {
-  int x,y,w,h;
+  int x,y;
   Style style;
 
   array_resize(G.tmp_render_buffer, 0);
@@ -1135,9 +1140,6 @@ static void render_flush() {
 
   screen_buffer_reset();
 
-  term_get_dimensions(&w, &h);
-  if (w != G.term_width || h != G.term_height)
-    resize(w, h);
 }
 
 static void mode_search() {
@@ -1372,7 +1374,7 @@ static int process_input() {
   {
     unsigned char c;
     int nread;
-    while ((nread = read_timeout(&c, 1, 0)) != 1 && nread != 0)
+    while ((nread = read_timeout(&c, 1, 0)) != 1)
       if (nread == -1 && errno != EAGAIN)
         return 1;
 
@@ -1435,8 +1437,13 @@ static int process_input() {
   switch (G.mode) {
     case MODE_MENU:
       G.bottom_pane.buffer = &G.menu_buffer;
-      if (input == KEY_RETURN && buffer_linesize(&G.menu_buffer, 0) > 0) {
+      if (input == KEY_RETURN) {
         Array(char) line;
+
+        if (buffer_isempty(&G.menu_buffer)) {
+          mode_normal(1);
+          break;
+        }
 
         line = G.menu_buffer.lines[0];
         #define IS_OPTION(str) (array_len(line) == strlen(str) && strncmp(line, str, array_len(line)) == 0)
@@ -1719,6 +1726,8 @@ int main(int argc, const char **argv) {
     err = process_input();
     if (err)
       break;
+
+    check_terminal_resize();
   }
 
   done:
