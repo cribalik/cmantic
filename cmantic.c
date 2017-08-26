@@ -1557,8 +1557,10 @@ static int process_input() {
         G.goto_line_number *= 10;
         G.goto_line_number += input - '0';
         buffer_move_to_y(G.main_pane.buffer, G.goto_line_number-1);
+        status_message_set("goto %u", G.goto_line_number);
         break;
       }
+
       switch (input) {
         case 't':
           buffer_move_to(G.main_pane.buffer, 0, 0);
