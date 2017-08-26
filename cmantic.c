@@ -1,4 +1,4 @@
-/* CURRENT: Fuzzy autocomplete
+/* CURRENT:
  *
  * TODO:
  *
@@ -11,7 +11,7 @@
  * Multiple cursors
  *
  * load files
- * movement (word, parenthises, block)
+ * movement (word, parentheses, block)
  * actions (Delete, Yank, ...)
  * add folders
  */
@@ -34,7 +34,7 @@
 #if 0
   #define DEBUG
   #define IF_DEBUG(stmt) stmt
-  static void* debug_malloc(unsigned long size, int line, const char* file) {
+  static void* debug_malloc(unsigned long size, int line, const char *file) {
     struct Header {
       int line;
       const char *file;
@@ -154,7 +154,7 @@ typedef struct {
 
 typedef struct Buffer {
   Array(Array(char)) lines;
-  const char* filename;
+  const char *filename;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
   /* parser stuff */
@@ -261,7 +261,7 @@ static Array(char) buffer_getline(Buffer *b, int y) {
 }
 
 static char *buffer_getstr(Buffer *b, int x, int y) {
-  return &b->lines[y][x];
+  return b->lines[y]+x;
 }
 
 static char *buffer_getstr_p(Buffer *b, Pos p) {
@@ -479,6 +479,9 @@ static struct State {
   Pos dropdown_pos; /* where dropdown was initialized */
   int dropdown_visible;
 
+  /* goto state */
+  unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
+
   /* search state */
   int search_failed;
   Pos search_begin_pos;
@@ -522,7 +525,7 @@ static void buffer_guess_tab_type(Buffer *b) {
     b->tab_type = G.default_tab_type;
 }
 
-static void render_strn(int x0, int x1, int y, const char* str, int n) {
+static void render_strn(int x0, int x1, int y, const char *str, int n) {
   Pixel *row = &G.screen_buffer[G.term_width*y];
 
   if (!str)
@@ -543,7 +546,7 @@ static void render_strn(int x0, int x1, int y, const char* str, int n) {
     row[x0].c = ' ';
 }
 
-static void render_str_v(int x0, int x1, int y, const char* fmt, va_list args) {
+static void render_str_v(int x0, int x1, int y, const char *fmt, va_list args) {
   int n;
 
   array_resize(G.tmp_render_buffer, x1-x0+1);
@@ -551,7 +554,7 @@ static void render_str_v(int x0, int x1, int y, const char* fmt, va_list args) {
   render_strn(x0, x1, y, G.tmp_render_buffer, n);
 }
 
-static void render_str(int x0, int x1, int y, const char* fmt, ...) {
+static void render_str(int x0, int x1, int y, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   render_str_v(x0, x1, y, fmt, args);
@@ -619,9 +622,13 @@ static Pos pane_to_screen_pos(Pane *pane) {
   return pane_to_screen_pos_xy(pane, pane->buffer->pos.x, pane->buffer->pos.y);
 }
 
-static void buffer_move_to(Buffer *b, int x, int y) {
+static void buffer_move_to_y(Buffer *b, int y) {
   y = clampi(y, 0, buffer_numlines(b)-1);
   b->pos.y = y;
+}
+
+static void buffer_move_to(Buffer *b, int x, int y) {
+  buffer_move_to_y(b, y);
   x = clampi(x, 0, array_len(b->lines[y]));
   b->pos.x = x;
   b->pos.ghost_x = x;
@@ -913,7 +920,7 @@ static int calc_num_chars(int i) {
 }
 
 /* grabs ownership of filename */
-static int file_open(const char* filename, Buffer *buffer_out) {
+static int file_open(const char *filename, Buffer *buffer_out) {
   int row, num_lines, i;
   Buffer buffer = {0};
   FILE* f;
@@ -1011,9 +1018,12 @@ static void render_pane(Pane *p, int draw_gutter) {
   x1 = p->bounds.x + p->bounds.w;
   y = p->bounds.y;
 
-  /* recalc gutter width */
+  /* calc gutter width */
+  i = pane_calc_top_visible_row(p);
+  i_end = pane_calc_bottom_visible_row(p)+1;
+
   if (draw_gutter)
-    p->gutter_width = calc_num_chars(buffer_numlines(b)) + 1;
+    p->gutter_width = calc_num_chars(i_end) + 1;
   else
     p->gutter_width = 0;
 
@@ -1021,11 +1031,10 @@ static void render_pane(Pane *p, int draw_gutter) {
 
   render_set_background_color(p->background_color, x0, x1, y, y+p->bounds.h);
   render_set_font_color(p->font_color, x0, x1, y, y+p->bounds.h);
+  render_set_font_color(COLOR_YELLOW, x0, x0+p->gutter_width - 1, p->bounds.y, p->bounds.y+p->bounds.h);
 
   /* calc where we start */
-  i = pane_calc_top_visible_row(p);
-  i_end = pane_calc_bottom_visible_row(p);
-  for (; i <= i_end; ++i, ++y) {
+  for (; i < i_end; ++i, ++y) {
     Array(char) line;
 
     if (i >= buffer_numlines(b)) {
@@ -1141,6 +1150,7 @@ static void mode_search() {
 
 static void mode_goto() {
   G.mode = MODE_GOTO;
+  G.goto_line_number = 0;
   G.bottom_pane.buffer = &G.message_buffer;
   status_message_set("goto");
 }
@@ -1174,12 +1184,30 @@ static void mode_menu() {
   buffer_empty(&G.menu_buffer);
 }
 
+typedef struct {
+  char *str;
+  float points;
+} DropdownMatch;
+
+static int dropdown_match_cmp(const void *aa, const void *bb) {
+  const DropdownMatch *a = aa, *b = bb;
+
+  if (a->points != b->points)
+    return b->points - a->points;
+  return strlen(a->str) - strlen(b->str);
+}
+
 static void dropdown_render(Pane *active_pane) {
   int i, max_width, input_len;
   char *input_str;
   Array(char*) identifiers;
+  DropdownMatch *best_matches;
+  int num_best_matches;
   Buffer *active_buffer;
   Pos p;
+
+  num_best_matches = 0;
+  best_matches = malloc(G.dropdown_size * sizeof(*best_matches));
 
   active_buffer = active_pane->buffer;
   identifiers = active_buffer->identifiers;
@@ -1191,19 +1219,77 @@ static void dropdown_render(Pane *active_pane) {
   }
 
   /* find matching identifiers */
-  buffer_empty(&G.dropdown_buffer);
   input_str = buffer_getstr_p(active_pane->buffer, G.dropdown_pos);
   input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
-  for (i = 0, max_width = 0; i < array_len(identifiers); ++i) {
-    if (strncmp(input_str, identifiers[i], input_len))
+  num_best_matches = 0;
+
+  for (i = 0; i < array_len(identifiers); ++i) {
+    float points, gain;
+    char *in, *in_end, *test, *test_end;
+    int test_len;
+    char *identifier;
+
+    identifier = identifiers[i];
+
+    points = 0;
+    gain = 10;
+
+    test_len = strlen(identifier);
+    if (test_len < input_len)
       continue;
 
-    buffer_push_line(&G.dropdown_buffer, identifiers[i]);
-    max_width = max(max_width, strlen(identifiers[i]));
+    in = input_str;
+    in_end = in + input_len;
+    test = identifier;
+    test_end = test + test_len;
 
-    if (buffer_numlines(&G.dropdown_buffer) == G.dropdown_size)
-      break;
+    for (; in < in_end && test < test_end; ++test) {
+      if (*in == *test) {
+        points += gain;
+        gain = 10;
+        ++in;
+      }
+      else if (tolower(*in) == tolower(*test)) {
+        points += gain*0.8f;
+        gain = 10;
+        ++in;
+      }
+      else
+        gain *= 0.7;
+    }
+
+    if (in != in_end || points <= 0)
+      continue;
+
+    /* push match */
+
+    if (num_best_matches < G.dropdown_size) {
+      best_matches[num_best_matches].str = identifier;
+      best_matches[num_best_matches].points = points;
+      ++num_best_matches;
+    } else {
+      DropdownMatch *p;
+      int i;
+
+      /* find worst match and replace */
+      p = best_matches;
+      for (i = 1; i < G.dropdown_size; ++i)
+        if (best_matches[i].points < p->points)
+          p = best_matches+i;
+      p->str = identifier;
+      p->points = points;
+    }
+
   }
+
+  qsort(best_matches, num_best_matches, sizeof(*best_matches), dropdown_match_cmp);
+  max_width = 0;
+  buffer_empty(&G.dropdown_buffer);
+  for (i = 0; i < num_best_matches; ++i) {
+    buffer_push_line(&G.dropdown_buffer, best_matches[i].str);
+    max_width = max(max_width, strlen(best_matches[i].str));
+  }
+  free(best_matches);
 
   /* position pane */
   p = pane_to_screen_pos_xy(active_pane, G.dropdown_pos.x, G.dropdown_pos.y);
@@ -1212,11 +1298,12 @@ static void dropdown_render(Pane *active_pane) {
   G.dropdown_pane.bounds.h = buffer_numlines(&G.dropdown_buffer);
   G.dropdown_pane.bounds.w = max_width + 5;
 
+
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
     render_pane(&G.dropdown_pane, 0);
 }
 
-static void dropdown_update(Pane *active_pane, int input) {
+static void dropdown_update_on_insert(Pane *active_pane, int input) {
 
   if (!G.dropdown_visible) {
     if (!isalpha(input) && input != '_')
@@ -1242,7 +1329,8 @@ static void insert_default(Pane *p, int input) {
   if (input == KEY_ESCAPE)
     mode_normal(1);
   else if (!key_is_special(input)) {
-    dropdown_update(&G.main_pane, input);
+    if (p != &G.bottom_pane)
+      dropdown_update_on_insert(&G.main_pane, input);
     buffer_insert_char(b, input);
   } else {
     switch (input) {
@@ -1251,7 +1339,7 @@ static void insert_default(Pane *p, int input) {
         break;
 
       case KEY_TAB: {
-        if (G.dropdown_visible) {
+        if (p != &G.bottom_pane && G.dropdown_visible) {
           char *str;
           int l;
 
@@ -1458,6 +1546,12 @@ static int process_input() {
       break;
 
     case MODE_GOTO:
+      if (isdigit(input)) {
+        G.goto_line_number *= 10;
+        G.goto_line_number += input - '0';
+        buffer_move_to_y(G.main_pane.buffer, G.goto_line_number-1);
+        break;
+      }
       switch (input) {
         case 't':
           buffer_move_to(G.main_pane.buffer, 0, 0);
@@ -1573,7 +1667,7 @@ static void test() {
 }
 #endif
 
-int main(int argc, const char** argv) {
+int main(int argc, const char **argv) {
   int err;
   (void) argc, (void)argv;
 
@@ -1591,7 +1685,7 @@ int main(int argc, const char** argv) {
 
   /* open a buffer */
   {
-    const char* filename = argv[1];
+    const char *filename = argv[1];
     G.main_pane.buffer = malloc(sizeof(*G.main_pane.buffer));
     err = file_open(filename, G.main_pane.buffer);
     if (err) {
