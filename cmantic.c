@@ -1,7 +1,12 @@
 /* CURRENT:
+ *       When you make a change, go backwards to check if it was an
+ *       identifier, and update the identifier list.
+ *       To do this fast, have a hashmap of refcounts for each identifier
+ *       if identifier disappears, remove from autocomplete list
  *
  * TODO:
  *
+ * Autoindent
  * Autocomplete other buffers
  * Search backwards
  * Colorize search results in view
@@ -356,7 +361,9 @@ static void buffer_delete_char(Buffer *b) {
 }
 
 static void buffer_insert_tab(Buffer *b) {
-  int n = b->tab_type;
+  int n;
+
+  n = b->tab_type;
 
   b->modified = 1;
   if (n == 0) {
@@ -425,11 +432,19 @@ typedef enum {
   COLOR_COUNT
 } Color;
 
+typedef struct {
+  int fcolor: 5;
+  int bcolor: 5;
+  int bold: 2;
+  int italic: 2;
+  int inverse: 2;
+} Style;
+
 typedef struct Pane {
   int gutter_width;
   Rect bounds;
   Buffer *buffer;
-  Color background_color, font_color;
+  Style style;
 } Pane;
 
 typedef enum Mode {
@@ -441,14 +456,6 @@ typedef enum Mode {
   MODE_SEARCH,
   MODE_COUNT
 } Mode;
-
-typedef struct {
-  int fcolor: 5;
-  int bcolor: 5;
-  int bold: 2;
-  int italic: 2;
-  int inverse: 2;
-} Style;
 
 typedef struct {
   char c;
@@ -505,8 +512,34 @@ static void buffer_guess_tab_type(Buffer *b) {
     if (!b->lines[i])
       continue;
 
+    /* skip comments */
+    if (array_len(b->lines[i]) >= 2 && b->lines[i][0] == '/' && b->lines[i][1] == '*') {
+      int j;
+      j = 2;
+      for (;;) {
+        if (i >= array_len(b->lines)) {
+          b->tab_type = G.default_tab_type;
+          return;
+        }
+        if (j >= array_len(b->lines[i])-1) {
+          j = 0;
+          ++i;
+          continue;
+        }
+        if (b->lines[i][j] == '*' && b->lines[i][j+1] == '/') {
+          ++i;
+          break;
+        }
+        ++j;
+      }
+    }
+
+    if (!b->lines[i])
+      continue;
+
     if (b->lines[i][0] == '\t') {
       b->tab_type = 0;
+      break;
     }
     else if (b->lines[i][0] == ' ') {
       int num_spaces = 0;
@@ -519,6 +552,7 @@ static void buffer_guess_tab_type(Buffer *b) {
         continue;
 
       b->tab_type = num_spaces;
+      break;
     }
     else
       continue;
@@ -792,6 +826,13 @@ static TermCommand term_bcolors[] = {
 STATIC_ASSERT(ARRAY_LEN(term_fcolors) == COLOR_COUNT, all_term_font_colors_defined);
 STATIC_ASSERT(ARRAY_LEN(term_bcolors) == COLOR_COUNT, all_term_background_colors_defined);
 
+static void term_bold(Array(char) *buf, int bold) {
+  if (bold)
+    array_push_str(buf, "\x1b[1m");
+  else
+    array_push_str(buf, "\x1b[22m");
+}
+
 static void term_inverse_video(Array(char) *buf, int inverse) {
   if (inverse)
     array_push_str(buf, "\x1b[7m");
@@ -802,6 +843,7 @@ static void term_inverse_video(Array(char) *buf, int inverse) {
 static void term_apply_style_slow(Array(char) *buf, Style style) {
   array_push_str(buf, term_fcolors[style.fcolor].str);
   array_push_str(buf, term_bcolors[style.bcolor].str);
+  term_bold(buf, style.bold);
   term_inverse_video(buf, style.inverse);
 }
 
@@ -812,6 +854,8 @@ static void term_apply_style(Array(char) *buf, Style style, Style old_style) {
     array_push_str(buf, term_bcolors[style.bcolor].str);
   if (style.inverse != old_style.inverse)
     term_inverse_video(buf, style.inverse);
+  if (style.bold != old_style.bold)
+    term_bold(buf, style.bold);
 }
 
 static void term_clear_screen() {
@@ -993,18 +1037,11 @@ static void render_clear(int x0, int x1, int y) {
     G.screen_buffer[y*G.term_width + x0].c = ' ';
 }
 
-static void render_set_font_color(Color color, int x0, int x1, int y0, int y1) {
+static void render_set_style(Style style, int x0, int x1, int y0, int y1) {
   int x,y;
   for (y = y0; y < y1; ++y)
     for (x = x0; x < x1; ++x)
-      G.screen_buffer[y*G.term_width + x].style.fcolor = color;
-}
-
-static void render_set_background_color(Color color, int x0, int x1, int y0, int y1) {
-  int x,y;
-  for (x = x0; x < x1; ++x)
-    for (y = y0; y < y1; ++y)
-      G.screen_buffer[y*G.term_width + x].style.bcolor = color;
+      G.screen_buffer[y*G.term_width + x].style = style;
 }
 
 static void render_marker(Pane *p) {
@@ -1018,6 +1055,7 @@ static void render_pane(Pane *p, int draw_gutter) {
   int buffer_row;
   int x0,x1,y,y_end;
   int line_offset_x;
+  Style style;
 
   b = p->buffer;
   x0 = clampi(p->bounds.x, 0, G.term_width-1);
@@ -1034,9 +1072,10 @@ static void render_pane(Pane *p, int draw_gutter) {
 
   line_offset_x = pane_calc_left_visible_column(p);
 
-  render_set_background_color(p->background_color, x0, x1, y, y_end);
-  render_set_font_color(p->font_color, x0, x1, y, y_end);
-  render_set_font_color(COLOR_YELLOW, x0, x0+p->gutter_width - 1, y, y_end);
+  render_set_style(p->style, x0, x1, y, y_end);
+  style = p->style;
+  style.fcolor = COLOR_YELLOW;
+  render_set_style(style, x0, x0+p->gutter_width-1, y, y_end);
 
   /* calc where we start */
   for (; y < y_end; ++buffer_row, ++y) {
@@ -1462,19 +1501,27 @@ static int process_input() {
         line = G.menu_buffer.lines[0];
         #define IS_OPTION(str) (array_len(line) == strlen(str) && strncmp(line, str, array_len(line)) == 0)
 
-        /* FIXME: this might buffer overrun */
         if (IS_OPTION("save")) {
           save_buffer(G.main_pane.buffer);
           /* TODO: write out absolute path, instead of relative */
           status_message_set("Wrote %i lines to %s", buffer_numlines(G.main_pane.buffer), G.main_pane.buffer->filename);
-          mode_normal(0);
         }
+
         else if (IS_OPTION("quit") || IS_OPTION("exit"))
           return 1;
+
+        else if (IS_OPTION("show_tabs")) {
+          if (G.main_pane.buffer->tab_type == 0)
+            status_message_set("Tabs is \\t");
+          else
+            status_message_set("Tabs is %i spaces", G.main_pane.buffer->tab_type);
+        }
+
         else {
           status_message_set("Unknown option '%.*s'", buffer_linesize(&G.menu_buffer, 0), G.menu_buffer.lines[0]);
-          mode_normal(0);
         }
+
+        mode_normal(0);
 
         #undef IS_OPTION
       }
@@ -1490,7 +1537,7 @@ static int process_input() {
         case KEY_UNKNOWN:
           break;
 
-        case 'q':
+        case KEY_ESCAPE:
           if (G.main_pane.buffer->modified)
             status_message_set("You have unsaved changes. If you really want to exit, use :quit");
           else
@@ -1535,8 +1582,10 @@ static int process_input() {
 
           buffer_advance(G.main_pane.buffer);
           err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0));
-          if (err)
+          if (err) {
             G.main_pane.buffer->pos = old_pos;
+            status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
+          }
         } break;
 
         case ' ':
@@ -1592,7 +1641,7 @@ static int process_input() {
       if (input == KEY_RETURN || input == KEY_ESCAPE) {
         if (G.search_failed) {
           G.main_pane.buffer->pos = G.search_begin_pos;
-          status_message_set("'%.*s' Not found", buffer_linesize(&G.search_buffer, 0), G.search_buffer.lines[0]);
+          status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), G.search_buffer.lines[0]);
           mode_normal(0);
         } else
           mode_normal(1);
@@ -1660,17 +1709,18 @@ static void state_init() {
   buffer_empty(&G.message_buffer);
   buffer_empty(&G.dropdown_buffer);
 
-  G.main_pane.background_color = COLOR_BLACK;
-  G.main_pane.font_color = COLOR_WHITE;
+  G.main_pane.style.bcolor = COLOR_BLACK;
+  G.main_pane.style.fcolor = COLOR_WHITE;
 
-  G.bottom_pane.background_color = COLOR_CYAN;
-  G.bottom_pane.font_color = COLOR_BLACK;
+  G.bottom_pane.style.bcolor = COLOR_CYAN;
+  G.bottom_pane.style.fcolor = COLOR_BLACK;
+  G.bottom_pane.style.bold = 1;
   G.bottom_pane.bounds = rect_create(0, G.term_height-1, G.term_width-1, 1);
   G.bottom_pane.buffer = &G.message_buffer;
 
   G.dropdown_pane.buffer = &G.dropdown_buffer;
-  G.dropdown_pane.background_color = COLOR_MAGENTA;
-  G.dropdown_pane.font_color = COLOR_BLACK;
+  G.dropdown_pane.style.bcolor = COLOR_MAGENTA;
+  G.dropdown_pane.style.fcolor = COLOR_BLACK;
 
   G.main_pane.bounds = rect_create(0, 0, G.term_width-1, G.term_height-1);
 
