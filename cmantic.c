@@ -6,6 +6,7 @@
  *
  * TODO:
  *
+ * Jumplist
  * Autoindent
  * Autocomplete other buffers
  * Search backwards
