@@ -296,7 +296,6 @@ static int buffer_find(Buffer *b, char *str, int n) {
 
     x = p - b->lines[y];
     buffer_move_to(b, x, y);
-    status_message_set("jumping to (%i,%i), but arrived at (%i, %i)", x, y, b->pos.x, b->pos.y);
     return 0;
   }
   return 1;
@@ -390,19 +389,22 @@ static void buffer_push_line(Buffer *b, const char *str) {
   memcpy(b->lines[y], str, l);
 }
 
+static void buffer_move_to_y(Buffer *b, int y);
+static void buffer_move_to_x(Buffer *b, int x);
+static void buffer_move_y(Buffer *b, int dy);
+
 static void buffer_insert_newline(Buffer *b) {
   int left_of_line;
 
   b->modified = 1;
 
   left_of_line = array_len(b->lines[b->pos.y]) - b->pos.x;
-  array_insert(b->lines, b->pos.y + 1, 0);
+  array_insert(b->lines, b->pos.y+1, 0);
   array_push_a(b->lines[b->pos.y+1], b->lines[b->pos.y] + b->pos.x, left_of_line);
-  array_len_get(b->lines[b->pos.y]) = b->pos.x;
+  array_resize(b->lines[b->pos.y], b->pos.x);
 
-  b->pos.x = 0;
-  b->pos.ghost_x = 0;
-  ++b->pos.y;
+  buffer_move_y(b, 1);
+  buffer_move_to_x(b, 0);
 }
 
 static void buffer_insert_newline_below(Buffer *b) {
@@ -599,10 +601,6 @@ static int pane_calc_top_visible_row(Pane *pane) {
   return at_least(0, pane->buffer->pos.y - pane->bounds.h/2);
 }
 
-static int pane_calc_bottom_visible_row(Pane *pane) {
-  return at_most(pane_calc_top_visible_row(pane) + pane->bounds.h, buffer_numlines(pane->buffer)) - 1;
-}
-
 static int pane_calc_left_visible_column(Pane *pane) {
   return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->bounds.w - pane->gutter_width - 3));
 }
@@ -627,11 +625,19 @@ static void buffer_move_to_y(Buffer *b, int y) {
   b->pos.y = y;
 }
 
-static void buffer_move_to(Buffer *b, int x, int y) {
-  buffer_move_to_y(b, y);
-  x = clampi(x, 0, array_len(b->lines[y]));
+static void buffer_move_to_x(Buffer *b, int x) {
+  x = clampi(x, 0, array_len(b->lines[b->pos.y]));
   b->pos.x = x;
   b->pos.ghost_x = x;
+}
+
+static void buffer_move_to(Buffer *b, int x, int y) {
+  buffer_move_to_y(b, y);
+  buffer_move_to_x(b, x);
+}
+
+static void buffer_move_y(Buffer *b, int dy) {
+  b->pos.y = clampi(b->pos.y + dy, 0, array_len(b->lines) - 1);
 }
 
 static void buffer_move(Buffer *b, int dx, int dy) {
@@ -643,7 +649,7 @@ static void buffer_move(Buffer *b, int dx, int dy) {
   old_x = b->pos.x;
 
   /* y is easy */
-  b->pos.y = clampi(b->pos.y + dy, 0, array_len(b->lines) - 1);
+  buffer_move_y(b, dy);
 
   new_line = b->lines[b->pos.y];
 
@@ -1009,43 +1015,42 @@ static void render_marker(Pane *p) {
 /* x,y: screen bounds for pane */
 static void render_pane(Pane *p, int draw_gutter) {
   Buffer *b;
-  int i, i_end;
-  int x0,x1,y;
+  int buffer_row;
+  int x0,x1,y,y_end;
   int line_offset_x;
 
   b = p->buffer;
-  x0 = p->bounds.x;
-  x1 = p->bounds.x + p->bounds.w;
-  y = p->bounds.y;
+  x0 = clampi(p->bounds.x, 0, G.term_width-1);
+  x1 = clampi(p->bounds.x + p->bounds.w, 0, G.term_width);
+  y = clampi(p->bounds.y, 0, G.term_height);
+  y_end = clampi(y + p->bounds.h, 0, G.term_height);
+  buffer_row = pane_calc_top_visible_row(p);
 
   /* calc gutter width */
-  i = pane_calc_top_visible_row(p);
-  i_end = pane_calc_bottom_visible_row(p)+1;
-
   if (draw_gutter)
-    p->gutter_width = calc_num_chars(i_end) + 1;
+    p->gutter_width = calc_num_chars(buffer_row + y_end-1-y) + 1;
   else
     p->gutter_width = 0;
 
   line_offset_x = pane_calc_left_visible_column(p);
 
-  render_set_background_color(p->background_color, x0, x1, y, y+p->bounds.h);
-  render_set_font_color(p->font_color, x0, x1, y, y+p->bounds.h);
-  render_set_font_color(COLOR_YELLOW, x0, x0+p->gutter_width - 1, p->bounds.y, p->bounds.y+p->bounds.h);
+  render_set_background_color(p->background_color, x0, x1, y, y_end);
+  render_set_font_color(p->font_color, x0, x1, y, y_end);
+  render_set_font_color(COLOR_YELLOW, x0, x0+p->gutter_width - 1, y, y_end);
 
   /* calc where we start */
-  for (; i < i_end; ++i, ++y) {
+  for (; y < y_end; ++buffer_row, ++y) {
     Array(char) line;
 
-    if (i >= buffer_numlines(b)) {
+    if (buffer_row >= buffer_numlines(b)) {
       render_clear(x0, x1, y);
       continue;
     }
 
-    line = b->lines[i];
+    line = b->lines[buffer_row];
 
     /* gutter */
-    render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, i+1);
+    render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, buffer_row+1);
 
     if (!line || array_len(line) <= line_offset_x)
       continue;
@@ -1200,7 +1205,7 @@ static int dropdown_match_cmp(const void *aa, const void *bb) {
 }
 
 static void dropdown_render(Pane *active_pane) {
-  int i, max_width, input_len;
+  int i, max_width, input_len, overflow, backwards;
   char *input_str;
   Array(char*) identifiers;
   DropdownMatch *best_matches;
@@ -1285,21 +1290,30 @@ static void dropdown_render(Pane *active_pane) {
   }
 
   qsort(best_matches, num_best_matches, sizeof(*best_matches), dropdown_match_cmp);
+
   max_width = 0;
-  buffer_empty(&G.dropdown_buffer);
-  for (i = 0; i < num_best_matches; ++i) {
-    buffer_push_line(&G.dropdown_buffer, best_matches[i].str);
+  for (i = 0; i < num_best_matches; ++i)
     max_width = max(max_width, strlen(best_matches[i].str));
-  }
-  free(best_matches);
 
   /* position pane */
   p = pane_to_screen_pos_xy(active_pane, G.dropdown_pos.x, G.dropdown_pos.y);
   G.dropdown_pane.bounds.x = p.x;
   G.dropdown_pane.bounds.y = p.y+1;
-  G.dropdown_pane.bounds.h = buffer_numlines(&G.dropdown_buffer);
-  G.dropdown_pane.bounds.w = max_width + 5;
+  G.dropdown_pane.bounds.h = at_most(num_best_matches, (G.term_height-1)/2);
+  G.dropdown_pane.bounds.w = at_least(max_width, 30);
+  overflow = G.dropdown_pane.bounds.x + G.dropdown_pane.bounds.w - (G.term_width - 1);
+  if (overflow > 0)
+    G.dropdown_pane.bounds.x -= overflow;
+  backwards = G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h >= G.term_height;
+  if (backwards)
+    G.dropdown_pane.bounds.y -= G.dropdown_pane.bounds.h+1;
 
+  buffer_empty(&G.dropdown_buffer);
+  for (i = 0; i < num_best_matches; ++i) {
+    int which = backwards ? num_best_matches-1-i : i;
+    buffer_push_line(&G.dropdown_buffer, best_matches[which].str);
+  }
+  free(best_matches);
 
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
     render_pane(&G.dropdown_pane, 0);
@@ -1578,6 +1592,7 @@ static int process_input() {
       if (input == KEY_RETURN || input == KEY_ESCAPE) {
         if (G.search_failed) {
           G.main_pane.buffer->pos = G.search_begin_pos;
+          status_message_set("'%.*s' Not found", buffer_linesize(&G.search_buffer, 0), G.search_buffer.lines[0]);
           mode_normal(0);
         } else
           mode_normal(1);
