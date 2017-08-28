@@ -1,17 +1,21 @@
 /* CURRENT:
+ *
+ *
+ *
+ * TODO:
+ *
+ * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
  *       identifier, and update the identifier list.
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
- * TODO:
- *
+ * Use 256 colors
  * Jumplist
  * Autoindent
  * Autocomplete other buffers
  * Search backwards
  * Colorize search results in view
- * Color highlighting
  * Action search
  * Undo
  * Multiple cursors
