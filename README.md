@@ -1,6 +1,8 @@
 # cmantic
 Terminal text editor mainly for C
 
+![cmantic screenshot](https://raw.githubusercontent.com/cribalik/cmantic/master/screenshot.png)
+
 ## Key bindings
 
 ### Normal mode
