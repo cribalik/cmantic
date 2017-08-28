@@ -134,18 +134,23 @@ Rect rect_create(int x, int y, int w, int h) {
   return result;
 }
 
-typedef enum {
+enum {
+  TOKEN_NULL = 0,
   TOKEN_EOF = -1,
   TOKEN_IDENTIFIER = -2,
   TOKEN_NUMBER = -3,
-  TOKEN_STRING = -4
-} Token;
+  TOKEN_STRING = -4,
+  TOKEN_STRING_BEGIN = -5,
+  TOKEN_BLOCK_COMMENT = -6,
+  TOKEN_BLOCK_COMMENT_BEGIN = -7,
+  TOKEN_BLOCK_COMMENT_END = -8
+};
 
 typedef struct TokenInfo {
-  Token token;
+  int token;
   int x;
 } TokenInfo;
-TokenInfo tokeninfo_create(Token token, int x) {
+TokenInfo tokeninfo_create(int token, int x) {
   TokenInfo t;
   t.token = token;
   t.x = x;
@@ -157,6 +162,14 @@ typedef struct {
   int x, y;
   int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
 } Pos;
+
+static Pos pos_create(int x, int y) {
+  Pos p;
+  p.x = x;
+  p.y = y;
+  p.ghost_x = x;
+  return p;
+}
 
 typedef struct Buffer {
   Array(Array(char)) lines;
@@ -474,6 +487,11 @@ static struct State {
   Array(char) tmp_render_buffer;
   int term_width, term_height;
   Style default_style;
+  Style comment_style,
+        identifier_style,
+        string_style,
+        number_style,
+        keyword_style;
 
   /* some editor state */
   Pane main_pane,
@@ -728,7 +746,7 @@ static void status_message_set(const char *fmt, ...) {
 
 /****** @TOKENIZER ******/
 
-static void tokenizer_push_token(Array(Array(TokenInfo)) *tokens, int x, int y, Token token) {
+static void tokenizer_push_token(Array(Array(TokenInfo)) *tokens, int x, int y, int token) {
   array_reserve(*tokens, y+1);
   array_push((*tokens)[y], tokeninfo_create(token, x));
 }
@@ -799,6 +817,163 @@ static void tokenize(Buffer *b) {
       buffer_advance_xy(b, &x, &y);
   }
 }
+
+static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *end) {
+  int token;
+  int x,y;
+  x = *xp, y = *yp;
+
+  for (;;) {
+    char c;
+
+    if (y >= y_end || y >= array_len(b->lines)) {
+      token = TOKEN_NULL;
+      break;
+    }
+    if (x >= array_len(b->lines[y])) {
+      x = 0;
+      ++y;
+      continue;
+    }
+
+
+    c = b->lines[y][x];
+
+    if (isspace(c)) {
+      ++x;
+      continue;
+    }
+
+    /* identifier */
+    if (isalpha(c) || c == '_') {
+      token = TOKEN_IDENTIFIER;
+      if (start)
+        *start = pos_create(x, y);
+      while ((isalnum(c) || c == '_') && x < array_len(b->lines[y])) {
+        if (end)
+          *end = pos_create(x, y);
+        c = b->lines[y][++x];
+      }
+      break;
+    }
+
+    /* block comment */
+    else if (c == '/' && x+1 < array_len(b->lines[y]) && b->lines[y][x+1] == '*') {
+      token = TOKEN_BLOCK_COMMENT;
+      if (start)
+        *start = pos_create(x, y);
+      x += 2;
+      /* goto matching end block */
+      for (;;) {
+        if (y >= y_end || y >= array_len(b->lines)) {
+          if (end)
+            *end = pos_create(x, y);
+          token = TOKEN_BLOCK_COMMENT_BEGIN;
+          break;
+        }
+        if (x >= array_len(b->lines[y])) {
+          ++y;
+          x = 0;
+          continue;
+        }
+
+        c = b->lines[y][x];
+        if (c == '*' && x+1 < array_len(b->lines[y]) && b->lines[y][x+1] == '/') {
+          if (end)
+            *end = pos_create(x+1, y);
+          x += 2;
+          break;
+        }
+        ++x;
+      }
+      break;
+    }
+
+    /* end of block comment */
+    else if (c == '*' && x+1 < array_len(b->lines[y]) && b->lines[y][x+1] == '/') {
+      token = TOKEN_BLOCK_COMMENT_END;
+      if (start)
+        *start = pos_create(x, y);
+      if (end)
+        *end = pos_create(x+1, y);
+      x += 2;
+      break;
+    }
+
+    /* number */
+    else if (isdigit(c)) {
+      token = TOKEN_NUMBER;
+      if (start)
+        *start = pos_create(x, y);
+      while (isdigit(c) && x < array_len(b->lines[y])) {
+        if (end)
+          *end = pos_create(x, y);
+        c = b->lines[y][++x];
+      }
+      if (x == array_len(b->lines[y]))
+        break;
+      if (c == '.' && x+1 < array_len(b->lines[y]) && isdigit(b->lines[y][x+1])) {
+        c = b->lines[y][++x];
+        while (isdigit(c) && x < array_len(b->lines[y])) {
+          if (end)
+            *end = pos_create(x, y);
+          c = b->lines[y][++x];
+        }
+        if (x == array_len(b->lines[y]))
+          break;
+      }
+      while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < array_len(b->lines[y])) {
+        if (end)
+          *end = pos_create(x, y);
+        c = b->lines[y][++x];
+      }
+      break;
+    }
+
+    else if (c == '"') {
+      token = TOKEN_STRING;
+      if (start)
+        *start = pos_create(x, y);
+      ++x;
+      for (;;) {
+        if (x >= array_len(b->lines[y])) {
+          token = TOKEN_STRING_BEGIN;
+          if (end)
+            *end = pos_create(x, y);
+          ++y;
+          x = 0;
+          break;
+        }
+
+        c = b->lines[y][x];
+        if (c == '"') {
+          if (end)
+            *end = pos_create(x, y);
+          ++x;
+          break;
+        }
+        ++x;
+      }
+      break;
+    }
+
+    /* single char token */
+    else {
+      token = c;
+      if (start)
+        *start = pos_create(x, y);
+      if (end)
+        *end = pos_create(x, y);
+      ++x;
+      break;
+    }
+  }
+
+  *xp = x;
+  *yp = y;
+  return token;
+}
+
 
 
 /****** TERMINAL STUFF !!DO NOT USE OUTSIDE OF RENDERER!! ******/
@@ -1038,11 +1213,38 @@ static void render_clear(int x0, int x1, int y) {
     G.screen_buffer[y*G.term_width + x0].c = ' ';
 }
 
-static void render_set_style(Style style, int x0, int x1, int y0, int y1) {
+static void render_set_style_block(Style style, int x0, int x1, int y0, int y1) {
   int x,y;
   for (y = y0; y < y1; ++y)
     for (x = x0; x < x1; ++x)
       G.screen_buffer[y*G.term_width + x].style = style;
+}
+
+/* a, b relative inside bounds */
+static void render_set_style_text(Style style, Pos a, Pos b, Rect bounds) {
+  int x,y,x0,x1,y0,y1;
+  a.x = clampi(a.x, 0, bounds.w-1);
+  a.y = clampi(a.y, 0, bounds.h-1);
+  b.x = clampi(b.x, 0, bounds.w-1);
+  b.y = clampi(b.y, 0, bounds.h-1);
+  x0 = bounds.x;
+  x1 = bounds.x + bounds.w;
+  y0 = bounds.y + a.y;
+  y1 = bounds.y + b.y;
+
+  if (y0 == y1) {
+    for (x = x0 + a.x, y = y0; x <= x0 + b.x; ++x)
+      G.screen_buffer[y*G.term_width + x].style = style;
+    return;
+  }
+
+  for (x = x0 + a.x, y = y0; x < x1 && y < y1; ++x)
+    G.screen_buffer[y*G.term_width + x].style = style;
+  for (++y; y < y1; ++y)
+    for (x = x0; x < x1; ++x)
+      G.screen_buffer[y*G.term_width + x].style = style;
+  for (x = x0; x <= x0 + b.x; ++x)
+    G.screen_buffer[y*G.term_width + x].style = style;
 }
 
 static void render_marker(Pane *p) {
@@ -1050,53 +1252,188 @@ static void render_marker(Pane *p) {
   G.screen_buffer[pos.y*G.term_width + pos.x].style.inverse = 1;
 }
 
+static const char *keywords[] = {
+  "static",
+  "const",
+  "char",
+  "short",
+  "int",
+  "long",
+  "float",
+  "double",
+  "void",
+  "define",
+  "ifdef",
+  "endif",
+  "elif",
+  "include",
+  "switch",
+  "case",
+  "if",
+  "else",
+  "for",
+  "while",
+  "struct",
+  "union",
+  "enum",
+  "typedef"
+};
+
 /* x,y: screen bounds for pane */
-static void render_pane(Pane *p, int draw_gutter) {
+static void render_pane(Pane *p, int draw_gutter, int highlight) {
   Buffer *b;
-  int buffer_row;
-  int x0,x1,y,y_end;
-  int line_offset_x;
+  int buf_y, buf_y0, buf_y1;
+  int x,y;
+  int x0, x1, y0, y1;
+  int buf_x0;
   Style style;
 
+  /* calc bounds */
   b = p->buffer;
   x0 = clampi(p->bounds.x, 0, G.term_width-1);
   x1 = clampi(p->bounds.x + p->bounds.w, 0, G.term_width);
-  y = clampi(p->bounds.y, 0, G.term_height);
-  y_end = clampi(y + p->bounds.h, 0, G.term_height);
-  buffer_row = pane_calc_top_visible_row(p);
+  y0 = clampi(p->bounds.y, 0, G.term_height);
+  y1 = clampi(y0 + p->bounds.h, 0, G.term_height);
+  buf_y0 = pane_calc_top_visible_row(p);
+  buf_y1 = at_most(buf_y0 + y1-y0, buffer_numlines(b));
+  buf_x0 = pane_calc_left_visible_column(p);
 
   /* calc gutter width */
   if (draw_gutter)
-    p->gutter_width = calc_num_chars(buffer_row + y_end-1-y) + 1;
+    p->gutter_width = calc_num_chars(buf_y1) + 1;
   else
     p->gutter_width = 0;
 
-  line_offset_x = pane_calc_left_visible_column(p);
-
-  render_set_style(p->style, x0, x1, y, y_end);
+  /* set some styles */
+  render_set_style_block(p->style, x0, x1, y0, y1);
   style = p->style;
   style.fcolor = COLOR_YELLOW;
-  render_set_style(style, x0, x0+p->gutter_width-1, y, y_end);
+  render_set_style_block(style, x0, x0+p->gutter_width-1, y0, y1);
 
-  /* calc where we start */
-  for (; y < y_end; ++buffer_row, ++y) {
+  /* draw each line */
+  for (y = y0, buf_y = buf_y0; y < y1; ++buf_y, ++y) {
     Array(char) line;
 
-    if (buffer_row >= buffer_numlines(b)) {
+    line = b->lines[buf_y];
+
+    /* beyond buffer ? */
+    if (buf_y >= buffer_numlines(b)) {
       render_clear(x0, x1, y);
       continue;
     }
 
-    line = b->lines[buffer_row];
-
     /* gutter */
-    render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, buffer_row+1);
+    render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, buf_y+1);
 
-    if (!line || array_len(line) <= line_offset_x)
+    if (!line || array_len(line) <= buf_x0)
       continue;
 
     /* text */
-    render_strn(x0 + p->gutter_width, x1, y, line + line_offset_x, array_len(line) - line_offset_x);
+    render_strn(x0 + p->gutter_width, x1, y, line + buf_x0, array_len(line) - buf_x0);
+  }
+
+  /* color highlighting */
+  if (highlight) {
+    int token;
+
+    y = buf_y0;
+    x = 0;
+    for (;;) {
+      Pos prev, next;
+      int do_render;
+
+      token = token_read(b, &x, &y, buf_y1, &prev, &next);
+
+      check_token:
+
+      do_render = 0;
+
+      if (token == TOKEN_NULL)
+        break;
+      switch (token) {
+
+        case TOKEN_NUMBER:
+          do_render = 1;
+          style = G.number_style;
+          break;
+
+        case TOKEN_BLOCK_COMMENT_END:
+          do_render = 1;
+          style = G.comment_style;
+          prev = pos_create(buf_x0, buf_y0);
+          break;
+
+        case TOKEN_BLOCK_COMMENT_BEGIN:
+          do_render = 1;
+          style = G.comment_style;
+          next = pos_create(buffer_linesize(b, buf_y1-1), buf_y1-1);
+          break;
+
+        case TOKEN_BLOCK_COMMENT:
+          do_render = 1;
+          style = G.comment_style;
+          break;
+
+        case TOKEN_STRING:
+          do_render = 1;
+          style = G.string_style;
+          break;
+
+        case TOKEN_STRING_BEGIN:
+          do_render = 1;
+          style = G.string_style;
+          break;
+
+        case TOKEN_IDENTIFIER: {
+          Pos prev_tmp, next_tmp;
+          int i;
+
+          /* check for keywords */
+          for (i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
+            if (strncmp(buffer_getstr_p(b, prev), keywords[i], at_most(buffer_linesize(b, prev.y)-prev.x, strlen(keywords[i]))) == 0) {
+              style = G.keyword_style;
+              goto done;
+            }
+          }
+
+          /* otherwise check for functions */
+          token = token_read(b, &x, &y, buf_y1, &prev_tmp, &next_tmp);
+          if (token != '(') {
+            prev = prev_tmp;
+            next = next_tmp;
+            goto check_token;
+          }
+          style = G.identifier_style;
+
+          done:
+          do_render = 1;
+        } break;
+
+        case '#':
+          do_render = 1;
+          style = G.keyword_style;
+          break;
+
+
+        default:
+          break;
+      }
+      if (do_render) {
+        Rect bounds;
+
+        bounds = p->bounds;
+        bounds.x += p->gutter_width;
+        bounds.w -= p->gutter_width;
+        prev.x -= buf_x0;
+        prev.y -= buf_y0;
+        next.x -= buf_x0;
+        next.y -= buf_y0;
+        render_set_style_text(style, prev, next, bounds);
+      }
+
+      if (y > buf_y1)
+        break;
+    }
   }
 }
 
@@ -1356,7 +1693,7 @@ static void dropdown_render(Pane *active_pane) {
   free(best_matches);
 
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
-    render_pane(&G.dropdown_pane, 0);
+    render_pane(&G.dropdown_pane, 0, 0);
 }
 
 static void dropdown_update_on_insert(Pane *active_pane, int input) {
@@ -1713,7 +2050,7 @@ static void state_init() {
   G.main_pane.style.bcolor = COLOR_BLACK;
   G.main_pane.style.fcolor = COLOR_WHITE;
 
-  G.bottom_pane.style.bcolor = COLOR_CYAN;
+  G.bottom_pane.style.bcolor = COLOR_MAGENTA;
   G.bottom_pane.style.fcolor = COLOR_BLACK;
   G.bottom_pane.style.bold = 1;
   G.bottom_pane.bounds = rect_create(0, G.term_height-1, G.term_width-1, 1);
@@ -1725,6 +2062,16 @@ static void state_init() {
 
   G.main_pane.bounds = rect_create(0, 0, G.term_width-1, G.term_height-1);
 
+  G.comment_style.fcolor = COLOR_GREEN;
+  G.comment_style.bcolor = COLOR_BLACK;
+  G.identifier_style.fcolor = COLOR_BLUE;
+  G.identifier_style.bcolor = COLOR_BLACK;
+  G.keyword_style.fcolor = COLOR_CYAN;
+  G.keyword_style.bcolor = COLOR_BLACK;
+  G.string_style.fcolor = COLOR_YELLOW;
+  G.string_style.bcolor = COLOR_BLACK;
+  G.number_style.fcolor = COLOR_CYAN;
+  G.number_style.bcolor = COLOR_BLACK;
 }
 
 #ifdef DEBUG
@@ -1774,10 +2121,10 @@ int main(int argc, const char **argv) {
   while (1) {
 
     /* draw document */
-    render_pane(&G.main_pane, 1);
+    render_pane(&G.main_pane, 1, 1);
 
     /* draw menu/status bar */
-    render_pane(&G.bottom_pane, 0);
+    render_pane(&G.bottom_pane, 0, 0);
 
     /* draw dropdown ? */
     dropdown_render(&G.main_pane);
