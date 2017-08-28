@@ -1,4 +1,4 @@
-/* CURRENT:
+/* CURRENT: Autoindent
  *
  *
  *
@@ -12,7 +12,6 @@
  *
  * Use 256 colors
  * Jumplist
- * Autoindent
  * Autocomplete other buffers
  * Search backwards
  * Colorize search results in view
