@@ -34,6 +34,7 @@
 #define Array(type) type*
 
 #define array_insert(a, i, x) (array_resize((a), array_len(a)+1), memmove((a)+(i)+1, (a)+(i), (array__n(a) - (i)) * sizeof(*(a))), (a)[i] = (x))
+#define array_insert_n(a, i, n) (array_resize((a), array_len(a)+(n)), memmove((a)+(i)+(n), (a)+(i), (array__n(a)-(n)-(i)) * sizeof(*(a))))
 #define array_insert_a(a, i, val, n) (array_resize((a), array_len(a)+(n)), memmove((a)+(i)+(n), (a)+(i), (array__n(a)-(n)-(i)) * sizeof(*(a))), memcpy((a)+(i), val, (n)*sizeof(*(val))))
 #define array_len(a) ((a) ? array__n(a) : 0)
 #define array_len_get(a) (array__n(a))

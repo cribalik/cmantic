@@ -203,6 +203,15 @@ static void buffer_goto_endline(Buffer *b) {
   b->pos.ghost_x = GHOST_EOL;
 }
 
+static void buffer_goto_beginline(Buffer *b) {
+  int x;
+
+  x = 0;
+  while (x < buffer_linesize(b, b->pos.y) && (b->lines[b->pos.y][x] == ' ' || b->lines[b->pos.y][x] == '\t'))
+    ++x;
+  buffer_move_to_x(b, x);
+}
+
 static void buffer_empty(Buffer *b) {
   int i;
 
@@ -362,8 +371,9 @@ static int buffer_find(Buffer *b, char *str, int n, int stay) {
   return 1;
 }
 
-
 static void buffer_insert_str(Buffer *b, int x, int y, const char *str, int n) {
+  if (!n)
+    return;
   b->modified = 1;
   array_insert_a(b->lines[y], x, str, n);
   buffer_move(b, n, 0);
@@ -376,10 +386,15 @@ static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, in
   buffer_insert_str(b, x0, y, str, n);
 }
 
+static void buffer_move_x(Buffer *b, int dx);
+static int buffer_autoindent(Buffer *b, int y);
+
 static void buffer_insert_char(Buffer *b, char ch) {
   b->modified = 1;
   array_insert(b->lines[b->pos.y], b->pos.x, ch);
   buffer_move(b, 1, 0);
+  if (ch == '}')
+    buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
 static void buffer_delete_line_at(Buffer *b, int y) {
@@ -433,6 +448,78 @@ static void buffer_insert_tab(Buffer *b) {
   }
 }
 
+static int buffer_getindent(Buffer *b, int y) {
+  int n = 0;
+  int tab_size = b->tab_type ? b->tab_type : 1;
+  char tab_char = b->tab_type ? ' ' : '\t';
+
+  for (n = 0;;) {
+    if (n >= array_len(b->lines[y]))
+      break;
+    if (b->lines[y][n] != tab_char)
+      break;
+    ++n;
+  }
+  return n/tab_size;
+}
+
+static int buffer_autoindent(Buffer *b, int y) {
+  int i,indent_above,indent_this,l, diff;
+  int tab_size;
+  char tab_char;
+
+  if (y == 0)
+    return 0;
+
+  tab_char = b->tab_type ? ' ' : '\t';
+  tab_size = b->tab_type ? b->tab_type : 1; 
+
+  /* count number of indents */
+  indent_above = buffer_getindent(b, y-1) * tab_size;
+
+  /* TODO: open braces */
+  l = array_len(b->lines[y-1]) - indent_above;
+  diff = 0;
+  i = array_len(b->lines[y-1])-1;
+  if (i >= 0 && b->lines[y-1][i] == '{')
+    ++diff;
+  else if ((l >= 3 && strncmp("for",   b->lines[y-1]+indent_above, 3) == 0) ||
+           (l >= 2 && strncmp("if",    b->lines[y-1]+indent_above, 2) == 0) ||
+           (l >= 5 && strncmp("while", b->lines[y-1]+indent_above, 5) == 0) ||
+           (l >= 4 && strncmp("else",  b->lines[y-1]+indent_above, 4) == 0))
+    ++diff;
+  else if (y >= 2) {
+    int indent_two_above;
+
+    indent_two_above = buffer_getindent(b, y-2) * tab_size;
+    l = array_len(b->lines[y-2]) - indent_two_above;
+    i = array_len(b->lines[y-2])-1;
+    if (i >= 0 && b->lines[y-2][i] != '{' &&
+       ((l >= 3 && strncmp("for",   b->lines[y-2]+indent_two_above, 3) == 0) ||
+        (l >= 2 && strncmp("if",    b->lines[y-2]+indent_two_above, 2) == 0) ||
+        (l >= 5 && strncmp("while", b->lines[y-2]+indent_two_above, 5) == 0) ||
+        (l >= 4 && strncmp("else",  b->lines[y-2]+indent_two_above, 4) == 0)))
+    --diff;
+  }
+
+  i = array_len(b->lines[y])-1;
+  if (i >= 0 && b->lines[y][i] == '}')
+    --diff;
+
+  /* count number of indents */
+  indent_this = buffer_getindent(b, y) * tab_size;
+  diff = indent_above + diff*tab_size - indent_this;
+  if (diff < 0) {
+    array_remove_slow_n(b->lines[y], 0, -diff);
+  }
+  if (diff > 0) {
+    array_insert_n(b->lines[y], 0, diff);
+    for (i = 0; i < diff; ++i)
+      b->lines[y][i] = tab_char;
+  }
+  return diff;
+}
+
 static int buffer_isempty(Buffer *b) {
   return array_len(b->lines) == 1 && array_len(b->lines[0]) == 0;
 }
@@ -466,12 +553,14 @@ static void buffer_insert_newline(Buffer *b) {
 
   buffer_move_y(b, 1);
   buffer_move_to_x(b, 0);
+  buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
 static void buffer_insert_newline_below(Buffer *b) {
   b->modified = 1;
   array_insert(b->lines, b->pos.y+1, 0);
   buffer_move(b, 0, 1);
+  buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
 typedef enum {
@@ -1300,7 +1389,8 @@ static const char *keywords[] = {
   "enum",
   "typedef",
   "return",
-  "continue"
+  "continue",
+  "break"
 };
 
 /* x,y: screen bounds for pane */
@@ -1938,7 +2028,7 @@ static int process_input() {
 
         case 'H':
         case KEY_HOME:
-          buffer_move_to_x(G.main_pane.buffer, 0);
+          buffer_goto_beginline(G.main_pane.buffer);
           break;
 
         case 'n': {
