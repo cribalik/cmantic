@@ -1108,11 +1108,11 @@ static void term_reset_to_default_settings() {
   if (panicking)
     return;
   panicking = 1;
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &G.orig_termios);
   term_clear_screen();
   term_show_cursor();
   term_cursor_move(0,0);
   term_reset_video();
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &G.orig_termios);
 }
 
 /* returns:
@@ -1400,6 +1400,9 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
           }
 
           /* otherwise check for functions */
+          /* should not be indented */
+          if (isspace(buffer_getchar(b, 0, prev.y)))
+            break;
           token = token_read(b, &x, &y, buf_y1, &prev_tmp, &next_tmp);
           if (token != '(') {
             prev = prev_tmp;
@@ -2065,15 +2068,15 @@ static void state_init() {
 
   G.main_pane.bounds = rect_create(0, 0, G.term_width-1, G.term_height-1);
 
-  G.comment_style.fcolor = COLOR_GREEN;
+  G.comment_style.fcolor = COLOR_BLUE;
   G.comment_style.bcolor = COLOR_BLACK;
-  G.identifier_style.fcolor = COLOR_BLUE;
+  G.identifier_style.fcolor = COLOR_GREEN;
   G.identifier_style.bcolor = COLOR_BLACK;
-  G.keyword_style.fcolor = COLOR_CYAN;
+  G.keyword_style.fcolor = COLOR_MAGENTA;
   G.keyword_style.bcolor = COLOR_BLACK;
-  G.string_style.fcolor = COLOR_YELLOW;
+  G.string_style.fcolor = COLOR_RED;
   G.string_style.bcolor = COLOR_BLACK;
-  G.number_style.fcolor = COLOR_CYAN;
+  G.number_style.fcolor = COLOR_RED;
   G.number_style.bcolor = COLOR_BLACK;
 }
 
@@ -2105,6 +2108,7 @@ int main(int argc, const char **argv) {
 
   /* set up terminal */
   term_enable_raw_mode();
+  atexit(term_reset_to_default_settings);
 
   state_init();
 
@@ -2115,7 +2119,8 @@ int main(int argc, const char **argv) {
     err = file_open(filename, G.main_pane.buffer);
     if (err) {
       status_message_set("Could not open file %s: %s\n", filename, strerror(errno));
-      goto done;
+      fprintf(stderr, "Could not open file %s: %s\n", filename, strerror(errno));
+      exit(1);
     }
     if (!err)
       status_message_set("loaded %s, %i lines", filename, buffer_numlines(G.main_pane.buffer));
@@ -2148,7 +2153,5 @@ int main(int argc, const char **argv) {
     check_terminal_resize();
   }
 
-  done:
-  term_reset_to_default_settings();
   return 0;
 }
