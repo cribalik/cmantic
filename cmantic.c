@@ -12,8 +12,8 @@
  *
  * Use 256 colors
  * Jumplist
+ * Do DFS on autocompletion.
  * Autocomplete other buffers
- * Search backwards
  * Colorize search results in view
  * Action search
  * Undo
@@ -196,8 +196,11 @@ static int buffer_linesize(Buffer *b, int y) {
   return array_len(b->lines[y]);
 }
 
+static void buffer_move_to_x(Buffer *b, int x);
+
 static void buffer_goto_endline(Buffer *b) {
-  b->pos.ghost_x = -1;
+  buffer_move_to_x(b, array_len(b->lines[b->pos.y]));
+  b->pos.ghost_x = GHOST_EOL;
 }
 
 static void buffer_empty(Buffer *b) {
@@ -298,13 +301,49 @@ static void buffer_move_to(Buffer *b, int x, int y);
 static void buffer_move(Buffer *b, int x, int y);
 static void status_message_set(const char *fmt, ...);
 
-static int buffer_find(Buffer *b, char *str, int n) {
+static int buffer_find_r(Buffer *b, char *str, int n, int stay) {
   int x, y;
 
   if (!n)
     return 1;
 
   x = b->pos.x;
+  if (!stay)
+    --x;
+  y = b->pos.y;
+
+  for (;; --x) {
+    char *p;
+    if (y < 0)
+      return 1;
+    if (x < 0) {
+      --y;
+      if (y < 0)
+        return 1;
+      x = buffer_linesize(b, y);
+      continue;
+    }
+
+    p = memmem(str, n, b->lines[y], x);
+    if (!p)
+      continue;
+
+    x = p - b->lines[y];
+    buffer_move_to(b, x, y);
+    return 0;
+  }
+  return 1;
+}
+
+static int buffer_find(Buffer *b, char *str, int n, int stay) {
+  int x, y;
+
+  if (!n)
+    return 1;
+
+  x = b->pos.x;
+  if (!stay)
+    ++x;
   y = b->pos.y;
 
   for (; y < buffer_numlines(b); ++y, x = 0) {
@@ -337,7 +376,6 @@ static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, in
   buffer_insert_str(b, x0, y, str, n);
 }
 
-static void buffer_move(Buffer *b, int x, int y);
 static void buffer_insert_char(Buffer *b, char ch) {
   b->modified = 1;
   array_insert(b->lines[b->pos.y], b->pos.x, ch);
@@ -414,7 +452,6 @@ static void buffer_push_line(Buffer *b, const char *str) {
 }
 
 static void buffer_move_to_y(Buffer *b, int y);
-static void buffer_move_to_x(Buffer *b, int x);
 static void buffer_move_y(Buffer *b, int dy);
 
 static void buffer_insert_newline(Buffer *b) {
@@ -694,42 +731,23 @@ static void buffer_move_to(Buffer *b, int x, int y) {
 
 static void buffer_move_y(Buffer *b, int dy) {
   b->pos.y = clampi(b->pos.y + dy, 0, array_len(b->lines) - 1);
+
+  if (b->pos.ghost_x == GHOST_EOL)
+    b->pos.x = array_len(b->lines[b->pos.y]);
+  else
+    b->pos.x = from_visual_offset(b->lines[b->pos.y], b->pos.ghost_x);
+}
+
+static void buffer_move_x(Buffer *b, int dx) {
+  b->pos.x = clampi(b->pos.x + dx, 0, array_len(b->lines[b->pos.y]));
+  b->pos.ghost_x = to_visual_offset(b->lines[b->pos.y], b->pos.x);
 }
 
 static void buffer_move(Buffer *b, int dx, int dy) {
-  Array(char) old_line;
-  Array(char) new_line;
-  int old_x;
-
-  old_line = b->lines[b->pos.y];
-  old_x = b->pos.x;
-
-  /* y is easy */
-  buffer_move_y(b, dy);
-
-  new_line = b->lines[b->pos.y];
-
-  /* use ghost pos? */
-  if (dx == 0) {
-    if (b->pos.ghost_x == GHOST_EOL)
-      b->pos.x = array_len(new_line);
-    else
-      b->pos.x = from_visual_offset(new_line, b->pos.ghost_x);
-  }
-  else {
-    int old_vis_x;
-
-    /* buffer_move visually down/up */
-    /* TODO: only need to do this if dy != 0 */
-    old_vis_x = to_visual_offset(old_line, old_x);
-    b->pos.x = from_visual_offset(new_line, old_vis_x);
-
-    b->pos.x = clampi(b->pos.x, 0, array_len(new_line));
-
-    b->pos.x += dx;
-
-    b->pos.ghost_x = to_visual_offset(new_line, b->pos.x);
-  }
+  if (dy)
+    buffer_move_y(b, dy);
+  if (dx)
+    buffer_move_x(b, dx);
 }
 
 static void status_message_set(const char *fmt, ...) {
@@ -817,7 +835,8 @@ static void tokenize(Buffer *b) {
     }
 
     if (x == array_len(row))
-      buffer_advance_xy(b, &x, &y);
+      if (buffer_advance_xy(b, &x, &y))
+        return;
   }
 }
 
@@ -1279,7 +1298,9 @@ static const char *keywords[] = {
   "struct",
   "union",
   "enum",
-  "typedef"
+  "typedef",
+  "return",
+  "continue"
 };
 
 /* x,y: screen bounds for pane */
@@ -1303,7 +1324,7 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
 
   /* calc gutter width */
   if (draw_gutter)
-    p->gutter_width = calc_num_chars(buf_y1) + 1;
+    p->gutter_width = at_least(calc_num_chars(buf_y1) + 1, 4);
   else
     p->gutter_width = 0;
 
@@ -1389,11 +1410,13 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
 
         case TOKEN_IDENTIFIER: {
           Pos prev_tmp, next_tmp;
-          int i;
+          int i, left_of_line;
 
           /* check for keywords */
+          left_of_line = buffer_linesize(b, prev.y) - prev.x;
           for (i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-            if (strncmp(buffer_getstr_p(b, prev), keywords[i], at_most(buffer_linesize(b, prev.y)-prev.x, strlen(keywords[i]))) == 0) {
+            int keyword_len = strlen(keywords[i]);
+            if (keyword_len <= left_of_line && strncmp(buffer_getstr_p(b, prev), keywords[i], keyword_len) == 0) {
               style = G.keyword_style;
               goto done;
             }
@@ -1890,22 +1913,22 @@ static int process_input() {
 
         case 'k':
         case KEY_ARROW_UP:
-          buffer_move(G.main_pane.buffer, 0, -1);
+          buffer_move_y(G.main_pane.buffer, -1);
           break;
 
         case 'j':
         case KEY_ARROW_DOWN:
-          buffer_move(G.main_pane.buffer, 0, 1);
+          buffer_move_y(G.main_pane.buffer, 1);
           break;
 
         case 'h':
         case KEY_ARROW_LEFT:
-          buffer_move(G.main_pane.buffer, -1, 0);
+          buffer_move_x(G.main_pane.buffer, -1);
           break;
 
         case 'l':
         case KEY_ARROW_RIGHT:
-          buffer_move(G.main_pane.buffer, 1, 0);
+          buffer_move_x(G.main_pane.buffer, 1);
           break;
 
         case 'L':
@@ -1915,21 +1938,23 @@ static int process_input() {
 
         case 'H':
         case KEY_HOME:
-          buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->pos.y);
+          buffer_move_to_x(G.main_pane.buffer, 0);
           break;
 
         case 'n': {
           int err;
-          Pos old_pos;
 
-          old_pos = G.main_pane.buffer->pos;
-
-          buffer_advance(G.main_pane.buffer);
-          err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0));
-          if (err) {
-            G.main_pane.buffer->pos = old_pos;
+          err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0), 0);
+          if (err)
             status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
-          }
+        } break;
+
+        case 'N': {
+          int err;
+
+          err = buffer_find_r(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0), 0);
+          if (err)
+            status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
         } break;
 
         case ' ':
@@ -1955,6 +1980,14 @@ static int process_input() {
 
         case 'd':
           mode_delete();
+          break;
+
+        case 'J':
+          buffer_move_y(G.main_pane.buffer, G.main_pane.bounds.h/2);
+          break;
+
+        case 'K':
+          buffer_move_y(G.main_pane.buffer, -G.main_pane.bounds.h/2);
           break;
       }
       break;
@@ -1996,7 +2029,8 @@ static int process_input() {
         search = G.search_buffer.lines[0];
         G.search_failed = buffer_find(G.main_pane.buffer,
                                  search,
-                                 array_len(search));
+                                 array_len(search),
+                                 1);
       }
       break;
 
