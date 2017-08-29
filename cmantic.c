@@ -15,6 +15,7 @@
  * Colorize search results in view
  * Undo
  * Multiple cursors
+ * Folding
  *
  * load files
  * movement (word, parentheses, block)
@@ -1370,6 +1371,7 @@ static const char *keywords[] = {
   "long",
   "float",
   "double",
+  "unsigned",
   "void",
   "define",
   "ifdef",
