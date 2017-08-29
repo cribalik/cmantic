@@ -1,5 +1,4 @@
-/* CURRENT: Autoindent
- *
+/* CURRENT:
  *
  *
  * TODO:
@@ -13,9 +12,7 @@
  * Use 256 colors
  * Jumplist
  * Do DFS on autocompletion.
- * Autocomplete other buffers
  * Colorize search results in view
- * Action search
  * Undo
  * Multiple cursors
  *
@@ -634,6 +631,7 @@ static struct State {
 
   /* dropdown state */
   Pos dropdown_pos; /* where dropdown was initialized */
+  int dropdown_backwards;
   int dropdown_visible;
 
   /* goto state */
@@ -1701,7 +1699,7 @@ static int dropdown_match_cmp(const void *aa, const void *bb) {
 }
 
 static void dropdown_render(Pane *active_pane) {
-  int i, max_width, input_len, overflow, backwards;
+  int i, max_width, input_len, overflow;
   char *input_str;
   Array(char*) identifiers;
   DropdownMatch *best_matches;
@@ -1800,19 +1798,40 @@ static void dropdown_render(Pane *active_pane) {
   overflow = G.dropdown_pane.bounds.x + G.dropdown_pane.bounds.w - (G.term_width - 1);
   if (overflow > 0)
     G.dropdown_pane.bounds.x -= overflow;
-  backwards = G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h >= G.term_height;
-  if (backwards)
+  G.dropdown_backwards = G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h >= G.term_height;
+  if (G.dropdown_backwards)
     G.dropdown_pane.bounds.y -= G.dropdown_pane.bounds.h+1;
 
   buffer_empty(&G.dropdown_buffer);
   for (i = 0; i < num_best_matches; ++i) {
-    int which = backwards ? num_best_matches-1-i : i;
+    int which = G.dropdown_backwards ? num_best_matches-1-i : i;
     buffer_push_line(&G.dropdown_buffer, best_matches[which].str);
   }
   free(best_matches);
 
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
     render_pane(&G.dropdown_pane, 0, 0);
+}
+
+static int dropdown_get_first_line() {
+  if (G.dropdown_backwards)
+    return buffer_numlines(&G.dropdown_buffer)-1;
+  else
+    return 0;
+}
+
+static void dropdown_autocomplete(Buffer *b) {
+  char *str;
+  int l,y;
+
+  if (!G.dropdown_visible || buffer_isempty(&G.dropdown_buffer))
+    return;
+
+  y = dropdown_get_first_line();
+  str = G.dropdown_buffer.lines[y];
+  l = buffer_linesize(&G.dropdown_buffer, y);
+  buffer_replace(b, G.dropdown_pos.x, b->pos.x, b->pos.y, str, l);
+  G.dropdown_visible = 0;
 }
 
 static void dropdown_update_on_insert(Pane *active_pane, int input) {
@@ -1835,14 +1854,16 @@ static void dropdown_update_on_insert(Pane *active_pane, int input) {
 }
 
 static void insert_default(Pane *p, int input) {
-  Buffer *b = p->buffer;
+  Buffer *b;
+
+  b = p->buffer;
 
   /* TODO: should not set `modifier` if we just enter and exit insert mode */
   if (input == KEY_ESCAPE)
     mode_normal(1);
   else if (!key_is_special(input)) {
-    if (p != &G.bottom_pane)
-      dropdown_update_on_insert(&G.main_pane, input);
+    /*if (p != &G.bottom_pane)*/
+    dropdown_update_on_insert(p, input);
     buffer_insert_char(b, input);
   } else {
     switch (input) {
@@ -1851,18 +1872,8 @@ static void insert_default(Pane *p, int input) {
         break;
 
       case KEY_TAB: {
-        if (p != &G.bottom_pane && G.dropdown_visible) {
-          char *str;
-          int l;
-
-          if (buffer_isempty(&G.dropdown_buffer))
-            break;
-
-          str = G.dropdown_buffer.lines[0];
-          l = buffer_linesize(&G.dropdown_buffer, 0);
-          buffer_replace(b, G.dropdown_pos.x, b->pos.x, b->pos.y, str, l);
-          G.dropdown_visible = 0;
-        }
+        if (G.dropdown_visible)
+          dropdown_autocomplete(b);
         else
           buffer_insert_tab(b);
       } break;
@@ -1954,6 +1965,9 @@ static int process_input() {
           mode_normal(1);
           break;
         }
+
+        if (G.dropdown_visible)
+          dropdown_autocomplete(&G.menu_buffer);
 
         line = G.menu_buffer.lines[0];
         #define IS_OPTION(str) (array_len(line) == strlen(str) && strncmp(line, str, array_len(line)) == 0)
@@ -2102,10 +2116,29 @@ static int process_input() {
       mode_normal(1);
       break;
 
-    case MODE_SEARCH:
+    case MODE_SEARCH: {
+      Array(char) search;
+
       G.bottom_pane.buffer = &G.search_buffer;
+      if (input == KEY_RETURN || input == KEY_ESCAPE)
+        dropdown_autocomplete(&G.search_buffer);
+      else
+        insert_default(&G.bottom_pane, input);
+
+      search = G.search_buffer.lines[0];
+      G.search_failed = buffer_find(G.main_pane.buffer,
+                               search,
+                               array_len(search),
+                               1);
 
       if (input == KEY_RETURN || input == KEY_ESCAPE) {
+        if (G.dropdown_visible) {
+          dropdown_get_first_line();
+          G.search_failed = buffer_find(G.main_pane.buffer,
+                                   search,
+                                   array_len(search),
+                                   1);
+        }
         if (G.search_failed) {
           G.main_pane.buffer->pos = G.search_begin_pos;
           status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), G.search_buffer.lines[0]);
@@ -2113,16 +2146,8 @@ static int process_input() {
         } else
           mode_normal(1);
       }
-      else {
-        Array(char) search;
-        insert_default(&G.bottom_pane, input);
-        search = G.search_buffer.lines[0];
-        G.search_failed = buffer_find(G.main_pane.buffer,
-                                 search,
-                                 array_len(search),
-                                 1);
-      }
-      break;
+    
+    } break;
 
     case MODE_DELETE:
       switch (input) {
@@ -2148,6 +2173,12 @@ static int process_input() {
   buffer_move(G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
   return 0;
 }
+
+static const char *menu_options[] = {
+  "quit",
+  "save",
+  "show_tabs"
+};
 
 static void state_init() {
   int err;
@@ -2179,6 +2210,9 @@ static void state_init() {
 
   G.main_pane.style.bcolor = COLOR_BLACK;
   G.main_pane.style.fcolor = COLOR_WHITE;
+
+  G.menu_buffer.identifiers = 0;
+  array_push_a(G.menu_buffer.identifiers, menu_options, (int)ARRAY_LEN(menu_options));
 
   G.bottom_pane.style.bcolor = COLOR_MAGENTA;
   G.bottom_pane.style.fcolor = COLOR_BLACK;
@@ -2259,7 +2293,11 @@ int main(int argc, const char **argv) {
     render_pane(&G.bottom_pane, 0, 0);
 
     /* draw dropdown ? */
-    dropdown_render(&G.main_pane);
+    G.search_buffer.identifiers = G.main_pane.buffer->identifiers;
+    if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
+      dropdown_render(&G.bottom_pane);
+    else
+      dropdown_render(&G.main_pane);
 
     /* Draw markers */
     render_marker(&G.main_pane);
