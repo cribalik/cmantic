@@ -1,4 +1,4 @@
-/* CURRENT:
+/* CURRENT: utf-8 support
  *
  *
  * TODO:
@@ -10,6 +10,7 @@
  *       if identifier disappears, remove from autocomplete list
  *
  * Use 256 colors
+ * utf-8 support
  * Jumplist
  * Do DFS on autocompletion.
  * Colorize search results in view
@@ -470,7 +471,7 @@ static int buffer_autoindent(Buffer *b, int y) {
     return 0;
 
   tab_char = b->tab_type ? ' ' : '\t';
-  tab_size = b->tab_type ? b->tab_type : 1; 
+  tab_size = b->tab_type ? b->tab_type : 1;
 
   /* count number of indents */
   indent_above = buffer_getindent(b, y-1) * tab_size;
@@ -1390,7 +1391,8 @@ static const char *keywords[] = {
   "typedef",
   "return",
   "continue",
-  "break"
+  "break",
+  "goto"
 };
 
 /* x,y: screen bounds for pane */
@@ -1642,6 +1644,31 @@ static void render_flush() {
   screen_buffer_reset();
 
 }
+
+static int menu_option_save() {
+  save_buffer(G.main_pane.buffer);
+          /* TODO: write out absolute path, instead of relative */
+  status_message_set("Wrote %i lines to %s", buffer_numlines(G.main_pane.buffer), G.main_pane.buffer->filename);
+  return 0;
+}
+
+static int menu_option_quit() {
+  return 1;
+}
+
+static int menu_option_show_tab_type() {
+  if (G.main_pane.buffer->tab_type == 0)
+    status_message_set("Tabs is \\t");
+  else
+    status_message_set("Tabs is %i spaces", G.main_pane.buffer->tab_type);
+  return 0;
+}
+
+static struct {char *name; int (*fun)();} menu_options[] = {
+  {"quit", menu_option_quit},
+  {"save", menu_option_save},
+  {"show_tab_type", menu_option_show_tab_type}
+};
 
 static void mode_search() {
   G.mode = MODE_SEARCH;
@@ -1962,6 +1989,7 @@ static int process_input() {
       G.bottom_pane.buffer = &G.menu_buffer;
       if (input == KEY_RETURN) {
         Array(char) line;
+        int i;
 
         if (buffer_isempty(&G.menu_buffer)) {
           mode_normal(1);
@@ -1972,31 +2000,20 @@ static int process_input() {
           dropdown_autocomplete(&G.menu_buffer);
 
         line = G.menu_buffer.lines[0];
-        #define IS_OPTION(str) (array_len(line) == strlen(str) && strncmp(line, str, array_len(line)) == 0)
+        for (i = 0; i < (int)ARRAY_LEN(menu_options); ++i) {
+          const char *name = menu_options[i].name;
 
-        if (IS_OPTION("save")) {
-          save_buffer(G.main_pane.buffer);
-          /* TODO: write out absolute path, instead of relative */
-          status_message_set("Wrote %i lines to %s", buffer_numlines(G.main_pane.buffer), G.main_pane.buffer->filename);
+          if (array_len(line) != (int)strlen(name) || strncmp(line, name, array_len(line)))
+            continue;
+          if (menu_options[i].fun())
+            return 1;
+          goto done;
         }
+        status_message_set("Unknown option '%.*s'", buffer_linesize(&G.menu_buffer, 0), G.menu_buffer.lines[0]);
+        done:
 
-        else if (IS_OPTION("quit") || IS_OPTION("exit"))
-          return 1;
-
-        else if (IS_OPTION("show_tabs")) {
-          if (G.main_pane.buffer->tab_type == 0)
-            status_message_set("Tabs is \\t");
-          else
-            status_message_set("Tabs is %i spaces", G.main_pane.buffer->tab_type);
-        }
-
-        else {
-          status_message_set("Unknown option '%.*s'", buffer_linesize(&G.menu_buffer, 0), G.menu_buffer.lines[0]);
-        }
 
         mode_normal(0);
-
-        #undef IS_OPTION
       }
       else if (input == KEY_ESCAPE)
         mode_normal(1);
@@ -2015,6 +2032,14 @@ static int process_input() {
             status_message_set("You have unsaved changes. If you really want to exit, use :quit");
           else
             return 1;
+          break;
+
+        case 'q':
+          /*jumplist_prev(G.main_pane.buffer);*/
+          break;
+
+        case 'w':
+          /*jumplist_next(G.main_pane.buffer);*/
           break;
 
         case 'k':
@@ -2049,18 +2074,30 @@ static int process_input() {
 
         case 'n': {
           int err;
+          Pos prev;
+
+          prev = G.main_pane.buffer->pos;
 
           err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0), 0);
-          if (err)
+          if (err) {
             status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
+            break;
+          }
+          /*jumplist_push(prev);*/
         } break;
 
         case 'N': {
           int err;
+          Pos prev;
+
+          prev = G.main_pane.buffer->pos;
 
           err = buffer_find_r(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0), 0);
-          if (err)
+          if (err) {
             status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
+            break;
+          }
+          /*jumplist_push(prev);*/
         } break;
 
         case ' ':
@@ -2148,7 +2185,7 @@ static int process_input() {
         } else
           mode_normal(1);
       }
-    
+
     } break;
 
     case MODE_DELETE:
@@ -2176,14 +2213,8 @@ static int process_input() {
   return 0;
 }
 
-static const char *menu_options[] = {
-  "quit",
-  "save",
-  "show_tabs"
-};
-
 static void state_init() {
-  int err;
+  int err, i;
 
   /* read terminal dimensions */
   err = term_get_dimensions(&G.term_width, &G.term_height);
@@ -2214,7 +2245,9 @@ static void state_init() {
   G.main_pane.style.fcolor = COLOR_WHITE;
 
   G.menu_buffer.identifiers = 0;
-  array_push_a(G.menu_buffer.identifiers, menu_options, (int)ARRAY_LEN(menu_options));
+  array_push_n(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
+  for (i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
+    G.menu_buffer.identifiers[i] = menu_options[i].name;
 
   G.bottom_pane.style.bcolor = COLOR_MAGENTA;
   G.bottom_pane.style.fcolor = COLOR_BLACK;
