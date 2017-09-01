@@ -1,4 +1,5 @@
-/* CURRENT: utf-8 support
+/* CURRENT: Crash when 'o' on empty line
+ * utf-8 support
  *
  *
  * TODO:
@@ -9,6 +10,7 @@
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
+ * Registers
  * Use 256 colors
  * utf-8 support
  * Jumplist
@@ -385,8 +387,37 @@ static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, in
   buffer_insert_str(b, x0, y, str, n);
 }
 
-static void buffer_move_x(Buffer *b, int dx);
+static void buffer_remove_trailing_whitespace(Buffer *b, int y) {
+  int x;
+  
+  x = buffer_linesize(b, y) - 1;
+  while (x >= 0 && isspace(buffer_getchar(b, x, y)))
+    --x;
+  array_resize(b->lines[y], x+1);
+  if (b->pos.y == y && b->pos.x > x+1)
+    buffer_move_to_x(b, x+1);
+}
+
 static int buffer_autoindent(Buffer *b, int y);
+static void buffer_move_y(Buffer *b, int dy);
+static void buffer_move_x(Buffer *b, int dx);
+
+static void buffer_pretty_range(Buffer *b, int y0, int y1) {
+  for (; y0 < y1; ++y0) {
+#if 0
+    int diff;
+    diff = buffer_autoindent(b, y0);
+    if (y0 == b->pos.y)
+      buffer_move_x(b, diff);
+#endif
+    buffer_remove_trailing_whitespace(b, y0);
+  }
+}
+
+static void buffer_pretty(Buffer *b, int y) {
+  buffer_pretty_range(b, y, y+1);
+}
+
 
 static void buffer_insert_char(Buffer *b, char ch) {
   b->modified = 1;
@@ -467,14 +498,20 @@ static int buffer_autoindent(Buffer *b, int y) {
   int tab_size;
   char tab_char;
 
-  if (y == 0)
-    return 0;
-
   tab_char = b->tab_type ? ' ' : '\t';
   tab_size = b->tab_type ? b->tab_type : 1;
 
-  /* count number of indents */
-  indent_above = buffer_getindent(b, y-1) * tab_size;
+  if (y == 0)
+    return -buffer_getindent(b, y);
+
+  /* count number of indents above */
+  /* skip empty lines */
+  for (i = y-1; i > 0; --i)
+    if (buffer_linesize(b, i) > 0)
+      break;
+  if (i == 0)
+    return -buffer_getindent(b, y);
+  indent_above = buffer_getindent(b, i) * tab_size;
 
   /* TODO: open braces */
   l = array_len(b->lines[y-1]) - indent_above;
@@ -482,10 +519,11 @@ static int buffer_autoindent(Buffer *b, int y) {
   i = array_len(b->lines[y-1])-1;
   if (i >= 0 && b->lines[y-1][i] == '{')
     ++diff;
-  else if ((l >= 3 && strncmp("for",   b->lines[y-1]+indent_above, 3) == 0) ||
+  else if (b->lines[y-1][i] != '}' &&
+          ((l >= 3 && strncmp("for",   b->lines[y-1]+indent_above, 3) == 0) ||
            (l >= 2 && strncmp("if",    b->lines[y-1]+indent_above, 2) == 0) ||
            (l >= 5 && strncmp("while", b->lines[y-1]+indent_above, 5) == 0) ||
-           (l >= 4 && strncmp("else",  b->lines[y-1]+indent_above, 4) == 0))
+           (l >= 4 && strncmp("else",  b->lines[y-1]+indent_above, 4) == 0)))
     ++diff;
   else if (y >= 2) {
     int indent_two_above;
@@ -493,7 +531,7 @@ static int buffer_autoindent(Buffer *b, int y) {
     indent_two_above = buffer_getindent(b, y-2) * tab_size;
     l = array_len(b->lines[y-2]) - indent_two_above;
     i = array_len(b->lines[y-2])-1;
-    if (i >= 0 && b->lines[y-2][i] != '{' &&
+    if (i >= 0 && b->lines[y-2][i] != '{' && b->lines[y-2][i] != '}' &&
        ((l >= 3 && strncmp("for",   b->lines[y-2]+indent_two_above, 3) == 0) ||
         (l >= 2 && strncmp("if",    b->lines[y-2]+indent_two_above, 2) == 0) ||
         (l >= 5 && strncmp("while", b->lines[y-2]+indent_two_above, 5) == 0) ||
@@ -501,12 +539,16 @@ static int buffer_autoindent(Buffer *b, int y) {
     --diff;
   }
 
+  indent_this = buffer_getindent(b, y) * tab_size;
   i = array_len(b->lines[y])-1;
-  if (i >= 0 && b->lines[y][i] == '}')
+  if (i >= 0 && b->lines[y][i] == '}' && !(
+        (l >= 3 && strncmp("for",   b->lines[y]+indent_this, 3) == 0) ||
+        (l >= 2 && strncmp("if",    b->lines[y]+indent_this, 2) == 0) ||
+        (l >= 5 && strncmp("while", b->lines[y]+indent_this, 5) == 0) ||
+        (l >= 4 && strncmp("else",  b->lines[y]+indent_this, 4) == 0)))
     --diff;
 
   /* count number of indents */
-  indent_this = buffer_getindent(b, y) * tab_size;
   diff = indent_above + diff*tab_size - indent_this;
   if (diff < 0) {
     array_remove_slow_n(b->lines[y], 0, -diff);
@@ -538,7 +580,6 @@ static void buffer_push_line(Buffer *b, const char *str) {
 }
 
 static void buffer_move_to_y(Buffer *b, int y);
-static void buffer_move_y(Buffer *b, int dy);
 
 static void buffer_insert_newline(Buffer *b) {
   int left_of_line;
@@ -550,9 +591,11 @@ static void buffer_insert_newline(Buffer *b) {
   array_push_a(b->lines[b->pos.y+1], b->lines[b->pos.y] + b->pos.x, left_of_line);
   array_resize(b->lines[b->pos.y], b->pos.x);
 
+
   buffer_move_y(b, 1);
   buffer_move_to_x(b, 0);
   buffer_move_x(b, buffer_autoindent(b, b->pos.y));
+  buffer_pretty(b, b->pos.y-1);
 }
 
 static void buffer_insert_newline_below(Buffer *b) {
@@ -630,6 +673,9 @@ static struct State {
          message_buffer,
          dropdown_buffer;
   Mode mode;
+
+  /* insert state */
+  int insert_mode_begin_y;
 
   /* dropdown state */
   Pos dropdown_pos; /* where dropdown was initialized */
@@ -1705,6 +1751,7 @@ static void mode_insert() {
   G.mode = MODE_INSERT;
   G.bottom_pane.buffer = &G.message_buffer;
   G.dropdown_visible = 0;
+  G.insert_mode_begin_y = G.main_pane.buffer->pos.y;
   status_message_set("insert");
 }
 
@@ -1735,6 +1782,9 @@ static void dropdown_render(Pane *active_pane) {
   int num_best_matches;
   Buffer *active_buffer;
   Pos p;
+
+  if (!G.dropdown_visible)
+    return;
 
   num_best_matches = 0;
   best_matches = malloc(G.dropdown_size * sizeof(*best_matches));
@@ -1888,8 +1938,10 @@ static void insert_default(Pane *p, int input) {
   b = p->buffer;
 
   /* TODO: should not set `modifier` if we just enter and exit insert mode */
-  if (input == KEY_ESCAPE)
+  if (input == KEY_ESCAPE) {
+    buffer_pretty_range(G.main_pane.buffer, G.insert_mode_begin_y, G.main_pane.buffer->pos.y+1);
     mode_normal(1);
+  }
   else if (!key_is_special(input)) {
     /*if (p != &G.bottom_pane)*/
     dropdown_update_on_insert(p, input);
@@ -2209,7 +2261,9 @@ static int process_input() {
       break;
   }
 
-  buffer_move(G.main_pane.buffer, 0, 0); /* update cursor in case anything happened (like changing modes) */
+  /* just in case */
+  G.main_pane.buffer->pos.y = clampi(G.main_pane.buffer->pos.y, 0, buffer_numlines(G.main_pane.buffer)-1);
+  G.main_pane.buffer->pos.x = clampi(G.main_pane.buffer->pos.x, 0, buffer_linesize(G.main_pane.buffer, G.main_pane.buffer->pos.y));
   return 0;
 }
 
