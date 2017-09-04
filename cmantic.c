@@ -1,6 +1,4 @@
-/* CURRENT: Crash when 'o' on empty line
- * utf-8 support
- *
+/* CURRENT: utf-8 support
  *
  * TODO:
  *
@@ -15,7 +13,7 @@
  * utf-8 support
  * Jumplist
  * Do DFS on autocompletion.
- * Colorize search results in view
+Ã * Colorize search results in view
  * Undo
  * Multiple cursors
  * Folding
@@ -61,6 +59,8 @@
 
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
+#define IS_UTF8_TRAIL(c) (((c)&0xC0) == 0xC0)
+#define IS_UTF8_HEAD(c) ((c)&0x80)
 
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
@@ -455,6 +455,7 @@ static void buffer_delete_char(Buffer *b) {
     buffer_delete_line_at(b, b->pos.y+1);
   }
   else {
+#error Change move so that it understands utf8, end then create a buffer_delete_range
     buffer_move(b, -1, 0);
     array_remove_slow(b->lines[b->pos.y], b->pos.x);
   }
@@ -643,7 +644,7 @@ typedef enum Mode {
 } Mode;
 
 typedef struct {
-  char c;
+  char c[4]; /* should be enough to hold any utf8 char that we care about */
   /* TODO: why isn't 1 working for flags (we get overflow warnings)? */
   Style style;
 } Pixel;
@@ -755,25 +756,50 @@ static void buffer_guess_tab_type(Buffer *b) {
     b->tab_type = G.default_tab_type;
 }
 
+static void char_to_wide(char c, char res[4]) {
+  *(u32*)res = 0;
+  res[0] = c;
+}
+
+static int utf8_to_wide(const char *str, char res[4]) {
+  *(u32*)res = 0;
+
+  *res++ = *str++;
+
+  if (!IS_UTF8_TRAIL(*str))
+    return 1;
+  *res++ = *str++;
+  if (!IS_UTF8_TRAIL(*str))
+    return 2;
+  *res++ = *str++;
+  if (!IS_UTF8_TRAIL(*str))
+    return 3;
+  *res++ = *str++;
+  return 4;
+}
+
 static void render_strn(int x0, int x1, int y, const char *str, int n) {
   Pixel *row = &G.screen_buffer[G.term_width*y];
+  const char *end;
 
   if (!str)
     return;
 
-  while (n-- && x0 < x1) {
+  for (end = str+n; str != end && x0 < x1;) {
     if (*str == '\t') {
       int end = x0 + at_most(G.tab_width, x1 - x0);
       for (; x0 < end; ++x0)
-        row[x0].c = ' ';
+        char_to_wide(' ', row[x0].c);
+      ++str;
     }
-    else
-      row[x0++].c = *str;
-    ++str;
+    else {
+      str += utf8_to_wide(str, row[x0].c);
+      ++x0;
+    }
   }
   /* pad with spaces to x1 */
   for (; x0 < x1; ++x0)
-    row[x0].c = ' ';
+    char_to_wide(' ', row[x0].c);
 }
 
 static void render_str_v(int x0, int x1, int y, const char *fmt, va_list args) {
@@ -801,7 +827,9 @@ static int to_visual_offset(Array(char) line, int x) {
     ++result;
     if (line[i] == '\t')
       result += G.tab_width-1;
-
+    if (IS_UTF8_HEAD(line[i]))
+      while (IS_UTF8_TRAIL(line[i]) && i < x)
+        ++i;
   }
   return result;
 }
@@ -817,6 +845,8 @@ static int from_visual_offset(Array(char) line, int x) {
     ++visual;
     if (line[i] == '\t')
       visual += G.tab_width-1;
+    if (IS_UTF8_TRAIL(line[i]))
+      --visual;
 
     if (visual > x)
       return i;
@@ -1367,7 +1397,7 @@ static int file_open(const char *filename, Buffer *buffer_out) {
 
 static void render_clear(int x0, int x1, int y) {
   for (; x0 < x1; ++x0)
-    G.screen_buffer[y*G.term_width + x0].c = ' ';
+    char_to_wide(' ', G.screen_buffer[y*G.term_width + x0].c);
 }
 
 static void render_set_style_block(Style style, int x0, int x1, int y0, int y1) {
@@ -1487,7 +1517,7 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
     /* gutter */
     render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, buf_y+1);
 
-    if (!line || array_len(line) <= buf_x0)
+    if (array_len(line) <= buf_x0)
       continue;
 
     /* text */
@@ -1635,7 +1665,7 @@ static void save_buffer(Buffer *b) {
 static void screen_buffer_reset() {
   int i;
   for (i = 0; i < G.term_width * G.term_height; ++i) {
-    G.screen_buffer[i].c = ' ';
+    char_to_wide(' ', G.screen_buffer[i].c);
     G.screen_buffer[i].style = G.default_style;
   }
 }
@@ -1679,7 +1709,13 @@ static void render_flush() {
       term_apply_style(&G.tmp_render_buffer, p.style, style);
       style = p.style;
     }
-    array_push(G.tmp_render_buffer, p.c);
+    array_push(G.tmp_render_buffer, p.c[0]);
+    if (IS_UTF8_TRAIL(p.c[1]))
+      array_push(G.tmp_render_buffer, p.c[1]);
+    if (IS_UTF8_TRAIL(p.c[2]))
+      array_push(G.tmp_render_buffer, p.c[2]);
+    if (IS_UTF8_TRAIL(p.c[3]))
+      array_push(G.tmp_render_buffer, p.c[3]);
   }
   /* flush buffer */
   write(STDOUT_FILENO, G.tmp_render_buffer, array_len(G.tmp_render_buffer));
@@ -2211,7 +2247,7 @@ static int process_input() {
       Array(char) search;
 
       G.bottom_pane.buffer = &G.search_buffer;
-      if (input == KEY_RETURN || input == KEY_ESCAPE)
+      if (input == KEY_ESCAPE)
         dropdown_autocomplete(&G.search_buffer);
       else
         insert_default(&G.bottom_pane, input);
