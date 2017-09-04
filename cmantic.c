@@ -519,7 +519,7 @@ static int buffer_autoindent(Buffer *b, int y) {
   i = array_len(b->lines[y-1])-1;
   if (i >= 0 && b->lines[y-1][i] == '{')
     ++diff;
-  else if (b->lines[y-1][i] != '}' &&
+  else if (i >= 0 && b->lines[y-1][i] != '}' &&
           ((l >= 3 && strncmp("for",   b->lines[y-1]+indent_above, 3) == 0) ||
            (l >= 2 && strncmp("if",    b->lines[y-1]+indent_above, 2) == 0) ||
            (l >= 5 && strncmp("while", b->lines[y-1]+indent_above, 5) == 0) ||
