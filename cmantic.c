@@ -108,7 +108,8 @@ static int clampi(int x, int a, int b) {
 #define arrcount(arr) (sizeof(arr)/sizeof(*arr))
 
 typedef enum Key {
-  KEY_UNKNOWN = 0,
+  KEY_NONE = 0,
+  KEY_UNKNOWN = 1,
   KEY_ESCAPE = '\x1b',
   KEY_RETURN = '\r',
   KEY_TAB = '\t',
@@ -122,10 +123,6 @@ typedef enum Key {
   KEY_END,
   KEY_HOME
 } Key;
-
-static int key_is_special(Key key) {
-  return key == KEY_ESCAPE || key == KEY_RETURN || key == KEY_TAB || key == KEY_BACKSPACE || key >= KEY_SPECIAL;
-}
 
 typedef struct Rect {
   int x,y,w,h;
@@ -421,11 +418,14 @@ static void buffer_pretty(Buffer *b, int y) {
 }
 
 
-static void buffer_insert_char(Buffer *b, char ch) {
+static void buffer_insert_char(Buffer *b, unsigned char ch[4]) {
+  int n = 1;
+  if (IS_UTF8_HEAD(ch[0]))
+    while (n < 4 && IS_UTF8_TRAIL(ch[n])) ++n;
   b->modified = 1;
-  array_insert(b->lines[b->pos.y], b->pos.x, ch);
-  buffer_move(b, 1, 0);
-  if (ch == '}')
+  array_insert_a(b->lines[b->pos.y], b->pos.x, ch, n);
+  buffer_move(b, n, 0);
+  if (ch[0] == '}')
     buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
@@ -1981,16 +1981,16 @@ static void dropdown_autocomplete(Buffer *b) {
   G.dropdown_visible = 0;
 }
 
-static void dropdown_update_on_insert(Pane *active_pane, int input) {
+static void dropdown_update_on_insert(Pane *active_pane, unsigned char input[4]) {
 
   if (!G.dropdown_visible) {
-    if (!isalpha(input) && input != '_')
+    if (!IS_IDENTIFIER_HEAD(*input))
       goto dropdown_hide;
 
     G.dropdown_pos = active_pane->buffer->pos;
   }
   else
-    if (!isalnum(input) && input != '_')
+    if (!IS_IDENTIFIER_TAIL(*input))
       goto dropdown_hide;
 
   G.dropdown_visible = 1;
@@ -2000,104 +2000,141 @@ static void dropdown_update_on_insert(Pane *active_pane, int input) {
   G.dropdown_visible = 0;
 }
 
-static void insert_default(Pane *p, int input) {
+static void insert_default(Pane *p, int special_key, unsigned char input[4]) {
   Buffer *b;
 
   b = p->buffer;
 
   /* TODO: should not set `modifier` if we just enter and exit insert mode */
-  if (input == KEY_ESCAPE) {
+  if (special_key == KEY_ESCAPE) {
     buffer_pretty_range(G.main_pane.buffer, G.insert_mode_begin_y, G.main_pane.buffer->pos.y+1);
     mode_normal(1);
+    return;
   }
-  else if (!key_is_special(input)) {
+
+  if (!special_key) {
     /*if (p != &G.bottom_pane)*/
     dropdown_update_on_insert(p, input);
     buffer_insert_char(b, input);
-  } else {
-    switch (input) {
-      case KEY_RETURN:
-        buffer_insert_newline(b);
-        break;
+    return;
+  }
 
-      case KEY_TAB: {
-        if (G.dropdown_visible)
-          dropdown_autocomplete(b);
-        else
-          buffer_insert_tab(b);
-      } break;
+  switch (special_key) {
+    case KEY_RETURN:
+      buffer_insert_newline(b);
+      break;
 
-      case KEY_BACKSPACE:
-        buffer_delete_char(b);
-        break;
+    case KEY_TAB: {
+      if (G.dropdown_visible)
+        dropdown_autocomplete(b);
+      else
+        buffer_insert_tab(b);
+    } break;
 
-      default:
-        break;
-    }
+    case KEY_BACKSPACE:
+      buffer_delete_char(b);
+      break;
+
+    default:
+      break;
+  }
+}
+
+static int read_char(unsigned char *c) {
+  int err;
+
+  for (;;) {
+    err = read_timeout(c, 1, 0);
+    if (err == 1)
+      return 0;
+    if (err == -1 && errno != EAGAIN)
+      return 1;
   }
 }
 
 static int process_input() {
-  int input;
+  Key special_key = 0;
+  /* utf8 input */
+  unsigned char input[4] = {0};
 
   /* get input */
   {
-    unsigned char c;
     int nread;
-    while ((nread = read_timeout(&c, 1, 0)) != 1)
-      if (nread == -1 && errno != EAGAIN)
-        return 1;
+
+    if (read_char(input))
+      return 1;
+
+    if (IS_UTF8_HEAD(*input)) {
+      unsigned char *c = input+1;
+      unsigned char x;
+
+      for (x = *input << 1; x&0x80; x <<= 1, ++c)
+        if (read_char(c))
+          return 1;
+    }
+
+    /* some special chars */
+    switch (*input) {
+      case '\t':
+        special_key = KEY_TAB;
+        break;
+      case '\r':
+        special_key = KEY_RETURN;
+        break;
+      case KEY_BACKSPACE:
+        special_key = KEY_BACKSPACE;
+        break;
+      default:
+        break;
+    }
+
+    if (*input != '\x1b')
+      goto input_done;
 
     /* escape sequence? */
-    if (c == '\x1b') {
-      /* read '[' */
-      nread = read_timeout(&c, 1, G.read_timeout_ms);
-      if (nread == -1 && errno != EAGAIN)
-        return 1;
-      if (nread == 0 || c != '[') {
-        input = KEY_ESCAPE;
-        goto input_done;
-      }
-
-      /* read actual character */
-      nread = read_timeout(&c, 1, G.read_timeout_ms);
-      if (nread == -1 && errno != EAGAIN)
-        return 1;
-      if (nread == 0) {
-        input = KEY_UNKNOWN;
-        goto input_done;
-      }
-
-      IF_DEBUG(fprintf(stderr, "escape %c\n", c);)
-
-      if (c >= '0' && c <= '9') {
-        switch (c) {
-          case '1': input = KEY_HOME; break;
-          case '4': input = KEY_END; break;
-        }
-
-        nread = read_timeout(&c, 1, G.read_timeout_ms);
-        if (nread == -1 && errno != EAGAIN)
-          return 1;
-        if (nread == 0 && c != '~') {
-          input = KEY_UNKNOWN;
-          goto input_done;
-        }
-      } else {
-        switch (c) {
-          case 'A': input = KEY_ARROW_UP; break;
-          case 'B': input = KEY_ARROW_DOWN; break;
-          case 'C': input = KEY_ARROW_RIGHT; break;
-          case 'D': input = KEY_ARROW_LEFT; break;
-          case 'F': input = KEY_END; break;
-          case 'H': input = KEY_HOME; break;
-          default: input = 0; break;
-        }
-      }
+    /* read '[' */
+    nread = read_timeout(input, 1, G.read_timeout_ms);
+    if (nread == -1 && errno != EAGAIN)
+      return 1;
+    if (nread == 0 || *input != '[') {
+      special_key = KEY_ESCAPE;
+      goto input_done;
     }
-    else {
-      input = c;
-      IF_DEBUG(fprintf(stderr, "%c\n", c);)
+
+    /* read actual character */
+    nread = read_timeout(input, 1, G.read_timeout_ms);
+    if (nread == -1 && errno != EAGAIN)
+      return 1;
+    if (nread == 0) {
+      special_key = KEY_UNKNOWN;
+      goto input_done;
+    }
+
+    IF_DEBUG(fprintf(stderr, "escape %c\n", *input);)
+
+    if (*input >= '0' && *input <= '9') {
+      switch (*input) {
+        case '1': special_key = KEY_HOME; break;
+        case '4': special_key = KEY_END; break;
+      }
+
+      nread = read_timeout(input, 1, G.read_timeout_ms);
+      if (nread == -1 && errno != EAGAIN)
+        return 1;
+      if (nread == 0 && *input != '~') {
+        special_key = KEY_UNKNOWN;
+        goto input_done;
+      }
+    } else {
+      switch (*input) {
+        case 'A': special_key = KEY_ARROW_UP; break;
+        case 'B': special_key = KEY_ARROW_DOWN; break;
+        case 'C': special_key = KEY_ARROW_RIGHT; break;
+        case 'D': special_key = KEY_ARROW_LEFT; break;
+        case 'F': special_key = KEY_END; break;
+        case 'H': special_key = KEY_HOME; break;
+        default: special_key = KEY_UNKNOWN; break;
+      }
     }
   }
 
@@ -2107,7 +2144,7 @@ static int process_input() {
   switch (G.mode) {
     case MODE_MENU:
       G.bottom_pane.buffer = &G.menu_buffer;
-      if (input == KEY_RETURN) {
+      if (special_key == KEY_RETURN) {
         Array(char) line;
         int i;
 
@@ -2135,15 +2172,15 @@ static int process_input() {
 
         mode_normal(0);
       }
-      else if (input == KEY_ESCAPE)
+      else if (special_key == KEY_ESCAPE)
         mode_normal(1);
       else
-        insert_default(&G.bottom_pane, input);
+        insert_default(&G.bottom_pane, special_key, input);
       /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
       break;
 
     case MODE_NORMAL:
-      switch (input) {
+      switch (special_key ? special_key : input[0]) {
         case KEY_UNKNOWN:
           break;
 
@@ -2256,15 +2293,15 @@ static int process_input() {
       break;
 
     case MODE_GOTO:
-      if (isdigit(input)) {
+      if (isdigit(input[0])) {
         G.goto_line_number *= 10;
-        G.goto_line_number += input - '0';
+        G.goto_line_number += input[0] - '0';
         buffer_move_to_y(G.main_pane.buffer, G.goto_line_number-1);
         status_message_set("goto %u", G.goto_line_number);
         break;
       }
 
-      switch (input) {
+      switch (special_key ? special_key : input[0]) {
         case 't':
           buffer_move_to(G.main_pane.buffer, 0, 0);
           break;
@@ -2279,10 +2316,10 @@ static int process_input() {
       Array(char) search;
 
       G.bottom_pane.buffer = &G.search_buffer;
-      if (input == KEY_ESCAPE)
+      if (special_key == KEY_ESCAPE)
         dropdown_autocomplete(&G.search_buffer);
       else
-        insert_default(&G.bottom_pane, input);
+        insert_default(&G.bottom_pane, special_key, input);
 
       search = G.search_buffer.lines[0];
       G.search_failed = buffer_find(G.main_pane.buffer,
@@ -2290,7 +2327,7 @@ static int process_input() {
                                array_len(search),
                                1);
 
-      if (input == KEY_RETURN || input == KEY_ESCAPE) {
+      if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
         if (G.dropdown_visible) {
           dropdown_get_first_line();
           G.search_failed = buffer_find(G.main_pane.buffer,
@@ -2309,7 +2346,7 @@ static int process_input() {
     } break;
 
     case MODE_DELETE:
-      switch (input) {
+      switch (special_key ? special_key : input[0]) {
         case 'd':
           buffer_delete_line(G.main_pane.buffer);
           mode_normal(1);
@@ -2322,7 +2359,7 @@ static int process_input() {
       break;
 
     case MODE_INSERT:
-      insert_default(&G.main_pane, input);
+      insert_default(&G.main_pane, special_key, input);
       break;
 
     case MODE_COUNT:
