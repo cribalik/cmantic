@@ -2,23 +2,24 @@
  *
  * TODO:
  *
- * Update identifiers as you type
+ * Update identifiers as you ty
  *       When you make a change, go backwards to check if it was an
  *       identifier, and update the identifier list.
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
  * Registers
- * Use 256 colors
+ * Use 256 color
  * utf-8 support
  * Jumplist
  * Do DFS on autocompletion.
-Ã * Colorize search results in view
+ * Colorize search results in view
  * Undo
  * Multiple cursors
  * Folding
  *
  * load files
+ * Fuzzy file finding
  * movement (word, parentheses, block)
  * actions (Delete, Yank, ...)
  * add folders
@@ -59,8 +60,10 @@
 
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
-#define IS_UTF8_TRAIL(c) (((c)&0xC0) == 0xC0)
+#define IS_UTF8_TRAIL(c) (((c)&0xC0) == 0x80)
 #define IS_UTF8_HEAD(c) ((c)&0x80)
+#define IS_IDENTIFIER_HEAD(c) (isalpha(c) || (c) == '_' || IS_UTF8_HEAD(c))
+#define IS_IDENTIFIER_TAIL(c) (isalnum(c) || (c) == '_' || IS_UTF8_TRAIL(c))
 
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
@@ -72,7 +75,6 @@ static void array_push_str(Array(char) *a, const char *str) {
 
 static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
   char *h, *hend;
-
   if (!needle_len || haystack_len < needle_len)
     return 0;
 
@@ -439,6 +441,22 @@ static void buffer_delete_line(Buffer *b) {
   buffer_delete_line_at(b, b->pos.y);
 }
 
+/* a,b inclusive */
+static void buffer_remove_range(Buffer *buf, Pos a, Pos b) {
+  int y0 = a.y;
+  int y1 = b.y;
+  int y;
+  if (y0 == y1) {
+    array_remove_slow_n(buf->lines[y0], a.x, b.x-a.x+1);
+    return;
+  }
+  array_resize(buf->lines[y0], a.x);
+  ++y0;
+  for (y = y0; y < y1; ++y)
+    buffer_delete_line_at(buf, y0);
+  array_remove_slow_n(buf->lines[y0], 0, b.x+1);
+}
+
 static void buffer_delete_char(Buffer *b) {
   b->modified = 1;
   if (b->pos.x == 0) {
@@ -455,9 +473,9 @@ static void buffer_delete_char(Buffer *b) {
     buffer_delete_line_at(b, b->pos.y+1);
   }
   else {
-#error Change move so that it understands utf8, end then create a buffer_delete_range
+    Pos p = b->pos;
     buffer_move(b, -1, 0);
-    array_remove_slow(b->lines[b->pos.y], b->pos.x);
+    buffer_remove_range(b, p, b->pos);
   }
 }
 
@@ -757,22 +775,25 @@ static void buffer_guess_tab_type(Buffer *b) {
 }
 
 static void char_to_wide(char c, char res[4]) {
-  *(u32*)res = 0;
+  res[1] = res[2] = res[3] = 0;
   res[0] = c;
 }
 
-static int utf8_to_wide(const char *str, char res[4]) {
-  *(u32*)res = 0;
+static int utf8_to_wide(const char *str, const char *end, char res[4]) {
+  res[0] = res[1] = res[2] = res[3] = 0;
+
+  if (str == end)
+    return 0;
 
   *res++ = *str++;
 
-  if (!IS_UTF8_TRAIL(*str))
+  if (str == end || !IS_UTF8_TRAIL(*str))
     return 1;
   *res++ = *str++;
-  if (!IS_UTF8_TRAIL(*str))
+  if (str == end || !IS_UTF8_TRAIL(*str))
     return 2;
   *res++ = *str++;
-  if (!IS_UTF8_TRAIL(*str))
+  if (str == end || !IS_UTF8_TRAIL(*str))
     return 3;
   *res++ = *str++;
   return 4;
@@ -793,7 +814,7 @@ static void render_strn(int x0, int x1, int y, const char *str, int n) {
       ++str;
     }
     else {
-      str += utf8_to_wide(str, row[x0].c);
+      str += utf8_to_wide(str, end, row[x0].c);
       ++x0;
     }
   }
@@ -824,12 +845,12 @@ static int to_visual_offset(Array(char) line, int x) {
   if (!line) return result;
 
   for (i = 0; i < x; ++i) {
+    if (IS_UTF8_TRAIL(line[i]))
+      continue;
+
     ++result;
     if (line[i] == '\t')
       result += G.tab_width-1;
-    if (IS_UTF8_HEAD(line[i]))
-      while (IS_UTF8_TRAIL(line[i]) && i < x)
-        ++i;
   }
   return result;
 }
@@ -842,11 +863,11 @@ static int from_visual_offset(Array(char) line, int x) {
   if (!line) return 0;
 
   for (i = 0; i < array_len(line); ++i) {
+    if (IS_UTF8_TRAIL(line[i]))
+      continue;
     ++visual;
     if (line[i] == '\t')
       visual += G.tab_width-1;
-    if (IS_UTF8_TRAIL(line[i]))
-      --visual;
 
     if (visual > x)
       return i;
@@ -904,8 +925,11 @@ static void buffer_move_y(Buffer *b, int dy) {
 }
 
 static void buffer_move_x(Buffer *b, int dx) {
-  b->pos.x = clampi(b->pos.x + dx, 0, array_len(b->lines[b->pos.y]));
-  b->pos.ghost_x = to_visual_offset(b->lines[b->pos.y], b->pos.x);
+  int vx;
+  vx = at_least(0, to_visual_offset(b->lines[b->pos.y], b->pos.x) + dx);
+  b->pos.x = from_visual_offset(b->lines[b->pos.y], vx);
+  b->pos.x = clampi(b->pos.x, 0, buffer_linesize(b, b->pos.y));
+  b->pos.ghost_x = vx;
 }
 
 static void buffer_move(Buffer *b, int dx, int dy) {
@@ -1032,14 +1056,16 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     }
 
     /* identifier */
-    if (isalpha(c) || c == '_') {
+    if (IS_IDENTIFIER_HEAD(c)) {
       token = TOKEN_IDENTIFIER;
       if (start)
         *start = pos_create(x, y);
-      while ((isalnum(c) || c == '_') && x < array_len(b->lines[y])) {
+      while (x < array_len(b->lines[y])) {
         if (end)
           *end = pos_create(x, y);
         c = b->lines[y][++x];
+        if (!IS_IDENTIFIER_TAIL(c))
+          break;
       }
       break;
     }
@@ -1396,8 +1422,10 @@ static int file_open(const char *filename, Buffer *buffer_out) {
 }
 
 static void render_clear(int x0, int x1, int y) {
-  for (; x0 < x1; ++x0)
+  for (; x0 < x1; ++x0) {
     char_to_wide(' ', G.screen_buffer[y*G.term_width + x0].c);
+    G.screen_buffer[y*G.term_width + x0].style = G.default_style;
+  }
 }
 
 static void render_set_style_block(Style style, int x0, int x1, int y0, int y1) {
@@ -1710,12 +1738,15 @@ static void render_flush() {
       style = p.style;
     }
     array_push(G.tmp_render_buffer, p.c[0]);
-    if (IS_UTF8_TRAIL(p.c[1]))
-      array_push(G.tmp_render_buffer, p.c[1]);
-    if (IS_UTF8_TRAIL(p.c[2]))
-      array_push(G.tmp_render_buffer, p.c[2]);
-    if (IS_UTF8_TRAIL(p.c[3]))
-      array_push(G.tmp_render_buffer, p.c[3]);
+    if (!IS_UTF8_TRAIL(p.c[1]))
+      continue;
+    array_push(G.tmp_render_buffer, p.c[1]);
+    if (!IS_UTF8_TRAIL(p.c[2]))
+      continue;
+    array_push(G.tmp_render_buffer, p.c[2]);
+    if (!IS_UTF8_TRAIL(p.c[3]))
+      continue;
+    array_push(G.tmp_render_buffer, p.c[3]);
   }
   /* flush buffer */
   write(STDOUT_FILENO, G.tmp_render_buffer, array_len(G.tmp_render_buffer));
@@ -1870,7 +1901,8 @@ static void dropdown_render(Pane *active_pane) {
         gain = 10;
         ++in;
       }
-      else
+      /* Don't penalize special characters */
+      else if (isalnum(*test))
         gain *= 0.7;
     }
 
