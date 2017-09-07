@@ -162,6 +162,7 @@ TokenInfo tokeninfo_create(int token, int x) {
 
 typedef struct {
   #define GHOST_EOL -1
+  #define GHOST_BOL -2
   int x, y;
   int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
 } Pos;
@@ -203,13 +204,21 @@ static void buffer_goto_endline(Buffer *b) {
   b->pos.ghost_x = GHOST_EOL;
 }
 
-static void buffer_goto_beginline(Buffer *b) {
+static int buffer_begin_of_line(Buffer *b, int y) {
   int x;
 
   x = 0;
-  while (x < buffer_linesize(b, b->pos.y) && (b->lines[b->pos.y][x] == ' ' || b->lines[b->pos.y][x] == '\t'))
+  while (x < buffer_linesize(b, y) && (isspace(b->lines[y][x])))
     ++x;
+  return x;
+}
+
+static void buffer_goto_beginline(Buffer *b) {
+  int x;
+
+  x = buffer_begin_of_line(b, b->pos.y);
   buffer_move_to_x(b, x);
+  b->pos.ghost_x = GHOST_BOL;
 }
 
 static void buffer_empty(Buffer *b) {
@@ -920,6 +929,8 @@ static void buffer_move_y(Buffer *b, int dy) {
 
   if (b->pos.ghost_x == GHOST_EOL)
     b->pos.x = array_len(b->lines[b->pos.y]);
+  else if (b->pos.ghost_x == GHOST_BOL)
+    b->pos.x = buffer_begin_of_line(b, b->pos.y);
   else
     b->pos.x = from_visual_offset(b->lines[b->pos.y], b->pos.ghost_x);
 }
