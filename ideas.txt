@@ -1,1 +1,2 @@
- * TODO stack with buffer location
+ * a TODO stack with buffer locations and maybe comments
+ * Intermittent saves of the file, and a history browser
