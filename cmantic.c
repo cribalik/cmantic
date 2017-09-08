@@ -2,12 +2,15 @@
  *
  * TODO:
  *
+ * Crash on empty file
+ *
  * Update identifiers as you ty
  *       When you make a change, go backwards to check if it was an
  *       identifier, and update the identifier list.
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
+ * Move the terminal marker to where our marker is, to get tmux to behave better
  * Registers
  * Use 256 color
  * utf-8 support
@@ -64,6 +67,8 @@
 #define IS_UTF8_HEAD(c) ((c)&0x80)
 #define IS_IDENTIFIER_HEAD(c) (isalpha(c) || (c) == '_' || IS_UTF8_HEAD(c))
 #define IS_IDENTIFIER_TAIL(c) (isalnum(c) || (c) == '_' || IS_UTF8_TRAIL(c))
+#define IS_NUMBER_HEAD(c) (isdigit(c))
+#define IS_NUMBER_TAIL(c) (isdigit(c) || ((c) >= 'A' && (c) <= 'F') || ((c) >= 'a' && (c) <= 'f') || (c) == 'x')
 
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
@@ -1125,14 +1130,16 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     }
 
     /* number */
-    else if (isdigit(c)) {
+    else if (IS_NUMBER_HEAD(c)) {
       token = TOKEN_NUMBER;
       if (start)
         *start = pos_create(x, y);
-      while (isdigit(c) && x < array_len(b->lines[y])) {
+      while (x < array_len(b->lines[y])) {
         if (end)
           *end = pos_create(x, y);
         c = b->lines[y][++x];
+        if (!IS_NUMBER_TAIL(c))
+          break;
       }
       if (x == array_len(b->lines[y]))
         break;
@@ -1154,7 +1161,8 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       break;
     }
 
-    else if (c == '"') {
+    else if (c == '"' || c == '\'') {
+      char str_char = c;
       token = TOKEN_STRING;
       if (start)
         *start = pos_create(x, y);
@@ -1170,7 +1178,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
         }
 
         c = b->lines[y][x];
-        if (c == '"') {
+        if (c == str_char) {
           if (end)
             *end = pos_create(x, y);
           ++x;
@@ -2300,6 +2308,46 @@ static int process_input() {
         case 'K':
           buffer_move_y(G.main_pane.buffer, -G.main_pane.bounds.h/2);
           break;
+
+        case '}': {
+          Buffer *b;
+          int x,y,yend,t;
+          Pos p;
+
+          b = G.main_pane.buffer;
+          x = b->pos.x;
+          y = b->pos.y;
+          yend = buffer_numlines(b);
+
+          for (;;) {
+            t = token_read(b, &x, &y, yend, &p, 0);
+            /* if we're already on one, ignore */
+            if (t == '}' && p.x == b->pos.x && p.y == b->pos.y)
+              continue;
+            if (t == '{' || t == '}' || t == TOKEN_NULL)
+              break;
+          }
+
+          if (t == '}')
+            buffer_move_to(b, p.x, p.y);
+          else if (t == '{') {
+            int depth = 1;
+            for (;;) {
+              t = token_read(b, &x, &y, yend, &p, 0);
+              if (t == TOKEN_NULL)
+                break;
+              if (t == '}')
+                --depth;
+              if (t == '{')
+                ++depth;
+              if (depth == 0) {
+                buffer_move_to(b, p.x, p.y);
+                break;
+              }
+            }
+          }
+        } break;
+
       }
       break;
 
