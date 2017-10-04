@@ -2,15 +2,16 @@
  *
  * TODO:
  *
+ * Multiple cursors
  * Crash on empty file
  *
- * Update identifiers as you ty
+ * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
  *       identifier, and update the identifier list.
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
- * Move the terminal marker to where our marker is, to get tmux to behave better
+ * Move the terminal cursor to where our cursor is, to get tmux to behave better
  * Registers
  * Use 256 color
  * utf-8 support
@@ -18,7 +19,6 @@
  * Do DFS on autocompletion.
  * Colorize search results in view
  * Undo
- * Multiple cursors
  * Folding
  *
  * load files
@@ -110,7 +110,6 @@ static int at_most(int a, int b) {
 static int clampi(int x, int a, int b) {
   return x < a ? a : (b < x ? b : x);
 }
-#define arrcount(arr) (sizeof(arr)/sizeof(*arr))
 
 typedef enum Key {
   KEY_NONE = 0,
@@ -317,7 +316,7 @@ static char *buffer_getstr_p(Buffer *b, Pos p) {
 }
 
 static char buffer_getchar(Buffer *b, int x, int y) {
-  return b->lines[y][x];
+  return x >= buffer_linesize(b, y) ? '\n' : b->lines[y][x];
 }
 
 static void buffer_move_to(Buffer *b, int x, int y);
@@ -1481,7 +1480,7 @@ static void render_set_style_text(Style style, Pos a, Pos b, Rect bounds) {
     G.screen_buffer[y*G.term_width + x].style = style;
 }
 
-static void render_marker(Pane *p) {
+static void render_cursor(Pane *p) {
   Pos pos = pane_to_screen_pos(p);
   G.screen_buffer[pos.y*G.term_width + pos.x].style.inverse = 1;
 }
@@ -2552,10 +2551,10 @@ int main(int argc, const char **argv) {
     else
       dropdown_render(&G.main_pane);
 
-    /* Draw markers */
-    render_marker(&G.main_pane);
+    /* Draw cursors */
+    render_cursor(&G.main_pane);
     if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
-      render_marker(&G.bottom_pane);
+      render_cursor(&G.bottom_pane);
 
     /* render to screen */
     render_flush();
