@@ -111,6 +111,8 @@ static int clampi(int x, int a, int b) {
   return x < a ? a : (b < x ? b : x);
 }
 
+#define swap(a,b,tmp) ((tmp) = (a), (a) = (b), (b) = (tmp))
+
 typedef enum Key {
   KEY_NONE = 0,
   KEY_UNKNOWN = 1,
@@ -454,41 +456,45 @@ static void buffer_delete_line(Buffer *b) {
   buffer_delete_line_at(b, b->pos.y);
 }
 
-/* a,b inclusive */
+/* b exclusive */
 static void buffer_remove_range(Buffer *buf, Pos a, Pos b) {
   int y0 = a.y;
   int y1 = b.y;
   int y;
+
+  if (a.y > b.y || (a.y == b.y && a.x > b.x)) {
+    Pos tmp;
+    swap(a, b, tmp);
+  }
+
   if (y0 == y1) {
-    array_remove_slow_n(buf->lines[y0], a.x, b.x-a.x+1);
+    array_remove_slow_n(buf->lines[y0], a.x, b.x-a.x);
     return;
   }
+
   array_resize(buf->lines[y0], a.x);
   ++y0;
   for (y = y0; y < y1; ++y)
     buffer_delete_line_at(buf, y0);
-  array_remove_slow_n(buf->lines[y0], 0, b.x+1);
+  array_remove_slow_n(buf->lines[y0], 0, b.x);
 }
 
 static void buffer_delete_char(Buffer *b) {
   b->modified = 1;
   if (b->pos.x == 0) {
-    int i;
-
     if (b->pos.y == 0)
       return;
 
     /* move up and right */
-    buffer_move(b, 0, -1);
-    buffer_move_to(b, array_len(b->lines[b->pos.y]), b->pos.y);
-    for (i = 0; i < array_len(b->lines[b->pos.y+1]); ++i)
-      array_push(b->lines[b->pos.y], b->lines[b->pos.y+1][i]);
+    buffer_move_y(b, -1);
+    buffer_goto_endline(b);
+    array_push_a(b->lines[b->pos.y], b->lines[b->pos.y+1], array_len(b->lines[b->pos.y+1]));
     buffer_delete_line_at(b, b->pos.y+1);
   }
   else {
     Pos p = b->pos;
-    buffer_move(b, -1, 0);
-    buffer_remove_range(b, p, b->pos);
+    buffer_move_x(b, -1);
+    buffer_remove_range(b, b->pos, p);
   }
 }
 
