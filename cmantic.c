@@ -2474,7 +2474,6 @@ static void state_init() {
 
   G.bottom_pane.style.bcolor = COLOR_MAGENTA;
   G.bottom_pane.style.fcolor = COLOR_BLACK;
-  G.bottom_pane.style.bold = 1;
   G.bottom_pane.bounds = rect_create(0, G.term_height-1, G.term_width-1, 1);
   G.bottom_pane.buffer = &G.message_buffer;
 
