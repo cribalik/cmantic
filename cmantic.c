@@ -875,6 +875,11 @@ static int to_visual_offset(Array(char) line, int x) {
   return result;
 }
 
+static Pos to_visual_pos(Buffer *b, Pos p) {
+  p.x = to_visual_offset(b->lines[p.y], p.x);
+  return p;
+}
+
 /* returns the logical index located visually at x */
 static int from_visual_offset(Array(char) line, int x) {
   int visual = 0;
@@ -947,11 +952,24 @@ static void buffer_move_y(Buffer *b, int dy) {
 }
 
 static void buffer_move_x(Buffer *b, int dx) {
-  int vx;
-  vx = at_least(0, to_visual_offset(b->lines[b->pos.y], b->pos.x) + dx);
-  b->pos.x = from_visual_offset(b->lines[b->pos.y], vx);
-  b->pos.x = clampi(b->pos.x, 0, buffer_linesize(b, b->pos.y));
-  b->pos.ghost_x = vx;
+  int w = buffer_linesize(b, b->pos.y);
+
+  if (dx > 0) {
+    for (; dx > 0 && b->pos.x < w; --dx) {
+      ++b->pos.x;
+      while (b->pos.x < w && IS_UTF8_TRAIL(b->lines[b->pos.y][b->pos.x]))
+        ++b->pos.x;
+    }
+  }
+  if (dx < 0) {
+    for (; dx < 0 && b->pos.x > 0; ++dx) {
+      --b->pos.x;
+      while (b->pos.x > 0 && IS_UTF8_TRAIL(b->lines[b->pos.y][b->pos.x]))
+        --b->pos.x;
+    }
+  }
+  b->pos.x = clampi(b->pos.x, 0, w);
+  b->pos.ghost_x = to_visual_offset(b->lines[b->pos.y], b->pos.x);
 }
 
 static void buffer_move(Buffer *b, int dx, int dy) {
@@ -1678,6 +1696,8 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
         prev.y -= buf_y0;
         next.x -= buf_x0;
         next.y -= buf_y0;
+        prev = to_visual_pos(b, prev);
+        next = to_visual_pos(b, next);
         render_set_style_text(style, prev, next, bounds);
       }
 
