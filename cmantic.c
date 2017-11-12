@@ -386,12 +386,16 @@ static int buffer_find(Buffer *b, char *str, int n, int stay) {
   return 1;
 }
 
+static int buffer_autoindent(Buffer *b, int y);
+static void buffer_move_y(Buffer *b, int dy);
+static void buffer_move_x(Buffer *b, int dx);
+
 static void buffer_insert_str(Buffer *b, int x, int y, const char *str, int n) {
   if (!n)
     return;
   b->modified = 1;
   array_insert_a(b->lines[y], x, str, n);
-  buffer_move(b, n, 0);
+  buffer_move_x(b, n);
 }
 
 static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, int n) {
@@ -411,10 +415,6 @@ static void buffer_remove_trailing_whitespace(Buffer *b, int y) {
   if (b->pos.y == y && b->pos.x > x+1)
     buffer_move_to_x(b, x+1);
 }
-
-static int buffer_autoindent(Buffer *b, int y);
-static void buffer_move_y(Buffer *b, int dy);
-static void buffer_move_x(Buffer *b, int dx);
 
 static void buffer_pretty_range(Buffer *b, int y0, int y1) {
   for (; y0 < y1; ++y0) {
@@ -436,10 +436,11 @@ static void buffer_pretty(Buffer *b, int y) {
 static void buffer_insert_char(Buffer *b, unsigned char ch[4]) {
   int n = 1;
   if (IS_UTF8_HEAD(ch[0]))
-    while (n < 4 && IS_UTF8_TRAIL(ch[n])) ++n;
+    while (n < 4 && IS_UTF8_TRAIL(ch[n]))
+      ++n;
   b->modified = 1;
   array_insert_a(b->lines[b->pos.y], b->pos.x, ch, n);
-  buffer_move(b, n, 0);
+  buffer_move_x(b, 1);
   if (ch[0] == '}')
     buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
@@ -506,13 +507,13 @@ static void buffer_insert_tab(Buffer *b) {
   b->modified = 1;
   if (n == 0) {
     array_insert(b->lines[b->pos.y], b->pos.x, '\t');
-    buffer_move(b, 1, 0);
+    buffer_move_x(b, 1);
   }
   else {
     /* TODO: optimize? */
     while (n--)
       array_insert(b->lines[b->pos.y], b->pos.x, ' ');
-    buffer_move(b, b->tab_type, 0);
+    buffer_move_x(b, b->tab_type);
   }
 }
 
@@ -639,7 +640,7 @@ static void buffer_insert_newline(Buffer *b) {
 static void buffer_insert_newline_below(Buffer *b) {
   b->modified = 1;
   array_insert(b->lines, b->pos.y+1, 0);
-  buffer_move(b, 0, 1);
+  buffer_move_y(b, 1);
   buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
