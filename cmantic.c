@@ -657,11 +657,11 @@ typedef enum {
 } Color;
 
 typedef struct {
-  int fcolor: 5;
-  int bcolor: 5;
-  int bold: 2;
-  int italic: 2;
-  int inverse: 2;
+  unsigned int fcolor: 4;
+  unsigned int bcolor: 4;
+  unsigned int bold: 1;
+  unsigned int italic: 1;
+  unsigned int inverse: 1;
 } Style;
 
 typedef struct Pane {
@@ -683,7 +683,6 @@ typedef enum Mode {
 
 typedef struct {
   char c[4]; /* should be enough to hold any utf8 char that we care about */
-  /* TODO: why isn't 1 working for flags (we get overflow warnings)? */
   Style style;
 } Pixel;
 
