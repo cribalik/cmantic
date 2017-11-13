@@ -1689,15 +1689,18 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
       if (do_render) {
         Rect bounds;
 
+        prev = to_visual_pos(b, prev);
+        next = to_visual_pos(b, next);
+
         bounds = p->bounds;
         bounds.x += p->gutter_width;
         bounds.w -= p->gutter_width;
+
         prev.x -= buf_x0;
         prev.y -= buf_y0;
         next.x -= buf_x0;
         next.y -= buf_y0;
-        prev = to_visual_pos(b, prev);
-        next = to_visual_pos(b, next);
+
         render_set_style_text(style, prev, next, bounds);
       }
 
