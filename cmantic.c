@@ -1506,7 +1506,12 @@ static void render_set_style_text(Style style, Pos a, Pos b, Rect bounds) {
 
 static void render_cursor(Pane *p) {
   Pos pos = pane_to_screen_pos(p);
-  G.screen_buffer[pos.y*G.term_width + pos.x].style.inverse = 1;
+  if (G.mode == MODE_INSERT) {
+    G.screen_buffer[pos.y*G.term_width + pos.x].style.bcolor = COLOR_RED;
+    G.screen_buffer[pos.y*G.term_width + pos.x].style.fcolor = COLOR_BLACK;
+  }
+  else
+    G.screen_buffer[pos.y*G.term_width + pos.x].style.inverse = 1;
 }
 
 static const char *keywords[] = {
