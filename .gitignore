@@ -1,6 +1,8 @@
 build
+include
 *.exe
 *.dll
 *.obj
 *.pdb
+*.lib
 *.sublime-workspace

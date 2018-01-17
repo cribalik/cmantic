@@ -1610,6 +1610,15 @@ static void test() {
 }
 #endif
 
+#include "3party/imgui_impl_sdl_gl3.cpp"
+#include "3party/imgui.cpp"
+#include "3party/imgui_draw.cpp"
+#include "3party/imgui_demo.cpp"
+#include "3party/GL/gl3w.c"
 
-int main(int, const char*) {
+int wmain(int, const char*) {
+  if (setup_sdl_window())
+    return 1;
+
+  return 0;
 }
