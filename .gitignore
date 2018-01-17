@@ -1,1 +1,6 @@
-cmantic
+build
+*.exe
+*.dll
+*.obj
+*.pdb
+*.sublime-workspace

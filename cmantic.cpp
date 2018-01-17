@@ -28,19 +28,34 @@
  * add folders
  */
 
-#define _POSIX_C_SOURCE 200112L
-#include <unistd.h>
-#include <termios.h>
+#ifdef _MSC_VER
+  #define OS_WINDOWS 1
+#else
+  #define OS_LINUX 1
+#endif
+
+#ifdef OS_LINUX
+  #define _POSIX_C_SOURCE 200112L
+  #include <unistd.h>
+  #include <termios.h>
+  #include <sys/ioctl.h>
+  #include <sys/select.h>
+#else
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN 1
+  #endif
+  #include <windows.h>
+#endif
+
+
 #include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/select.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <assert.h>
-#include "array.h"
+#include "array.hpp"
 
 /* @debug */
 #if 0
@@ -73,7 +88,7 @@
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
 
-static void array_push_str(Array(char) *a, const char *str) {
+static void array_push_str(Array<char> *a, const char *str) {
   for (; *str; ++str)
     array_push(*a, *str);
 }
@@ -83,7 +98,7 @@ static void *memmem(void *needle, int needle_len, void *haystack, int haystack_l
   if (!needle_len || haystack_len < needle_len)
     return 0;
 
-  h = haystack;
+  h = (char*)haystack;
   hend = h + haystack_len - needle_len + 1;
 
   for (; h < hend; ++h)
@@ -93,19 +108,24 @@ static void *memmem(void *needle, int needle_len, void *haystack, int haystack_l
 }
 
 static void term_reset_to_default_settings();
-static void panic() {
-  term_reset_to_default_settings();
+static void panic(const char *fmt = "", ...) {
+  // term_reset_to_default_settings();
+  va_list args;
+  va_start(args, fmt);
+  vprintf(fmt, args);
+  va_end(args);
+  fflush(stdout);
+
   abort();
 }
 
 static int at_least(int a, int b) {
   return a < b ? b : a;
 }
-#define max(a, b) at_least(a, b)
-static int at_most(int a, int b) {
-  return b < a ? b : a;
-}
-#define min(a, b) at_most(a, b)
+
+#define at_least(a,b) max(a,b)
+#define at_most(a, b) min(a,b)
+
 /* a,b inclusive */
 static int clampi(int x, int a, int b) {
   return x < a ? a : (b < x ? b : x);
@@ -181,32 +201,28 @@ static Pos pos_create(int x, int y) {
   return p;
 }
 
-typedef struct Buffer {
-  Array(Array(char)) lines;
+struct Buffer {
+  Array<Array<char>> lines;
   const char *filename;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
   /* parser stuff */
-  Array(Array(TokenInfo)) tokens;
-  Array(char*) identifiers;
+  Array<Array<TokenInfo>> tokens;
+  Array<char*> identifiers;
 
   Pos pos;
 
   int modified;
-} Buffer;
 
-static int buffer_numlines(Buffer *b) {
-  return array_len(b->lines);
-}
-
-static int buffer_linesize(Buffer *b, int y) {
-  return array_len(b->lines[y]);
-}
+  Array<char>& operator[](int i) {return lines[i];}
+  const Array<char>& operator[](int i) const {return lines[i];}
+  int num_lines() const {return lines.size;}
+};
 
 static void buffer_move_to_x(Buffer *b, int x);
 
 static void buffer_goto_endline(Buffer *b) {
-  buffer_move_to_x(b, array_len(b->lines[b->pos.y]));
+  buffer_move_to_x(b, b->lines[b->pos.y].size);
   b->pos.ghost_x = GHOST_EOL;
 }
 
@@ -214,7 +230,7 @@ static int buffer_begin_of_line(Buffer *b, int y) {
   int x;
 
   x = 0;
-  while (x < buffer_linesize(b, y) && (isspace(b->lines[y][x])))
+  while (x < b->lines[y].size && (isspace(b->lines[y][x])))
     ++x;
   return x;
 }
@@ -232,11 +248,11 @@ static void buffer_empty(Buffer *b) {
 
   b->modified = 1;
 
-  for (i = 0; i < array_len(b->lines); ++i)
+  for (i = 0; i < b->lines.size; ++i)
     array_free(b->lines[i]);
 
-  array_resize(b->lines, 1);
-  b->lines[0] = 0;
+  b->lines.size = 0;
+  array_pushz(b->lines);
   b->pos.x = b->pos.y = 0;
 }
 
@@ -246,23 +262,23 @@ static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   b->modified = 1;
   n = at_least(n, 1);
 
-  if (n >= array_len(b->lines))
+  if (n >= b->lines.size)
     return;
 
-  for (i = n; i < array_len(b->lines); ++i)
+  for (i = n; i < b->lines.size; ++i)
     array_free(b->lines[i]);
-  array_resize(b->lines, n);
+  b->lines.size = n;
   b->pos.y = at_most(b->pos.y, n-1);
 }
 
 static int buffer_advance_xy(Buffer *b, int *x, int *y) {
   ++(*x);
-  if (*x >= array_len(b->lines[*y])) {
+  if (*x >= b->lines[*y].size) {
     *x = 0;
     ++(*y);
-    while (*y < array_len(b->lines) && array_len(b->lines[*y]) == 0)
+    while (*y < b->lines.size && b->lines[*y].size == 0)
       ++(*y);
-    if (*y == array_len(b->lines)) {
+    if (*y == b->lines.size) {
       --(*y);
       return 1;
     }
@@ -287,10 +303,10 @@ static int buffer_advance_r_xy(Buffer *b, int *x, int *y) {
     while (!b->lines[*y] && *y > 0)
       --(*y);
     if (*y <= 0) {
-      *x = array_len(b->lines[0]);
+      *x = b->lines[0].size;
       return 1;
     }
-    *x = array_len(b->lines[*y]);
+    *x = b->lines[*y].size;
   }
   return 0;
 }
@@ -305,8 +321,8 @@ static int buffer_advance_r(Buffer *b) {
   return 0;
 }
 
-static Array(char) buffer_getline(Buffer *b, int y) {
-  return b->lines[y];
+static Array<char>* buffer_getline(Buffer *b, int y) {
+  return &b->lines[y];
 }
 
 static char *buffer_getstr(Buffer *b, int x, int y) {
@@ -318,7 +334,7 @@ static char *buffer_getstr_p(Buffer *b, Pos p) {
 }
 
 static char buffer_getchar(Buffer *b, int x, int y) {
-  return x >= buffer_linesize(b, y) ? '\n' : b->lines[y][x];
+  return x >= b->lines[y].size ? '\n' : b->lines[y][x];
 }
 
 static void buffer_move_to(Buffer *b, int x, int y);
@@ -344,11 +360,11 @@ static int buffer_find_r(Buffer *b, char *str, int n, int stay) {
       --y;
       if (y < 0)
         return 1;
-      x = buffer_linesize(b, y);
+      x = b->lines[y].size;
       continue;
     }
 
-    p = memmem(str, n, b->lines[y], x);
+    p = (char*)memmem(str, n, b->lines[y], x);
     if (!p)
       continue;
 
@@ -356,7 +372,6 @@ static int buffer_find_r(Buffer *b, char *str, int n, int stay) {
     buffer_move_to(b, x, y);
     return 0;
   }
-  return 1;
 }
 
 static int buffer_find(Buffer *b, char *str, int n, int stay) {
@@ -370,12 +385,12 @@ static int buffer_find(Buffer *b, char *str, int n, int stay) {
     ++x;
   y = b->pos.y;
 
-  for (; y < buffer_numlines(b); ++y, x = 0) {
+  for (; y < b->lines.size; ++y, x = 0) {
     char *p;
-    if (x >= buffer_linesize(b, y))
+    if (x >= b->lines[y].size)
       continue;
 
-    p = memmem(str, n, b->lines[y]+x, buffer_linesize(b, y)-x);
+    p = (char*)memmem(str, n, b->lines[y]+x, b->lines[y].size-x);
     if (!p)
       continue;
 
@@ -394,13 +409,13 @@ static void buffer_insert_str(Buffer *b, int x, int y, const char *str, int n) {
   if (!n)
     return;
   b->modified = 1;
-  array_insert_a(b->lines[y], x, str, n);
+  array_inserta(b->lines[y], x, str, n);
   buffer_move_x(b, n);
 }
 
 static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, int n) {
   b->modified = 1;
-  array_remove_slow_n(b->lines[y], x0, x1-x0);
+  array_remove_slown(b->lines[y], x0, x1-x0);
   buffer_move_to(b, x0, y);
   buffer_insert_str(b, x0, y, str, n);
 }
@@ -408,10 +423,10 @@ static void buffer_replace(Buffer *b, int x0, int x1, int y, const char *str, in
 static void buffer_remove_trailing_whitespace(Buffer *b, int y) {
   int x;
   
-  x = buffer_linesize(b, y) - 1;
+  x = b->lines[y].size - 1;
   while (x >= 0 && isspace(buffer_getchar(b, x, y)))
     --x;
-  array_resize(b->lines[y], x+1);
+  b->lines[y].size = x+1;
   if (b->pos.y == y && b->pos.x > x+1)
     buffer_move_to_x(b, x+1);
 }
@@ -439,7 +454,7 @@ static void buffer_insert_char(Buffer *b, unsigned char ch[4]) {
     while (n < 4 && IS_UTF8_TRAIL(ch[n]))
       ++n;
   b->modified = 1;
-  array_insert_a(b->lines[b->pos.y], b->pos.x, ch, n);
+  array_inserta(b->lines[b->pos.y], b->pos.x, (char*)ch, n);
   buffer_move_x(b, 1);
   if (ch[0] == '}')
     buffer_move_x(b, buffer_autoindent(b, b->pos.y));
@@ -448,7 +463,7 @@ static void buffer_insert_char(Buffer *b, unsigned char ch[4]) {
 static void buffer_delete_line_at(Buffer *b, int y) {
   b->modified = 1;
   array_free(b->lines[y]);
-  if (array_len(b->lines) == 1)
+  if (b->lines.size == 1)
     return;
   array_remove_slow(b->lines, y);
 }
@@ -469,15 +484,15 @@ static void buffer_remove_range(Buffer *buf, Pos a, Pos b) {
   }
 
   if (y0 == y1) {
-    array_remove_slow_n(buf->lines[y0], a.x, b.x-a.x);
+    array_remove_slown(buf->lines[y0], a.x, b.x-a.x);
     return;
   }
 
-  array_resize(buf->lines[y0], a.x);
+  buf->lines[y0].size = a.x;
   ++y0;
   for (y = y0; y < y1; ++y)
     buffer_delete_line_at(buf, y0);
-  array_remove_slow_n(buf->lines[y0], 0, b.x);
+  array_remove_slown(buf->lines[y0], 0, b.x);
 }
 
 static void buffer_delete_char(Buffer *b) {
@@ -489,7 +504,7 @@ static void buffer_delete_char(Buffer *b) {
     /* move up and right */
     buffer_move_y(b, -1);
     buffer_goto_endline(b);
-    array_push_a(b->lines[b->pos.y], b->lines[b->pos.y+1], array_len(b->lines[b->pos.y+1]));
+    array_push(b->lines[b->pos.y], b->lines[b->pos.y+1].data, b->lines[b->pos.y+1].size);
     buffer_delete_line_at(b, b->pos.y+1);
   }
   else {
@@ -523,7 +538,7 @@ static int buffer_getindent(Buffer *b, int y) {
   char tab_char = b->tab_type ? ' ' : '\t';
 
   for (n = 0;;) {
-    if (n >= array_len(b->lines[y]))
+    if (n >= b->lines[y].size)
       break;
     if (b->lines[y][n] != tab_char)
       break;
@@ -546,16 +561,16 @@ static int buffer_autoindent(Buffer *b, int y) {
   /* count number of indents above */
   /* skip empty lines */
   for (i = y-1; i > 0; --i)
-    if (buffer_linesize(b, i) > 0)
+    if (b->lines[i].size > 0)
       break;
   if (i == 0)
     return -buffer_getindent(b, y);
   indent_above = buffer_getindent(b, i) * tab_size;
 
   /* TODO: open braces */
-  l = array_len(b->lines[y-1]) - indent_above;
+  l = b->lines[y-1].size - indent_above;
   diff = 0;
-  i = array_len(b->lines[y-1])-1;
+  i = b->lines[y-1].size-1;
   if (i >= 0 && b->lines[y-1][i] == '{')
     ++diff;
   else if (i >= 0 && b->lines[y-1][i] != '}' &&
@@ -568,8 +583,8 @@ static int buffer_autoindent(Buffer *b, int y) {
     int indent_two_above;
 
     indent_two_above = buffer_getindent(b, y-2) * tab_size;
-    l = array_len(b->lines[y-2]) - indent_two_above;
-    i = array_len(b->lines[y-2])-1;
+    l = b->lines[y-2].size - indent_two_above;
+    i = b->lines[y-2].size-1;
     if (i >= 0 && b->lines[y-2][i] != '{' && b->lines[y-2][i] != '}' &&
        ((l >= 3 && strncmp("for",   b->lines[y-2]+indent_two_above, 3) == 0) ||
         (l >= 2 && strncmp("if",    b->lines[y-2]+indent_two_above, 2) == 0) ||
@@ -579,7 +594,7 @@ static int buffer_autoindent(Buffer *b, int y) {
   }
 
   indent_this = buffer_getindent(b, y) * tab_size;
-  i = array_len(b->lines[y])-1;
+  i = b->lines[y].size-1;
   if (i >= 0 && b->lines[y][i] == '}' && !(
         (l >= 3 && strncmp("for",   b->lines[y]+indent_this, 3) == 0) ||
         (l >= 2 && strncmp("if",    b->lines[y]+indent_this, 2) == 0) ||
@@ -590,10 +605,10 @@ static int buffer_autoindent(Buffer *b, int y) {
   /* count number of indents */
   diff = indent_above + diff*tab_size - indent_this;
   if (diff < 0) {
-    array_remove_slow_n(b->lines[y], 0, -diff);
+    array_remove_slown(b->lines[y], 0, -diff);
   }
   if (diff > 0) {
-    array_insert_n(b->lines[y], 0, diff);
+    array_insertn(b->lines[y], 0, diff);
     for (i = 0; i < diff; ++i)
       b->lines[y][i] = tab_char;
   }
@@ -601,20 +616,20 @@ static int buffer_autoindent(Buffer *b, int y) {
 }
 
 static int buffer_isempty(Buffer *b) {
-  return array_len(b->lines) == 1 && array_len(b->lines[0]) == 0;
+  return b->lines.size == 1 && b->lines[0].size == 0;
 }
 
 static void buffer_push_line(Buffer *b, const char *str) {
   int y, l;
 
   b->modified = 1;
-  y = buffer_numlines(b);
+  y = b->lines.size;
   if (!buffer_isempty(b))
-    array_push(b->lines, 0);
+    array_pushz(b->lines);
   else
     y = 0;
   l = strlen(str);
-  array_push_n(b->lines[y], l);
+  array_pushn(b->lines[y], l);
   memcpy(b->lines[y], str, l);
 }
 
@@ -625,10 +640,10 @@ static void buffer_insert_newline(Buffer *b) {
 
   b->modified = 1;
 
-  left_of_line = array_len(b->lines[b->pos.y]) - b->pos.x;
-  array_insert(b->lines, b->pos.y+1, 0);
-  array_push_a(b->lines[b->pos.y+1], b->lines[b->pos.y] + b->pos.x, left_of_line);
-  array_resize(b->lines[b->pos.y], b->pos.x);
+  left_of_line = b->lines[b->pos.y].size - b->pos.x;
+  array_insertz(b->lines, b->pos.y+1);
+  array_pusha(b->lines[b->pos.y+1], b->lines[b->pos.y] + b->pos.x, left_of_line);
+  b->lines[b->pos.y].size = b->pos.x;
 
 
   buffer_move_y(b, 1);
@@ -639,7 +654,7 @@ static void buffer_insert_newline(Buffer *b) {
 
 static void buffer_insert_newline_below(Buffer *b) {
   b->modified = 1;
-  array_insert(b->lines, b->pos.y+1, 0);
+  array_insertz(b->lines, b->pos.y+1);
   buffer_move_y(b, 1);
   buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
@@ -693,7 +708,7 @@ static int style_cmp(Style a, Style b) {
 static struct State {
   /* @renderer some rendering state */
   Pixel *screen_buffer;
-  Array(char) tmp_render_buffer;
+  Array<char> tmp_render_buffer;
   int term_width, term_height;
   Style default_style;
   Style comment_style,
@@ -740,20 +755,20 @@ static void buffer_guess_tab_type(Buffer *b) {
   /* try to figure out tab type */
   /* TODO: use tokens here instead, so we skip comments */
   b->tab_type = -1;
-  for (i = 0; i < array_len(b->lines); ++i) {
+  for (i = 0; i < b->lines.size; ++i) {
     if (!b->lines[i])
       continue;
 
     /* skip comments */
-    if (array_len(b->lines[i]) >= 2 && b->lines[i][0] == '/' && b->lines[i][1] == '*') {
+    if (b->lines[i].size >= 2 && b->lines[i][0] == '/' && b->lines[i][1] == '*') {
       int j;
       j = 2;
       for (;;) {
-        if (i >= array_len(b->lines)) {
+        if (i >= b->lines.size) {
           b->tab_type = G.default_tab_type;
           return;
         }
-        if (j >= array_len(b->lines[i])-1) {
+        if (j >= b->lines[i].size-1) {
           j = 0;
           ++i;
           continue;
@@ -777,10 +792,10 @@ static void buffer_guess_tab_type(Buffer *b) {
       int num_spaces = 0;
       int j;
 
-      for (j = 0; j < array_len(b->lines[i]) && b->lines[i][j] == ' '; ++j)
+      for (j = 0; j < b->lines[i].size && b->lines[i][j] == ' '; ++j)
         ++num_spaces;
 
-      if (j == array_len(b->lines[i]))
+      if (j == b->lines[i].size)
         continue;
 
       b->tab_type = num_spaces;
@@ -820,15 +835,14 @@ static int utf8_to_wide(const char *str, const char *end, char res[4]) {
 
 static void render_strn(int x0, int x1, int y, const char *str, int n) {
   Pixel *row = &G.screen_buffer[G.term_width*y];
-  const char *end;
 
   if (!str)
     return;
 
-  for (end = str+n; str != end && x0 < x1;) {
+  for (const char *end = str+n; str != end && x0 < x1;) {
     if (*str == '\t') {
-      int end = x0 + at_most(G.tab_width, x1 - x0);
-      for (; x0 < end; ++x0)
+      int e = x0 + at_most(G.tab_width, x1 - x0);
+      for (; x0 < e; ++x0)
         char_to_wide(' ', row[x0].c);
       ++str;
     }
@@ -857,7 +871,7 @@ static void render_str(int x0, int x1, int y, const char *fmt, ...) {
   va_end(args);
 }
 
-static int to_visual_offset(Array(char) line, int x) {
+static int to_visual_offset(Array<char> line, int x) {
   int result = 0;
   int i;
 
@@ -880,13 +894,13 @@ static Pos to_visual_pos(Buffer *b, Pos p) {
 }
 
 /* returns the logical index located visually at x */
-static int from_visual_offset(Array(char) line, int x) {
+static int from_visual_offset(Array<char> line, int x) {
   int visual = 0;
   int i;
 
   if (!line) return 0;
 
-  for (i = 0; i < array_len(line); ++i) {
+  for (i = 0; i < line.size; ++i) {
     if (IS_UTF8_TRAIL(line[i]))
       continue;
     ++visual;
@@ -910,7 +924,7 @@ static int pane_calc_left_visible_column(Pane *pane) {
 
 static Pos pane_to_screen_pos_xy(Pane *pane, int x, int y) {
   Pos result = {0};
-  Array(char) line;
+  Array<char> line;
 
   line = pane->buffer->lines[y];
   result.x = pane->bounds.x + pane->gutter_width + to_visual_offset(line, x) - pane_calc_left_visible_column(pane);
@@ -924,12 +938,12 @@ static Pos pane_to_screen_pos(Pane *pane) {
 }
 
 static void buffer_move_to_y(Buffer *b, int y) {
-  y = clampi(y, 0, buffer_numlines(b)-1);
+  y = clampi(y, 0, b->lines.size-1);
   b->pos.y = y;
 }
 
 static void buffer_move_to_x(Buffer *b, int x) {
-  x = clampi(x, 0, array_len(b->lines[b->pos.y]));
+  x = clampi(x, 0, b->lines[b->pos.y].size);
   b->pos.x = x;
   b->pos.ghost_x = x;
 }
@@ -940,10 +954,10 @@ static void buffer_move_to(Buffer *b, int x, int y) {
 }
 
 static void buffer_move_y(Buffer *b, int dy) {
-  b->pos.y = clampi(b->pos.y + dy, 0, array_len(b->lines) - 1);
+  b->pos.y = clampi(b->pos.y + dy, 0, b->lines.size - 1);
 
   if (b->pos.ghost_x == GHOST_EOL)
-    b->pos.x = array_len(b->lines[b->pos.y]);
+    b->pos.x = b->lines[b->pos.y].size;
   else if (b->pos.ghost_x == GHOST_BOL)
     b->pos.x = buffer_begin_of_line(b, b->pos.y);
   else
@@ -951,7 +965,7 @@ static void buffer_move_y(Buffer *b, int dy) {
 }
 
 static void buffer_move_x(Buffer *b, int dx) {
-  int w = buffer_linesize(b, b->pos.y);
+  int w = b->lines[b->pos.y].size;
 
   if (dx > 0) {
     for (; dx > 0 && b->pos.x < w; --dx) {
@@ -983,36 +997,35 @@ static void status_message_set(const char *fmt, ...) {
   va_list args;
 
   buffer_truncate_to_n_lines(&G.message_buffer, 1);
-  array_resize(G.message_buffer.lines[0], G.term_width-1);
+  array_resize(G.message_buffer[0], G.term_width-1);
 
   va_start(args, fmt);
-  n = vsnprintf(G.message_buffer.lines[0], buffer_linesize(&G.message_buffer, 0), fmt, args);
+  n = vsnprintf(G.message_buffer[0], G.message_buffer[0].size, fmt, args);
   va_end(args);
 
-  n = at_most(n, buffer_linesize(&G.message_buffer, 0));
-  array_resize(G.message_buffer.lines[0], n);
+  n = at_most(n, G.message_buffer[0].size);
+  array_resize(G.message_buffer[0], n);
 }
 
 /****** @TOKENIZER ******/
 
-static void tokenizer_push_token(Array(Array(TokenInfo)) *tokens, int x, int y, int token) {
+static void tokenizer_push_token(Array<Array<TokenInfo>> *tokens, int x, int y, int token) {
   array_reserve(*tokens, y+1);
   array_push((*tokens)[y], tokeninfo_create(token, x));
 }
 
 static void tokenize(Buffer *b) {
-  static Array(char) identifier_buffer;
-  int x = 0, y = 0, i;
+  static Array<char> identifier_buffer;
+  int x = 0, y = 0;
 
   /* reset old tokens */
-  for (i = 0; i < array_len(b->tokens); ++i)
+  for (int i = 0; i < b->tokens.size; ++i)
     array_free(b->tokens[i]);
-  array_resize(b->tokens, buffer_numlines(b));
-  for (i = 0; i < array_len(b->tokens); ++i)
-    b->tokens[i] = 0;
+  array_resize(b->tokens, b->lines.size);
+  for (int i = 0; i < b->tokens.size; ++i)
+    b->tokens[i] = {};
 
   for (;;) {
-    Array(char) row;
     /* whitespace */
     while (isspace(buffer_getchar(b, x, y)))
       if (buffer_advance_xy(b, &x, &y))
@@ -1021,7 +1034,8 @@ static void tokenize(Buffer *b) {
     /* TODO: how do we handle comments ? */
 
     /* identifier */
-    row = buffer_getline(b, y);
+    char *row = b->lines[y].data;
+    int rowsize = b->lines[y].size;
     if (isalpha(row[x]) || row[x] == '_') {
       char *str;
 
@@ -1029,19 +1043,19 @@ static void tokenize(Buffer *b) {
       /* TODO: predefined keywords */
       tokenizer_push_token(&b->tokens, x, y, TOKEN_IDENTIFIER);
 
-      for (; x < array_len(row); ++x) {
+      for (; x < rowsize; ++x) {
         if (!isalnum(row[x]) && row[x] != '_')
           break;
         array_push(identifier_buffer, row[x]);
       }
-      array_push(identifier_buffer, 0);
+      array_push(identifier_buffer, '\0');
       /* check if identifier already exists */
-      for (i = 0; i < array_len(b->identifiers); ++i)
+      for (int i = 0; i < b->identifiers.size; ++i)
         if (strcmp(identifier_buffer, b->identifiers[i]) == 0)
           goto identifier_done;
 
-      str = malloc(array_len(identifier_buffer));
-      strcpy(str, identifier_buffer);
+      str = (char*)malloc(identifier_buffer.size);
+      array_copy(identifier_buffer, str);
       array_push(b->identifiers, str);
 
       identifier_done:;
@@ -1050,9 +1064,9 @@ static void tokenize(Buffer *b) {
     /* number */
     else if (isdigit(row[x])) {
       tokenizer_push_token(&b->tokens, x, y, TOKEN_NUMBER);
-      for (; x < array_len(row) && isdigit(row[x]); ++x);
+      for (; x < rowsize && isdigit(row[x]); ++x);
       if (buffer_getchar(b, x, y) == '.')
-        for (; x < array_len(row) && isdigit(row[x]); ++x);
+        for (; x < rowsize && isdigit(row[x]); ++x);
     }
 
     /* single char token */
@@ -1062,7 +1076,7 @@ static void tokenize(Buffer *b) {
         return;
     }
 
-    if (x == array_len(row))
+    if (x == rowsize)
       if (buffer_advance_xy(b, &x, &y))
         return;
   }
@@ -1076,11 +1090,11 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
   for (;;) {
     char c;
 
-    if (y >= y_end || y >= array_len(b->lines)) {
+    if (y >= y_end || y >= b->lines.size) {
       token = TOKEN_NULL;
       break;
     }
-    if (x >= array_len(b->lines[y])) {
+    if (x >= b->lines[y].size) {
       x = 0;
       ++y;
       continue;
@@ -1099,7 +1113,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       token = TOKEN_IDENTIFIER;
       if (start)
         *start = pos_create(x, y);
-      while (x < array_len(b->lines[y])) {
+      while (x < b->lines[y].size) {
         if (end)
           *end = pos_create(x, y);
         c = b->lines[y][++x];
@@ -1110,27 +1124,27 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     }
 
     /* block comment */
-    else if (c == '/' && x+1 < array_len(b->lines[y]) && b->lines[y][x+1] == '*') {
+    else if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '*') {
       token = TOKEN_BLOCK_COMMENT;
       if (start)
         *start = pos_create(x, y);
       x += 2;
       /* goto matching end block */
       for (;;) {
-        if (y >= y_end || y >= array_len(b->lines)) {
+        if (y >= y_end || y >= b->lines.size) {
           if (end)
             *end = pos_create(x, y);
           token = TOKEN_BLOCK_COMMENT_BEGIN;
           break;
         }
-        if (x >= array_len(b->lines[y])) {
+        if (x >= b->lines[y].size) {
           ++y;
           x = 0;
           continue;
         }
 
         c = b->lines[y][x];
-        if (c == '*' && x+1 < array_len(b->lines[y]) && b->lines[y][x+1] == '/') {
+        if (c == '*' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
           if (end)
             *end = pos_create(x+1, y);
           x += 2;
@@ -1142,7 +1156,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     }
 
     /* end of block comment */
-    else if (c == '*' && x+1 < array_len(b->lines[y]) && b->lines[y][x+1] == '/') {
+    else if (c == '*' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
       token = TOKEN_BLOCK_COMMENT_END;
       if (start)
         *start = pos_create(x, y);
@@ -1157,26 +1171,26 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       token = TOKEN_NUMBER;
       if (start)
         *start = pos_create(x, y);
-      while (x < array_len(b->lines[y])) {
+      while (x < b->lines[y].size) {
         if (end)
           *end = pos_create(x, y);
         c = b->lines[y][++x];
         if (!IS_NUMBER_TAIL(c))
           break;
       }
-      if (x == array_len(b->lines[y]))
+      if (x == b->lines[y].size)
         break;
-      if (c == '.' && x+1 < array_len(b->lines[y]) && isdigit(b->lines[y][x+1])) {
+      if (c == '.' && x+1 < b->lines[y].size && isdigit(b->lines[y][x+1])) {
         c = b->lines[y][++x];
-        while (isdigit(c) && x < array_len(b->lines[y])) {
+        while (isdigit(c) && x < b->lines[y].size) {
           if (end)
             *end = pos_create(x, y);
           c = b->lines[y][++x];
         }
-        if (x == array_len(b->lines[y]))
+        if (x == b->lines[y].size)
           break;
       }
-      while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < array_len(b->lines[y])) {
+      while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < b->lines[y].size) {
         if (end)
           *end = pos_create(x, y);
         c = b->lines[y][++x];
@@ -1191,7 +1205,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
         *start = pos_create(x, y);
       ++x;
       for (;;) {
-        if (x >= array_len(b->lines[y])) {
+        if (x >= b->lines[y].size) {
           token = TOKEN_STRING_BEGIN;
           if (end)
             *end = pos_create(x, y);
@@ -1257,28 +1271,28 @@ static TermCommand term_bcolors[] = {
 STATIC_ASSERT(ARRAY_LEN(term_fcolors) == COLOR_COUNT, all_term_font_colors_defined);
 STATIC_ASSERT(ARRAY_LEN(term_bcolors) == COLOR_COUNT, all_term_background_colors_defined);
 
-static void term_bold(Array(char) *buf, int bold) {
+static void term_bold(Array<char> *buf, int bold) {
   if (bold)
     array_push_str(buf, "\x1b[1m");
   else
     array_push_str(buf, "\x1b[22m");
 }
 
-static void term_inverse_video(Array(char) *buf, int inverse) {
+static void term_inverse_video(Array<char> *buf, int inverse) {
   if (inverse)
     array_push_str(buf, "\x1b[7m");
   else
     array_push_str(buf, "\x1b[27m");
 }
 
-static void term_apply_style_slow(Array(char) *buf, Style style) {
+static void term_apply_style_slow(Array<char> *buf, Style style) {
   array_push_str(buf, term_fcolors[style.fcolor].str);
   array_push_str(buf, term_bcolors[style.bcolor].str);
   term_bold(buf, style.bold);
   term_inverse_video(buf, style.inverse);
 }
 
-static void term_apply_style(Array(char) *buf, Style style, Style old_style) {
+static void term_apply_style(Array<char> *buf, Style style, Style old_style) {
   if (style.fcolor != old_style.fcolor)
     array_push_str(buf, term_fcolors[style.fcolor].str);
   if (style.bcolor != old_style.bcolor)
@@ -1289,33 +1303,37 @@ static void term_apply_style(Array(char) *buf, Style style, Style old_style) {
     term_bold(buf, style.bold);
 }
 
+#define file_write(file, str, len) fwrite(str, len, 1, file)
+#define file_read(file, buf, n) fread(buf, n, 1, file)
+
 static void term_clear_screen() {
-  if (write(STDOUT_FILENO, "\x1b[2J", 4) != 4) panic();
+  if (file_write(stdout, "\x1b[2J", 4) != 4) panic();
 }
 
 static void term_hide_cursor() {
-  if (write(STDOUT_FILENO, "\x1b[?25l", 6) != 6) panic();
+  if (file_write(stdout, "\x1b[?25l", 6) != 6) panic();
 }
 
 static void term_clear_line() {
-  if (write(STDOUT_FILENO, "\x1b[2K", 4) != 4) panic();
+  if (file_write(stdout, "\x1b[2K", 4) != 4) panic();
 }
 
 static void term_show_cursor() {
-  if (write(STDOUT_FILENO, "\x1b[?25h", 6) != 6) panic();
+  if (file_write(stdout, "\x1b[?25h", 6) != 6) panic();
 }
 
 static void term_cursor_move(int x, int y) {
   char buf[32];
-  int n = sprintf(buf, "\x1b[%i;%iH", y+1, x+1);
-  if (write(STDOUT_FILENO, buf, n+1) != n+1) panic();
+  unsigned int n = sprintf_s(buf, "\x1b[%i;%iH", y+1, x+1);
+  if (file_write(stdout, buf, n+1) != n+1) panic();
 }
 
 static void term_reset_video() {
-  if (write(STDOUT_FILENO, "\x1b[0m", 4) != 4) panic();
+  if (file_write(stdout, "\x1b[0m", 4) != 4) panic();
 }
 
 static int term_get_dimensions(int *w, int *h) {
+#ifdef OS_LINUX
   struct winsize ws;
   int res = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
   if (res == -1 || !ws.ws_col) {
@@ -1328,7 +1346,6 @@ static int term_get_dimensions(int *w, int *h) {
     *w = ws.ws_col;
     *h = ws.ws_row;
   }
-
   return 0;
 }
 
@@ -1373,7 +1390,6 @@ static void term_reset_to_default_settings() {
  * number of bytes read on success
  */
 static int read_timeout(unsigned char *buf, int n, int ms) {
-  #if 1
   fd_set files;
   struct timeval timeout = {0};
   int res;
@@ -1386,9 +1402,7 @@ static int read_timeout(unsigned char *buf, int n, int ms) {
   res = select(STDIN_FILENO+1, &files, 0, 0, ms ? &timeout : 0);
   if (res == -1) return res; /* error */
   else if (res == 0) return res; /* timeout */
-  else
-  #endif
-    return read(STDIN_FILENO, buf, n);
+  else return read(STDIN_FILENO, buf, n);
 }
 
 static int calc_num_chars(int i) {
@@ -1402,18 +1416,20 @@ static int calc_num_chars(int i) {
 
 /* grabs ownership of filename */
 static int file_open(const char *filename, Buffer *buffer_out) {
-  int row, num_lines, i;
   Buffer buffer = {0};
   FILE* f;
 
   buffer.filename = filename;
-  f = fopen(buffer.filename, "r");
-  if (!f)
+  if (fopen_s(&f, buffer.filename, "r"))
     return -1;
 
   /* get line count */
-  num_lines = 0;
-  while (!feof(f) && !ferror(f)) num_lines += fgetc(f) == '\n';
+  int num_lines = 0;
+  {
+    char c;
+    while ((c = (char)fgetc(f)) != EOF)
+      num_lines += c == '\n';
+  }
   if (ferror(f)) {
     fclose(f);
     return -1;
@@ -1422,28 +1438,28 @@ static int file_open(const char *filename, Buffer *buffer_out) {
 
   if (num_lines > 0) {
     array_resize(buffer.lines, num_lines);
-    for (i = 0; i < num_lines; ++i)
-      buffer.lines[i] = 0;
+    for(int i = 0; i < num_lines; ++i)
+      buffer.lines[i] = {};
 
+    char c = 0;
     fseek(f, 0, SEEK_SET);
-    for (row = 0; row < array_len(buffer.lines); ++row) {
+    for (int i = 0; i < num_lines; ++i) {
       while (1) {
-        char c = fgetc(f);
+        c = (char)fgetc(f);
         if (c == EOF) {
           if (ferror(f))
             goto err;
           goto last_line;
         }
-        if (c == '\r') c = fgetc(f);
+        if (c == '\r') c = (char)fgetc(f);
         if (c == '\n') break;
-        array_push(buffer.lines[row], c);
+        array_push(buffer[i], c);
       }
     }
     last_line:;
     assert(fgetc(f) == EOF);
   } else {
-    array_resize(buffer.lines, 1);
-    buffer.lines[0] = 0;
+    array_pushz(buffer.lines);
   }
 
   tokenize(&buffer);
@@ -1455,8 +1471,8 @@ static int file_open(const char *filename, Buffer *buffer_out) {
   return 0;
 
   err:
-  for (i = 0; i < array_len(buffer.lines); ++i)
-    array_free(buffer.lines[i]);
+  for (int i = 0; i < buffer.lines.size; ++i)
+    array_free(buffer[i]);
   array_free(buffer.lines);
   fclose(f);
 
@@ -1562,7 +1578,7 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
   y0 = clampi(p->bounds.y, 0, G.term_height);
   y1 = clampi(y0 + p->bounds.h, 0, G.term_height);
   buf_y0 = pane_calc_top_visible_row(p);
-  buf_y1 = at_most(buf_y0 + y1-y0, buffer_numlines(b));
+  buf_y1 = at_most(buf_y0 + y1-y0, b->lines.size);
   buf_x0 = pane_calc_left_visible_column(p);
 
   /* calc gutter width */
@@ -1579,12 +1595,12 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
 
   /* draw each line */
   for (y = y0, buf_y = buf_y0; y < y1; ++buf_y, ++y) {
-    Array(char) line;
+    Array<char> line;
 
     line = b->lines[buf_y];
 
     /* beyond buffer ? */
-    if (buf_y >= buffer_numlines(b)) {
+    if (buf_y >= b->num_lines()) {
       render_clear(x0, x1, y);
       continue;
     }
@@ -1592,11 +1608,11 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
     /* gutter */
     render_str(x0, x0+p->gutter_width, y, "%*i", p->gutter_width-1, buf_y+1);
 
-    if (array_len(line) <= buf_x0)
+    if (line.size <= buf_x0)
       continue;
 
     /* text */
-    render_strn(x0 + p->gutter_width, x1, y, line + buf_x0, array_len(line) - buf_x0);
+    render_strn(x0 + p->gutter_width, x1, y, line + buf_x0, line.size - buf_x0);
   }
 
   /* color highlighting */
@@ -1633,7 +1649,7 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
         case TOKEN_BLOCK_COMMENT_BEGIN:
           do_render = 1;
           style = G.comment_style;
-          next = pos_create(buffer_linesize(b, buf_y1-1), buf_y1-1);
+          next = pos_create(b->lines[buf_y1-1].size, buf_y1-1);
           break;
 
         case TOKEN_BLOCK_COMMENT:
@@ -1656,7 +1672,7 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
           int i, left_of_line;
 
           /* check for keywords */
-          left_of_line = buffer_linesize(b, prev.y) - prev.x;
+          left_of_line = b->lines[prev.y].size - prev.x;
           for (i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
             int keyword_len = strlen(keywords[i]);
             if (keyword_len <= left_of_line && strncmp(buffer_getstr_p(b, prev), keywords[i], keyword_len) == 0) {
@@ -1714,23 +1730,28 @@ static void render_pane(Pane *p, int draw_gutter, int highlight) {
   }
 }
 
+static const char* cman_strerror(int e) {
+  static char buf[128];
+  strerror_s(buf, sizeof(buf), e);
+  return buf;
+}
+
 static void save_buffer(Buffer *b) {
   FILE* f;
   int i;
 
   assert(b->filename);
 
-  f = fopen(b->filename, "wb");
-  if (!f) {
-    status_message_set("Could not open file %s for writing: %s", b->filename, strerror(errno));
+  if (fopen_s(&f, b->filename, "wb")) {
+    status_message_set("Could not open file %s for writing: %s", b->filename, cman_strerror(errno));
     return;
   }
 
   /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
-  for (i = 0; i < buffer_numlines(b); ++i) {
-    unsigned int num_to_write = array_len(b->lines[i]);
-    if (fwrite(b->lines[i], 1, num_to_write, f) != num_to_write) {
-      status_message_set("Failed to write to %s: %s", b->filename, strerror(errno));
+  for (i = 0; i < b->num_lines(); ++i) {
+    unsigned int num_to_write = b->lines[i].size;
+    if (file_write(f, b->lines[i], num_to_write) != num_to_write) {
+      status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
       return;
     }
     /* TODO: windows endlines option */
@@ -1759,14 +1780,13 @@ static void check_terminal_resize() {
   G.term_width = w;
   G.term_height = h;
   free(G.screen_buffer);
-  G.screen_buffer = malloc(G.term_width * G.term_height * sizeof(*G.screen_buffer));
+  G.screen_buffer = (Pixel*)malloc(G.term_width * G.term_height * sizeof(*G.screen_buffer));
   screen_buffer_reset();
   G.bottom_pane.bounds = rect_create(0, G.term_height-1, G.term_width-1, 1);
   G.main_pane.bounds = rect_create(0, 0, G.term_width-1, G.term_height-1);
 }
 
 static void render_flush() {
-  int x,y;
   Style style;
 
   array_resize(G.tmp_render_buffer, 0);
@@ -1774,15 +1794,16 @@ static void render_flush() {
   style = G.default_style;
   term_apply_style_slow(&G.tmp_render_buffer, style);
 
-  term_cursor_move(0, 0);
+  term_cursor_move(3, 3);
 
-  for (y = 0; y < G.term_height; ++y)
-  for (x = 0; x < G.term_width; ++x) {
+  #if 0
+  for (int y = 0; y < G.term_height; ++y)
+  for (int x = 0; x < G.term_width; ++x) {
     Pixel p = G.screen_buffer[y*G.term_width + x];
 
     if (style_cmp(p.style, style)) {
       /* flush buffer */
-      write(STDOUT_FILENO, G.tmp_render_buffer, array_len(G.tmp_render_buffer));
+      file_write(stdout, G.tmp_render_buffer.data, G.tmp_render_buffer.size);
       array_resize(G.tmp_render_buffer, 0);
 
       /* apply style */
@@ -1801,19 +1822,21 @@ static void render_flush() {
     array_push(G.tmp_render_buffer, p.c[3]);
   }
   /* flush buffer */
-  write(STDOUT_FILENO, G.tmp_render_buffer, array_len(G.tmp_render_buffer));
-  array_resize(G.tmp_render_buffer, 0);
+  file_write(stdout, G.tmp_render_buffer.data, G.tmp_render_buffer.size);
+  #endif
+  G.tmp_render_buffer.size = 0;
+
+  puts("WWAAAAYA");
 
   fflush(stdout);
 
   screen_buffer_reset();
-
 }
 
 static int menu_option_save() {
   save_buffer(G.main_pane.buffer);
           /* TODO: write out absolute path, instead of relative */
-  status_message_set("Wrote %i lines to %s", buffer_numlines(G.main_pane.buffer), G.main_pane.buffer->filename);
+  status_message_set("Wrote %i lines to %s", G.main_pane.buffer->num_lines(), G.main_pane.buffer->filename);
   return 0;
 }
 
@@ -1886,30 +1909,22 @@ typedef struct {
 } DropdownMatch;
 
 static int dropdown_match_cmp(const void *aa, const void *bb) {
-  const DropdownMatch *a = aa, *b = bb;
+  const DropdownMatch *a = (DropdownMatch*)aa, *b = (DropdownMatch*)bb;
 
   if (a->points != b->points)
-    return b->points - a->points;
+    return (int)(b->points - a->points + 0.5f);
   return strlen(a->str) - strlen(b->str);
 }
 
 static void dropdown_render(Pane *active_pane) {
-  int i, max_width, input_len, overflow;
-  char *input_str;
-  Array(char*) identifiers;
-  DropdownMatch *best_matches;
-  int num_best_matches;
-  Buffer *active_buffer;
-  Pos p;
-
   if (!G.dropdown_visible)
     return;
 
-  num_best_matches = 0;
-  best_matches = malloc(G.dropdown_size * sizeof(*best_matches));
+  int num_best_matches = 0;
+  DropdownMatch *best_matches = (DropdownMatch*)malloc(G.dropdown_size * sizeof(*best_matches));
 
-  active_buffer = active_pane->buffer;
-  identifiers = active_buffer->identifiers;
+  Buffer *active_buffer = active_pane->buffer;
+  Array<char*> identifiers = active_buffer->identifiers;
 
   /* this shouldn't happen.. but just to be safe */
   if (G.dropdown_pos.y != active_pane->buffer->pos.y) {
@@ -1918,11 +1933,11 @@ static void dropdown_render(Pane *active_pane) {
   }
 
   /* find matching identifiers */
-  input_str = buffer_getstr_p(active_pane->buffer, G.dropdown_pos);
-  input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
+  char *input_str = buffer_getstr_p(active_pane->buffer, G.dropdown_pos);
+  int input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
   num_best_matches = 0;
 
-  for (i = 0; i < array_len(identifiers); ++i) {
+  for (int i = 0; i < identifiers.size; ++i) {
     float points, gain;
     char *in, *in_end, *test, *test_end;
     int test_len;
@@ -1968,33 +1983,32 @@ static void dropdown_render(Pane *active_pane) {
       best_matches[num_best_matches].points = points;
       ++num_best_matches;
     } else {
-      DropdownMatch *p;
-      int i;
+      DropdownMatch *match;
 
       /* find worst match and replace */
-      p = best_matches;
-      for (i = 1; i < G.dropdown_size; ++i)
-        if (best_matches[i].points < p->points)
-          p = best_matches+i;
-      p->str = identifier;
-      p->points = points;
+      match = best_matches;
+      for (int j = 1; j < G.dropdown_size; ++j)
+        if (best_matches[j].points < match->points)
+          match = best_matches+j;
+      match->str = identifier;
+      match->points = points;
     }
 
   }
 
   qsort(best_matches, num_best_matches, sizeof(*best_matches), dropdown_match_cmp);
 
-  max_width = 0;
-  for (i = 0; i < num_best_matches; ++i)
-    max_width = max(max_width, strlen(best_matches[i].str));
+  int max_width = 0;
+  for (int i = 0; i < num_best_matches; ++i)
+    max_width = max(max_width, (int)strlen(best_matches[i].str));
 
   /* position pane */
-  p = pane_to_screen_pos_xy(active_pane, G.dropdown_pos.x, G.dropdown_pos.y);
+  Pos p = pane_to_screen_pos_xy(active_pane, G.dropdown_pos.x, G.dropdown_pos.y);
   G.dropdown_pane.bounds.x = p.x;
   G.dropdown_pane.bounds.y = p.y+1;
   G.dropdown_pane.bounds.h = at_most(num_best_matches, (G.term_height-1)/2);
   G.dropdown_pane.bounds.w = at_least(max_width, 30);
-  overflow = G.dropdown_pane.bounds.x + G.dropdown_pane.bounds.w - (G.term_width - 1);
+  int overflow = G.dropdown_pane.bounds.x + G.dropdown_pane.bounds.w - (G.term_width - 1);
   if (overflow > 0)
     G.dropdown_pane.bounds.x -= overflow;
   G.dropdown_backwards = G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h >= G.term_height;
@@ -2002,7 +2016,7 @@ static void dropdown_render(Pane *active_pane) {
     G.dropdown_pane.bounds.y -= G.dropdown_pane.bounds.h+1;
 
   buffer_empty(&G.dropdown_buffer);
-  for (i = 0; i < num_best_matches; ++i) {
+  for (int i = 0; i < num_best_matches; ++i) {
     int which = G.dropdown_backwards ? num_best_matches-1-i : i;
     buffer_push_line(&G.dropdown_buffer, best_matches[which].str);
   }
@@ -2014,7 +2028,7 @@ static void dropdown_render(Pane *active_pane) {
 
 static int dropdown_get_first_line() {
   if (G.dropdown_backwards)
-    return buffer_numlines(&G.dropdown_buffer)-1;
+    return G.dropdown_buffer.num_lines()-1;
   else
     return 0;
 }
@@ -2027,8 +2041,8 @@ static void dropdown_autocomplete(Buffer *b) {
     return;
 
   y = dropdown_get_first_line();
-  str = G.dropdown_buffer.lines[y];
-  l = buffer_linesize(&G.dropdown_buffer, y);
+  str = G.dropdown_buffer[y];
+  l = G.dropdown_buffer[y].size;
   buffer_replace(b, G.dropdown_pos.x, b->pos.x, b->pos.y, str, l);
   G.dropdown_visible = 0;
 }
@@ -2105,11 +2119,12 @@ static int read_char(unsigned char *c) {
 }
 
 static int process_input() {
-  Key special_key = 0;
+  Key special_key = KEY_NONE;
   /* utf8 input */
   unsigned char input[4] = {0};
 
   /* get input */
+
   {
     int nread;
 
@@ -2197,7 +2212,7 @@ static int process_input() {
     case MODE_MENU:
       G.bottom_pane.buffer = &G.menu_buffer;
       if (special_key == KEY_RETURN) {
-        Array(char) line;
+        Array<char> line;
         int i;
 
         if (buffer_isempty(&G.menu_buffer)) {
@@ -2208,17 +2223,17 @@ static int process_input() {
         if (G.dropdown_visible)
           dropdown_autocomplete(&G.menu_buffer);
 
-        line = G.menu_buffer.lines[0];
+        line = G.menu_buffer[0];
         for (i = 0; i < (int)ARRAY_LEN(menu_options); ++i) {
           const char *name = menu_options[i].name;
 
-          if (array_len(line) != (int)strlen(name) || strncmp(line, name, array_len(line)))
+          if (line.size != (int)strlen(name) || strncmp(line, name, line.size))
             continue;
           if (menu_options[i].fun())
             return 1;
           goto done;
         }
-        status_message_set("Unknown option '%.*s'", buffer_linesize(&G.menu_buffer, 0), G.menu_buffer.lines[0]);
+        status_message_set("Unknown option '%.*s'", G.menu_buffer[0].size, G.menu_buffer[0].data);
         done:
 
 
@@ -2287,9 +2302,9 @@ static int process_input() {
 
           prev = G.main_pane.buffer->pos;
 
-          err = buffer_find(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0), 0);
+          err = buffer_find(G.main_pane.buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
           if (err) {
-            status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
+            status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
             break;
           }
           /*jumplist_push(prev);*/
@@ -2301,9 +2316,9 @@ static int process_input() {
 
           prev = G.main_pane.buffer->pos;
 
-          err = buffer_find_r(G.main_pane.buffer, G.search_buffer.lines[0], buffer_linesize(&G.search_buffer, 0), 0);
+          err = buffer_find_r(G.main_pane.buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
           if (err) {
-            status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), buffer_getline(&G.search_buffer, 0));
+            status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
             break;
           }
           /*jumplist_push(prev);*/
@@ -2350,7 +2365,7 @@ static int process_input() {
           b = G.main_pane.buffer;
           x = b->pos.x;
           y = b->pos.y;
-          yend = buffer_numlines(b);
+          yend = b->num_lines();
 
           for (;;) {
             t = token_read(b, &x, &y, yend, &p, 0);
@@ -2398,14 +2413,14 @@ static int process_input() {
           buffer_move_to(G.main_pane.buffer, 0, 0);
           break;
         case 'b':
-          buffer_move_to(G.main_pane.buffer, 0, buffer_numlines(G.main_pane.buffer)-1);
+          buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->num_lines()-1);
           break;
       }
       mode_normal(1);
       break;
 
     case MODE_SEARCH: {
-      Array(char) search;
+      Array<char> search;
 
       G.bottom_pane.buffer = &G.search_buffer;
       if (special_key == KEY_ESCAPE)
@@ -2416,7 +2431,7 @@ static int process_input() {
       search = G.search_buffer.lines[0];
       G.search_failed = buffer_find(G.main_pane.buffer,
                                search,
-                               array_len(search),
+                               search.size,
                                1);
 
       if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
@@ -2424,12 +2439,12 @@ static int process_input() {
           dropdown_get_first_line();
           G.search_failed = buffer_find(G.main_pane.buffer,
                                    search,
-                                   array_len(search),
+                                   search.size,
                                    1);
         }
         if (G.search_failed) {
           G.main_pane.buffer->pos = G.search_begin_pos;
-          status_message_set("'%.*s' not found", buffer_linesize(&G.search_buffer, 0), G.search_buffer.lines[0]);
+          status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer.lines[0].data);
           mode_normal(0);
         } else
           mode_normal(1);
@@ -2459,8 +2474,8 @@ static int process_input() {
   }
 
   /* just in case */
-  G.main_pane.buffer->pos.y = clampi(G.main_pane.buffer->pos.y, 0, buffer_numlines(G.main_pane.buffer)-1);
-  G.main_pane.buffer->pos.x = clampi(G.main_pane.buffer->pos.x, 0, buffer_linesize(G.main_pane.buffer, G.main_pane.buffer->pos.y));
+  G.main_pane.buffer->pos.y = clampi(G.main_pane.buffer->pos.y, 0, G.main_pane.buffer->num_lines()-1);
+  G.main_pane.buffer->pos.x = clampi(G.main_pane.buffer->pos.x, 0, G.main_pane.buffer->lines[G.main_pane.buffer->pos.y].size);
   return 0;
 }
 
@@ -2483,7 +2498,7 @@ static void state_init() {
   G.default_style.bold = G.default_style.italic = G.default_style.inverse = 0;
 
   /* init screen buffer */
-  G.screen_buffer = malloc(G.term_width * G.term_height * sizeof(*G.screen_buffer));
+  G.screen_buffer = (Pixel*)malloc(G.term_width * G.term_height * sizeof(*G.screen_buffer));
   screen_buffer_reset();
 
   /* init predefined buffers */
@@ -2495,8 +2510,8 @@ static void state_init() {
   G.main_pane.style.bcolor = COLOR_BLACK;
   G.main_pane.style.fcolor = COLOR_WHITE;
 
-  G.menu_buffer.identifiers = 0;
-  array_push_n(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
+  G.menu_buffer.identifiers = {};
+  array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
   for (i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
     G.menu_buffer.identifiers[i] = menu_options[i].name;
 
@@ -2540,7 +2555,6 @@ static void test() {
 
 int main(int argc, const char **argv) {
   int err;
-  (void) argc, (void)argv;
 
   if (argc < 2) {
     fprintf(stderr, "Usage: cedit <file>\n");
@@ -2553,20 +2567,21 @@ int main(int argc, const char **argv) {
   term_enable_raw_mode();
   atexit(term_reset_to_default_settings);
 
+  /* initialize state */
   state_init();
 
   /* open a buffer */
   {
     const char *filename = argv[1];
-    G.main_pane.buffer = malloc(sizeof(*G.main_pane.buffer));
+    G.main_pane.buffer = (Buffer*)malloc(sizeof(*G.main_pane.buffer));
     err = file_open(filename, G.main_pane.buffer);
     if (err) {
-      status_message_set("Could not open file %s: %s\n", filename, strerror(errno));
-      fprintf(stderr, "Could not open file %s: %s\n", filename, strerror(errno));
+      // status_message_set("Could not open file %s: %s\n", filename, cman_strerror(errno));
+      fprintf(stderr, "Could not open file %s: %s\n", filename, cman_strerror(errno));
       exit(1);
     }
     if (!err)
-      status_message_set("loaded %s, %i lines", filename, buffer_numlines(G.main_pane.buffer));
+      status_message_set("loaded %s, %i lines", filename, G.main_pane.buffer->num_lines());
   }
 
   while (1) {
@@ -2597,7 +2612,7 @@ int main(int argc, const char **argv) {
     if (err)
       break;
 
-    check_terminal_resize();
+    // check_terminal_resize();
   }
 
   return 0;

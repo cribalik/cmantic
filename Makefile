@@ -1,6 +1,6 @@
 all:
-	gcc -g -Wall -Wextra -pedantic -ansi -pedantic *.c -o cmantic
+	g++ -g -Wall -Wextra -pedantic -ansi -pedantic *.cpp -o cmantic
 
 release:
-	gcc -Wall -Wextra -pedantic -ansi -pedantic *.c -o cmantic
+	g++ -Wall -Wextra -pedantic -ansi -pedantic *.cpp -o cmantic
 

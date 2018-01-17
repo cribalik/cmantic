@@ -1,0 +1,30 @@
+{
+	"file_exclude_patterns":
+	[
+		"*.out",
+		"*.o",
+		"*.so",
+		"*.exe"
+	],
+	"folders":
+	[
+		{
+			"path": "."
+		}
+	],
+	"settings":
+	{
+		"tab_size": 2
+	},
+	"build_systems":
+	[
+		{
+			"name": "windows",
+			"cmd": ["build.bat"],
+			"working_dir": "${project_path}",
+			"shell": true,
+			"file_regex": "^([^(\n]+)\\(([0-9]+)\\)[ ]*: ()([^\n]+)$"
+		}
+	]
+
+}
