@@ -696,20 +696,27 @@ static void term_reset_video() {
 }
 
 static int term_get_dimensions(int *w, int *h) {
-#ifdef OS_LINUX
-  struct winsize ws;
-  int res = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
-  if (res == -1 || !ws.ws_col) {
-    /* fall back to moving the cursor to the bottom right and querying its position */
+  #ifdef OS_LINUX
+    struct winsize ws;
+    int res = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+    if (res == -1 || !ws.ws_col) {
+      /* fall back to moving the cursor to the bottom right and querying its position */
+      printf("%s", "\x1b[999C\x1b[999B\x1b[6n");
+      fflush(stdout);
+      res = scanf("\x1b[%d;%dR", h, w);
+      if (res != 2 || !*w || !*h) return -1;
+    } else {
+      *w = ws.ws_col;
+      *h = ws.ws_row;
+    }
+    return 0;
+  #else
     printf("%s", "\x1b[999C\x1b[999B\x1b[6n");
     fflush(stdout);
     res = scanf("\x1b[%d;%dR", h, w);
     if (res != 2 || !*w || !*h) return -1;
-  } else {
-    *w = ws.ws_col;
-    *h = ws.ws_row;
-  }
-  return 0;
+    return 0;
+  #endif
 }
 
 static void term_enable_raw_mode() {
@@ -1011,10 +1018,6 @@ static void term_init() {
 int main(int argc, const char **argv) {
   int err;
 
-  if (argc < 2) {
-    fprintf(stderr, "Usage: cedit <file>\n");
-    return 1;
-  }
 
   IF_DEBUG(test());
 

@@ -56,6 +56,8 @@
   #include <assert.h>
   #include "array.hpp"
 
+#include "graphics.h"
+
 // @debug
   #if 0
     #define DEBUG
@@ -103,20 +105,25 @@
     // term_reset_to_default_settings();
     va_list args;
     va_start(args, fmt);
-    vprintf(fmt, args);
+    vfprintf(stderr, fmt, args);
     va_end(args);
-    fflush(stdout);
+    fflush(stderr);
 
     abort();
   }
 
-  #define at_least(a,b) max(a,b)
-  #define at_most(a, b) min(a,b)
+  #define at_least(a,b) max((a),(b))
+  #define at_most(a, b) min((a),(b))
 
   /* a,b inclusive */
   static int clampi(int x, int a, int b) {
     return x < a ? a : (b < x ? b : x);
   }
+
+  template<class T>
+  T max(T a, T b) {return a < b ? b : a;}
+  template<class T>
+  T min(T a, T b) {return b < a ? b : a;}
 
   template<class T>
   void swap(T &a, T &b) {
@@ -190,26 +197,32 @@ struct Buffer {
 
   /* parser stuff */
   Array<Array<TokenInfo>> tokens;
-  Array<char*> identifiers;
+  Array<const char*> identifiers;
 
   Pos pos;
-
   int modified;
 
+  // methods
   Array<char>& operator[](int i) {return lines[i];}
   const Array<char>& operator[](int i) const {return lines[i];}
   int num_lines() const {return lines.size;}
 };
 
 struct Pane {
-  float x,y,pw,ph; // in pixels
-  float w,h; // in characters
+  int x,y,pw,ph; // in pixels
+  int w,h; // in lines (including line margin)
+  int gutter_width;
   Style style; // just for background and foreground
   Buffer *buffer;
 };
 
 static struct State {
   /* @renderer some rendering state */
+  SDL_Window *window;
+  int font_height;
+  int font_width;
+  int line_margin;
+
   int win_height, win_width;
   Style default_style;
   Style comment_style,
@@ -247,10 +260,11 @@ static struct State {
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
+  Color gutter_color;
   #define DROPDOWN_SIZE 7
 } G;
 
-enum Color {
+enum {
   COLOR_BLACK,
   COLOR_RED,
   COLOR_GREEN,
@@ -964,7 +978,7 @@ static void tokenize(Buffer *b) {
 
       str = (char*)malloc(identifier_buffer.size);
       array_copy(identifier_buffer, str);
-      array_push(b->identifiers, str);
+      array_push(b->identifiers, (const char*)str);
 
       identifier_done:;
     }
@@ -1164,13 +1178,22 @@ static int calc_num_chars(int i) {
   return result;
 }
 
+static int file_open(FILE **f, const char *filename, const char *mode) {
+  #ifdef OS_WINDOWS
+  return fopen_s(f, filename, mode);
+  #else
+  *f = fopen(filename, mode);
+  return *f == NULL;
+  #endif
+}
+
 /* grabs ownership of filename */
-static int file_open(const char *filename, Buffer *buffer_out) {
-  Buffer buffer = {0};
+static int buffer_from_file(const char *filename, Buffer *buffer_out) {
+  Buffer buffer = {};
   FILE* f;
 
   buffer.filename = filename;
-  if (fopen_s(&f, buffer.filename, "r"))
+  if (file_open(&f, buffer.filename, "r"))
     return -1;
 
   /* get line count */
@@ -1263,9 +1286,13 @@ static const char *keywords[] = {
 };
 
 static const char* cman_strerror(int e) {
-  static char buf[128];
-  strerror_s(buf, sizeof(buf), e);
-  return buf;
+  #ifdef OS_WINDOWS
+    static char buf[128];
+    strerror_s(buf, sizeof(buf), e);
+    return buf;
+  #else
+    return strerror(e);
+  #endif
 }
 
 #define file_write(file, str, len) fwrite(str, len, 1, file)
@@ -1278,7 +1305,7 @@ static void save_buffer(Buffer *b) {
 
   assert(b->filename);
 
-  if (fopen_s(&f, b->filename, "wb")) {
+  if (file_open(&f, b->filename, "wb")) {
     status_message_set("Could not open file %s for writing: %s", b->filename, cman_strerror(errno));
     return;
   }
@@ -1318,7 +1345,7 @@ static int menu_option_show_tab_type() {
   return 0;
 }
 
-static struct {char *name; int (*fun)();} menu_options[] = {
+static struct {const char *name; int (*fun)();} menu_options[] = {
   {"quit", menu_option_quit},
   {"save", menu_option_save},
   {"show_tab_type", menu_option_show_tab_type}
@@ -1370,7 +1397,7 @@ static void mode_menu() {
 }
 
 typedef struct {
-  char *str;
+  const char *str;
   float points;
 } DropdownMatch;
 
@@ -1391,7 +1418,7 @@ static void fill_dropdown_buffer(Pane *active_pane) {
   int num_best_matches = 0;
 
   Buffer *active_buffer = active_pane->buffer;
-  Array<char*> identifiers = active_buffer->identifiers;
+  Array<const char*> identifiers = active_buffer->identifiers;
 
   /* this shouldn't happen.. but just to be safe */
   if (G.dropdown_pos.y != active_pane->buffer->pos.y) {
@@ -1406,9 +1433,9 @@ static void fill_dropdown_buffer(Pane *active_pane) {
 
   for (int i = 0; i < identifiers.size; ++i) {
     float points, gain;
-    char *in, *in_end, *test, *test_end;
+    const char *in, *in_end, *test, *test_end;
     int test_len;
-    char *identifier;
+    const char *identifier;
 
     identifier = identifiers[i];
 
@@ -1558,8 +1585,12 @@ static void insert_default(Pane *p, SpecialKey special_key, unsigned char input[
 }
 
 static void state_init() {
+  SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
+
+  G.font_width = graphics_get_font_advance();
   G.tab_width = 4;
   G.default_tab_type = 4;
+  G.line_margin = 5;
 
   G.default_style.fcolor = COLOR_WHITE;
   G.default_style.bcolor = COLOR_BLACK;
@@ -1573,6 +1604,14 @@ static void state_init() {
 
   G.main_pane.style.bcolor = COLOR_BLACK;
   G.main_pane.style.fcolor = COLOR_WHITE;
+  G.main_pane.x = 0;
+  G.main_pane.y = 0;
+  G.main_pane.pw = G.win_width;
+  G.main_pane.ph = G.win_height;
+  G.main_pane.w = G.main_pane.pw / G.font_width;
+  G.main_pane.h = G.main_pane.ph / G.font_height / G.line_margin;
+  G.main_pane.gutter_width = 1;
+  G.main_pane.style = {};
 
   G.menu_buffer.identifiers = {};
   array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
@@ -1593,6 +1632,55 @@ static void state_init() {
   G.string_style.bcolor = COLOR_BLACK;
   G.number_style.fcolor = COLOR_RED;
   G.number_style.bcolor = COLOR_BLACK;
+
+  G.gutter_color = {1.0, 0.5, 0.7};
+}
+
+static int pane_calc_top_visible_row(Pane *pane) {
+  return at_least(0, pane->buffer->pos.y - pane->h/2);
+}
+
+static int pane_calc_left_visible_column(Pane *pane) {
+  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->w - pane->gutter_width - 3));
+}
+
+static void render_pane(Pane *p, bool draw_gutter) {
+  Buffer *b;
+  int buf_y, buf_y0, buf_y1;
+  int buf_x0;
+  Style style;
+
+  /* calc bounds */
+  b = p->buffer;
+  buf_y0 = pane_calc_top_visible_row(p);
+  buf_y1 = at_most(buf_y0 + p->h, b->lines.size);
+  buf_x0 = pane_calc_left_visible_column(p);
+
+  /* calc gutter width */
+  if (draw_gutter)
+    p->gutter_width = at_least(calc_num_chars(buf_y1) + 1, 2);
+  else
+    p->gutter_width = 0;
+
+  /* set some styles */
+  // render_set_style_block(p->style, x0, x1, y0, y1);
+  // style = p->style;
+  // style.fcolor = COLOR_YELLOW;
+  // render_set_style_block(style, x0, x0+p->gutter_width-1, y0, y1);
+
+  /* draw each line */
+  for (int y = p->y + G.font_height, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, y+=G.font_height + G.line_margin) {
+    Array<char> line = b->lines[buf_y];
+
+    /* gutter */
+    push_textf(p->x, y, false, G.gutter_color, "%i", buf_y+1);
+
+    if (line.size <= buf_x0)
+      continue;
+
+    /* text */
+    push_textn(line + buf_x0, line.size, p->x + p->gutter_width*G.font_width, y, false, {0.1f, 0.1f, 0.1f});
+  }
 }
 
 #ifdef DEBUG
@@ -1610,15 +1698,85 @@ static void test() {
 }
 #endif
 
-#include "3party/imgui_impl_sdl_gl3.cpp"
-#include "3party/imgui.cpp"
-#include "3party/imgui_draw.cpp"
-#include "3party/imgui_demo.cpp"
-#include "3party/GL/gl3w.c"
+#ifdef OS_WINDOWS
+int wmain(int argc, const char* argv)
+#else
+int main(int argc, const char **argv)
+#endif
+{
 
-int wmain(int, const char*) {
-  if (setup_sdl_window())
+  if (argc < 2) {
+    fprintf(stderr, "Usage: cedit <file>\n");
     return 1;
+  }
+
+  if (graphics_init(&G.window))
+    return 1;
+
+  G.font_height = 20;
+
+  if (graphics_text_init("/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf", G.font_height))
+    return 1;
+
+  state_init();
+
+  /* open a buffer */
+  {
+    const char *filename = argv[1];
+    G.main_pane.buffer = (Buffer*)malloc(sizeof(*G.main_pane.buffer));
+    int err = buffer_from_file(filename, G.main_pane.buffer);
+    if (err) {
+      // status_message_set("Could not open file %s: %s\n", filename, cman_strerror(errno));
+      fprintf(stderr, "Could not open file %s: %s\n", filename, cman_strerror(errno));
+      exit(1);
+    }
+    if (!err)
+      status_message_set("loaded %s, %i lines", filename, G.main_pane.buffer->num_lines());
+  }
+
+  // char input[9] = {};
+  // int in_pos = 0;
+  for (;;) {
+
+    for (SDL_Event event; SDL_PollEvent(&event);) {
+
+      switch (event.type) {
+      case SDL_WINDOWEVENT:
+        if (event.window.event == SDL_WINDOWEVENT_CLOSE)
+          return 1;
+        break;
+
+      case SDL_KEYDOWN:
+        if (event.key.keysym.sym == SDLK_ESCAPE)
+          exit(0);
+        break;
+
+      case SDL_TEXTINPUT:
+        // input[in_pos++] = *event.text.text;
+        // in_pos = in_pos & 7;
+        // strcpy(input, event.text.text);
+        break;
+      }
+    }
+
+    glClearColor(0.1f, 0.5f, 0.7f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    #if 0
+    static float a;
+    a += 0.05f;
+    push_text(input, 0, 0, false);
+    #endif
+
+    render_pane(&G.main_pane, true);
+
+    render_text();
+
+    // draw the 
+    // render_textatlas(0, 0, 200, 200);
+
+    SDL_GL_SwapWindow(G.window);
+  }
 
   return 0;
 }

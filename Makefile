@@ -1,6 +1,3 @@
 all:
-	g++ -g -Wall -Wextra -pedantic -ansi -pedantic *.cpp -o cmantic
-
-release:
-	g++ -Wall -Wextra -pedantic -ansi -pedantic *.cpp -o cmantic
+	g++ -g -Wall -Wno-unused-variable -Wno-unused-function -pedantic -std=c++11 -I./3party/SDL2 -I./3party cmantic.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL
 
