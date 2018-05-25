@@ -136,6 +136,7 @@
 // @utf8
   #define IS_UTF8_TRAIL(c) (((c)&0xC0) == 0x80)
   #define IS_UTF8_HEAD(c) ((c)&0x80)
+  #define IS_UTF8(utf8char) IS_UTF8_HEAD((utf8char).code[0])
 
 enum Mode {
   MODE_NORMAL,
@@ -148,11 +149,8 @@ enum Mode {
 };
 
 struct Style {
-  unsigned int fcolor: 4;
-  unsigned int bcolor: 4;
-  unsigned int bold: 1;
-  unsigned int italic: 1;
-  unsigned int inverse: 1;
+  Color text_color;
+  Color background_color;
 };
 
 struct Rect {
@@ -161,7 +159,55 @@ struct Rect {
 
 struct Utf8char {
   char code[4];
+
+  void operator=(char c) {
+    code[1] = code[2] = code[3] = 0;
+    code[0] = c;
+  }
+
+  void write_to_string(char *&str) {
+    for (int i = 0; i < 4 && code[i]; ++i)
+      *str++ = code[i];
+  }
+
+  static Utf8char from_string(const char *&str, const char *end) {
+    Utf8char r = {};
+    char *res = r.code;
+
+    if (str == end)
+      return r;
+
+    *res++ = *str++;
+
+    if (str == end || !IS_UTF8_TRAIL(*str))
+      return r;
+    *res++ = *str++;
+    if (str == end || !IS_UTF8_TRAIL(*str))
+      return r;
+    *res++ = *str++;
+    if (str == end || !IS_UTF8_TRAIL(*str))
+      return r;
+    *res++ = *str++;
+    return r;
+  }
+
+  static void to_string(Utf8char *in, int n, Array<char> &out) {
+    array_resize(out, n*4);
+    char * const begin = out.data;
+    char *end = begin;
+    for (int i = 0; i < n; ++i)
+      in[i].write_to_string(end);
+    array_resize(out, end - begin);
+  }
 };
+
+bool operator==(Utf8char uc, char c) {
+  return !uc.code[1] && uc.code[0] == c;
+}
+
+bool operator==(char c, Utf8char uc) {
+  return uc == c;
+}
 
 enum Token{
   TOKEN_NULL = 0,
@@ -210,10 +256,9 @@ struct Buffer {
 
 struct Pane {
   int x,y,pw,ph; // in pixels
-  int w,h; // in lines (including line margin)
-  int gutter_width;
-  Style style; // just for background and foreground
   Buffer *buffer;
+  int numchars_x() const;
+  int numchars_y() const;
 };
 
 struct State {
@@ -222,14 +267,11 @@ struct State {
   int font_height;
   int font_width;
   int line_margin;
+  Array<char> tmp_render_buffer;
 
   int win_height, win_width;
   Style default_style;
-  Style comment_style,
-        identifier_style,
-        string_style,
-        number_style,
-        keyword_style;
+  Style default_gutter_style;
 
   /* some editor state */
   Pane main_pane,
@@ -260,11 +302,113 @@ struct State {
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
-  Color gutter_color;
   #define DROPDOWN_SIZE 7
 };
 
 State G;
+
+struct Canvas {
+  Utf8char *chars;
+  Style *styles;
+  int w, h;
+
+  void init(int w, int h) {
+    this->w = w;
+    this->h = h;
+    this->chars = new Utf8char[w*h]();
+    this->styles = new Style[w*h]();
+  }
+
+  void resize(int w, int h) {
+    if (this->chars)
+      delete [] this->chars;
+    if (this->styles)
+      delete [] this->styles;
+    this->init(w, h);
+  }
+
+  void free() {
+    delete [] this->chars;
+    delete [] this->styles;
+  }
+
+  void fill(Utf8char c) {
+    for (int i = 0; i < w*h; ++i)
+      this->chars[i] = c;
+  }
+
+  void fill(Style s) {
+    for (int i = 0; i < w*h; ++i)
+      this->styles[i] = s;
+  }
+
+  void render_strn(int x, int y, Style style, const char *str, int n) {
+    if (!str)
+      return;
+
+    Utf8char *row = &this->chars[y*w];
+    Style *style_row = &this->styles[y*w];
+    int x0 = x;
+    for (const char *end = str+n; str != end && x0 < w;) {
+      if (*str == '\t') {
+        int e = x0 + at_most(G.tab_width, w - x0);
+        for (; x0 < e; ++x0) {
+          row[x0] = ' ';
+          style_row[x0] = style;
+        }
+        ++str;
+      }
+      else {
+        row[x0] = Utf8char::from_string(str, end);
+        style_row[x0] = style;
+        ++x0;
+      }
+    }
+  }
+
+  void render_str_v(int x, int y, Style style, const char *fmt, va_list args) {
+    int max_chars = w-x+1;
+    if (max_chars <= 0)
+      return;
+    array_resize(G.tmp_render_buffer, max_chars);
+    int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
+    render_strn(x, y, style, G.tmp_render_buffer, min(max_chars, n));
+  }
+
+  void render_strf(int x, int y, Style style, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    this->render_str_v(x, y, style, fmt, args);
+    va_end(args);
+  }
+
+  void render(const Pane *p) {
+    int y = p->y + G.font_height;
+    array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
+    for (int row = 0; row < h; ++row) {
+      // write utf8chars to a string of regular chars
+      Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
+      int x0 = 0;
+      int x1;
+      int y = p->y + G.font_height + (row) * (G.font_height + G.line_margin);
+      for (x1 = 1; x1 < w; ++x1) {
+        if (styles[row*w + x1].text_color == styles[x0].text_color)
+          continue;
+        int x = p->x + x0*G.font_width;
+        push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[x0].text_color);
+        x0 = x1;
+      }
+      push_textn(G.tmp_render_buffer.data + x0, x1 - x0, p->x + x0*G.font_width, y, false, styles[x0].text_color);
+    }
+  }
+};
+
+int Pane::numchars_x() const {
+  return this->pw / G.font_width + 1;
+}
+int Pane::numchars_y() const {
+  return this->ph / (G.font_height + G.line_margin) + 1;
+}
 
 enum {
   COLOR_BLACK,
@@ -793,11 +937,6 @@ static void buffer_guess_tab_type(Buffer *b) {
     b->tab_type = G.default_tab_type;
 }
 
-static void char_to_wide(char c, char res[4]) {
-  res[1] = res[2] = res[3] = 0;
-  res[0] = c;
-}
-
 static int utf8_to_wide(const char *str, const char *end, char res[4]) {
   res[0] = res[1] = res[2] = res[3] = 0;
 
@@ -921,7 +1060,7 @@ static void status_message_set(const char *fmt, ...) {
   va_list args;
 
   buffer_truncate_to_n_lines(&G.status_message_buffer, 1);
-  array_resize(G.status_message_buffer[0], (int)G.bottom_pane.w);
+  array_resize(G.status_message_buffer[0], (int)G.bottom_pane.numchars_x());
 
   va_start(args, fmt);
   n = vsnprintf(G.status_message_buffer[0], G.status_message_buffer[0].size, fmt, args);
@@ -1586,6 +1725,15 @@ static void insert_default(Pane *p, SpecialKey special_key, unsigned char input[
 }
 
 static void state_init() {
+
+  if (graphics_init(&G.window))
+    exit(1);
+
+  G.font_height = 14;
+
+  if (graphics_text_init("/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf", G.font_height, 64*1024))
+    exit(1);
+
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
 
   G.font_width = graphics_get_font_advance();
@@ -1593,9 +1741,10 @@ static void state_init() {
   G.default_tab_type = 4;
   G.line_margin = 5;
 
-  G.default_style.fcolor = COLOR_WHITE;
-  G.default_style.bcolor = COLOR_BLACK;
-  G.default_style.bold = G.default_style.italic = G.default_style.inverse = 0;
+  G.default_style.text_color = {0.9f, 0.9f, 0.9f};
+  G.default_style.background_color = {0.1, 0.1, 0.1};
+  G.default_gutter_style.text_color = {0.2f, 0.7f, 0.7f};
+  G.default_gutter_style.background_color = {0.1, 0.1, 0.1};
 
   /* init predefined buffers */
   buffer_empty(&G.menu_buffer);
@@ -1603,16 +1752,10 @@ static void state_init() {
   buffer_empty(&G.status_message_buffer);
   buffer_empty(&G.dropdown_buffer);
 
-  G.main_pane.style.bcolor = COLOR_BLACK;
-  G.main_pane.style.fcolor = COLOR_WHITE;
   G.main_pane.x = 0;
   G.main_pane.y = 0;
   G.main_pane.pw = G.win_width;
   G.main_pane.ph = G.win_height;
-  G.main_pane.w = G.main_pane.pw / G.font_width;
-  G.main_pane.h = G.main_pane.ph / G.font_height / G.line_margin;
-  G.main_pane.gutter_width = 1;
-  G.main_pane.style = {};
 
   G.menu_buffer.identifiers = {};
   array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
@@ -1620,29 +1763,14 @@ static void state_init() {
     G.menu_buffer.identifiers[i] = menu_options[i].name;
 
   G.dropdown_pane.buffer = &G.dropdown_buffer;
-  G.dropdown_pane.style.bcolor = COLOR_MAGENTA;
-  G.dropdown_pane.style.fcolor = COLOR_BLACK;
-
-  G.comment_style.fcolor = COLOR_BLUE;
-  G.comment_style.bcolor = COLOR_BLACK;
-  G.identifier_style.fcolor = COLOR_GREEN;
-  G.identifier_style.bcolor = COLOR_BLACK;
-  G.keyword_style.fcolor = COLOR_MAGENTA;
-  G.keyword_style.bcolor = COLOR_BLACK;
-  G.string_style.fcolor = COLOR_RED;
-  G.string_style.bcolor = COLOR_BLACK;
-  G.number_style.fcolor = COLOR_RED;
-  G.number_style.bcolor = COLOR_BLACK;
-
-  G.gutter_color = {1.0, 0.5, 0.7};
 }
 
 static int pane_calc_top_visible_row(Pane *pane) {
-  return at_least(0, pane->buffer->pos.y - pane->h/2);
+  return at_least(0, pane->buffer->pos.y - pane->numchars_y()/2);
 }
 
-static int pane_calc_left_visible_column(Pane *pane) {
-  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->w - pane->gutter_width - 3));
+static int pane_calc_left_visible_column(Pane *pane, int gutter_width) {
+  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->numchars_x() - gutter_width - 3));
 }
 
 static void render_pane(Pane *p, bool draw_gutter) {
@@ -1651,37 +1779,64 @@ static void render_pane(Pane *p, bool draw_gutter) {
   int buf_x0;
   Style style;
 
-  /* calc bounds */
+
+  // calc bounds 
   b = p->buffer;
   buf_y0 = pane_calc_top_visible_row(p);
-  buf_y1 = at_most(buf_y0 + p->h, b->lines.size);
-  buf_x0 = pane_calc_left_visible_column(p);
+  buf_y1 = at_most(buf_y0 + p->numchars_y(), b->lines.size);
 
-  /* calc gutter width */
+  int gutter_width;
+  // calc gutter width 
   if (draw_gutter)
-    p->gutter_width = at_least(calc_num_chars(buf_y1) + 1, 2);
+    gutter_width = at_least(calc_num_chars(buf_y1) + 0, 2);
   else
-    p->gutter_width = 0;
+    gutter_width = 0;
 
-  /* set some styles */
-  // render_set_style_block(p->style, x0, x1, y0, y1);
-  // style = p->style;
-  // style.fcolor = COLOR_YELLOW;
-  // render_set_style_block(style, x0, x0+p->gutter_width-1, y0, y1);
+  buf_x0 = pane_calc_left_visible_column(p, gutter_width);
 
-  /* draw each line */
-  for (int y = p->y + G.font_height, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, y+=G.font_height + G.line_margin) {
+  Canvas canvas;
+  canvas.init(p->numchars_x(), p->numchars_y());
+  canvas.fill(Utf8char{' '});
+  canvas.fill(G.default_style);
+
+  // draw each line 
+  for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
     Array<char> line = b->lines[buf_y];
 
-    /* gutter */
-    push_textf(p->x, y, false, G.gutter_color, "%i", buf_y+1);
+    // gutter 
+    canvas.render_strf(0, y, G.default_gutter_style, "%i", buf_y+1);
 
     if (line.size <= buf_x0)
       continue;
 
-    /* text */
-    push_textn(line + buf_x0, line.size, p->x + p->gutter_width*G.font_width, y, false, {0.1f, 0.1f, 0.1f});
+    // text 
+    canvas.render_strn(gutter_width+1, y, G.default_style, line + buf_x0, line.size);
   }
+
+  canvas.render(p);
+  canvas.free();
+}
+
+static void handle_text_input(Utf8char input) {
+  // TODO
+}
+
+static void handle_input(Utf8char input) {
+  // if it is utf8, we don't need to check for commands
+  if (IS_UTF8(input)) {
+    handle_text_input(input);
+    return;
+  }
+
+  switch (input.code[0]) {
+  case 'c':
+    exit(1);
+  case 'i':
+    puts("TODO: insert mode");
+    break;
+  }
+
+  handle_text_input(input);
 }
 
 #ifdef DEBUG
@@ -1711,14 +1866,6 @@ int main(int argc, const char **argv)
     return 1;
   }
 
-  if (graphics_init(&G.window))
-    return 1;
-
-  G.font_height = 20;
-
-  if (graphics_text_init("/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf", G.font_height))
-    return 1;
-
   state_init();
 
   /* open a buffer */
@@ -1735,10 +1882,9 @@ int main(int argc, const char **argv)
       status_message_set("loaded %s, %i lines", filename, G.main_pane.buffer->num_lines());
   }
 
-  // char input[9] = {};
-  // int in_pos = 0;
   for (;;) {
 
+    Utf8char input = {};
     for (SDL_Event event; SDL_PollEvent(&event);) {
 
       switch (event.type) {
@@ -1753,23 +1899,24 @@ int main(int argc, const char **argv)
         break;
 
       case SDL_TEXTINPUT:
-        // input[in_pos++] = *event.text.text;
-        // in_pos = in_pos & 7;
-        // strcpy(input, event.text.text);
+        // ignore weird characters
+        if (strlen(event.text.text) > sizeof(input))
+          break;
+        memcpy(input.code, event.text.text, strlen(event.text.text));
         break;
       }
     }
 
-    glClearColor(0.1f, 0.5f, 0.7f, 1.0f);
+    // handle input
+    if (input.code[0])
+      handle_input(input);
+
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    #if 0
-    static float a;
-    a += 0.05f;
-    push_text(input, 0, 0, false);
-    #endif
-
     render_pane(&G.main_pane, true);
+
+    // TODO: render background
 
     render_text();
 

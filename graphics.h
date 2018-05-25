@@ -141,6 +141,9 @@ struct Texture {
 struct Color {
   float r,g,b;
 };
+bool operator==(Color a, Color b) {
+  return a.r == b.r && a.g == b.g && a.b == b.b;
+}
 
 struct TextVertex {
   int x,y;
