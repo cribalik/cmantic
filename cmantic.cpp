@@ -147,7 +147,7 @@ enum Mode {
   MODE_COUNT
 };
 
-struct Style{
+struct Style {
   unsigned int fcolor: 4;
   unsigned int bcolor: 4;
   unsigned int bold: 1;
@@ -216,7 +216,7 @@ struct Pane {
   Buffer *buffer;
 };
 
-static struct State {
+struct State {
   /* @renderer some rendering state */
   SDL_Window *window;
   int font_height;
@@ -262,7 +262,9 @@ static struct State {
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
   Color gutter_color;
   #define DROPDOWN_SIZE 7
-} G;
+};
+
+State G;
 
 enum {
   COLOR_BLACK,
@@ -1396,10 +1398,10 @@ static void mode_menu() {
   buffer_empty(&G.menu_buffer);
 }
 
-typedef struct {
+struct DropdownMatch {
   const char *str;
   float points;
-} DropdownMatch;
+};
 
 static int dropdown_match_cmp(const void *aa, const void *bb) {
   const DropdownMatch *a = (DropdownMatch*)aa, *b = (DropdownMatch*)bb;
@@ -1501,7 +1503,6 @@ static void fill_dropdown_buffer(Pane *active_pane) {
     int which = G.dropdown_backwards ? num_best_matches-1-i : i;
     buffer_push_line(&G.dropdown_buffer, best_matches[which].str);
   }
-
 }
 
 static int dropdown_get_first_line() {
