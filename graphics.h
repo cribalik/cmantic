@@ -13,7 +13,37 @@
 
 #include <SDL.h>
 
+/**************
+ *   GENERAL  *
+ *************/
+
 static int graphics_init(SDL_Window **window);
+struct Color {
+  float r,g,b;
+};
+
+/**************
+ *    TEXT    *
+ *************/
+
+static int graphics_text_init(const char *ttf_file, int font_size = 20);
+static void render_textatlas(int x, int y, int w, int h);
+static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color);
+static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color);
+static void push_textf(int pos_x, int pos_y, bool center, Color color, const char *fmt, ...);
+static void render_text();
+
+/**************
+ *    QUAD    *
+ *************/
+
+struct Quad {
+  float x,y;
+  Color color;
+};
+static int graphics_quad_init();
+static void push_quad(Quad a, Quad b, Quad c, Quad d);
+static void render_quads();
 
 #if defined(OS_WINDOWS)
   #ifndef WIN32_LEAN_AND_MEAN
@@ -32,80 +62,81 @@ static int graphics_init(SDL_Window **window);
 
 #include <stddef.h>
 
-typedef char GLchar;
-typedef ptrdiff_t GLsizeiptr;
-typedef ptrdiff_t GLintptr;
+/* GL defines */
+  typedef char GLchar;
+  typedef ptrdiff_t GLsizeiptr;
+  typedef ptrdiff_t GLintptr;
 
-#define GL_DYNAMIC_DRAW                   0x88E8
-#define GL_ARRAY_BUFFER                   0x8892
-#define GL_LINK_STATUS                    0x8B82
-#define GL_INVALID_FRAMEBUFFER_OPERATION  0x0506
-#define GL_VERTEX_SHADER                  0x8B31
-#define GL_COMPILE_STATUS                 0x8B81
-#define GL_FRAGMENT_SHADER                0x8B30
+  #define GL_DYNAMIC_DRAW                   0x88E8
+  #define GL_ARRAY_BUFFER                   0x8892
+  #define GL_LINK_STATUS                    0x8B82
+  #define GL_INVALID_FRAMEBUFFER_OPERATION  0x0506
+  #define GL_VERTEX_SHADER                  0x8B31
+  #define GL_COMPILE_STATUS                 0x8B81
+  #define GL_FRAGMENT_SHADER                0x8B30
 
-#define GL_TEXTURE0                       0x84C0
-#define GL_TEXTURE1                       0x84C1
-#define GL_TEXTURE2                       0x84C2
-#define GL_TEXTURE3                       0x84C3
-#define GL_TEXTURE4                       0x84C4
-#define GL_TEXTURE5                       0x84C5
-#define GL_TEXTURE6                       0x84C6
-#define GL_TEXTURE7                       0x84C7
-#define GL_TEXTURE8                       0x84C8
-#define GL_TEXTURE9                       0x84C9
-#define GL_TEXTURE10                      0x84CA
-#define GL_TEXTURE11                      0x84CB
-#define GL_TEXTURE12                      0x84CC
-#define GL_TEXTURE13                      0x84CD
-#define GL_TEXTURE14                      0x84CE
-#define GL_TEXTURE15                      0x84CF
-#define GL_TEXTURE16                      0x84D0
-#define GL_TEXTURE17                      0x84D1
-#define GL_TEXTURE18                      0x84D2
-#define GL_TEXTURE19                      0x84D3
-#define GL_TEXTURE20                      0x84D4
-#define GL_TEXTURE21                      0x84D5
-#define GL_TEXTURE22                      0x84D6
-#define GL_TEXTURE23                      0x84D7
-#define GL_TEXTURE24                      0x84D8
-#define GL_TEXTURE25                      0x84D9
-#define GL_TEXTURE26                      0x84DA
-#define GL_TEXTURE27                      0x84DB
-#define GL_TEXTURE28                      0x84DC
-#define GL_TEXTURE29                      0x84DD
-#define GL_TEXTURE30                      0x84DE
-#define GL_TEXTURE31                      0x84DF
+  #define GL_TEXTURE0                       0x84C0
+  #define GL_TEXTURE1                       0x84C1
+  #define GL_TEXTURE2                       0x84C2
+  #define GL_TEXTURE3                       0x84C3
+  #define GL_TEXTURE4                       0x84C4
+  #define GL_TEXTURE5                       0x84C5
+  #define GL_TEXTURE6                       0x84C6
+  #define GL_TEXTURE7                       0x84C7
+  #define GL_TEXTURE8                       0x84C8
+  #define GL_TEXTURE9                       0x84C9
+  #define GL_TEXTURE10                      0x84CA
+  #define GL_TEXTURE11                      0x84CB
+  #define GL_TEXTURE12                      0x84CC
+  #define GL_TEXTURE13                      0x84CD
+  #define GL_TEXTURE14                      0x84CE
+  #define GL_TEXTURE15                      0x84CF
+  #define GL_TEXTURE16                      0x84D0
+  #define GL_TEXTURE17                      0x84D1
+  #define GL_TEXTURE18                      0x84D2
+  #define GL_TEXTURE19                      0x84D3
+  #define GL_TEXTURE20                      0x84D4
+  #define GL_TEXTURE21                      0x84D5
+  #define GL_TEXTURE22                      0x84D6
+  #define GL_TEXTURE23                      0x84D7
+  #define GL_TEXTURE24                      0x84D8
+  #define GL_TEXTURE25                      0x84D9
+  #define GL_TEXTURE26                      0x84DA
+  #define GL_TEXTURE27                      0x84DB
+  #define GL_TEXTURE28                      0x84DC
+  #define GL_TEXTURE29                      0x84DD
+  #define GL_TEXTURE30                      0x84DE
+  #define GL_TEXTURE31                      0x84DF
 
-static void (*glEnableVertexAttribArray) (GLuint index);
-static void (*glVertexAttribPointer) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
-static void (*glVertexAttribIPointer) (GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
-static void (*glUseProgram) (GLuint program);
-static void (*glUniform1i) (GLint location, GLint v0);
-static GLint (*glGetUniformLocation) (GLuint program, const GLchar *name);
-static GLuint (*glCreateShader) (GLenum type);
-static void (*glShaderSource) (GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length);
-static void (*glCompileShader) (GLuint shader);
-static void (*glGetShaderiv) (GLuint shader, GLenum pname, GLint *params);
-static void (*glGetShaderInfoLog) (GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
-static GLuint (*glCreateProgram) (void);
-static void (*glAttachShader) (GLuint program, GLuint shader);
-static void (*glLinkProgram) (GLuint program);
-static void (*glGetProgramiv) (GLuint program, GLenum pname, GLint *params);
-static void (*glGetProgramInfoLog) (GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
-static void (*glDeleteShader) (GLuint shader);
-static void (*glGenerateMipmap) (GLenum target);
-static void (*glGenVertexArrays) (GLsizei n, GLuint *arrays);
-static void (*glBindVertexArray) (GLuint array);
-static void (*glGenBuffers) (GLsizei n, GLuint *buffers);
-static void (*glBindBuffer) (GLenum target, GLuint buffer);
-static void (*glBufferData) (GLenum target, GLsizeiptr size, const void *data, GLenum usage);
-static void (*glUniform1f) (GLint location, GLfloat v0);
-static void (*glUniform2f) (GLint location, GLfloat v0, GLfloat v1);
-static void (*glUniform3f) (GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
-static void (*glUniform2i) (GLint location, GLint v0, GLint v1);
-static void (*glBufferSubData) (GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
-static void (*glUniform3fv) (GLint location, GLsizei count, const GLfloat *value);
+  static void (*glEnableVertexAttribArray) (GLuint index);
+  static void (*glVertexAttribPointer) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
+  static void (*glVertexAttribIPointer) (GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
+  static void (*glUseProgram) (GLuint program);
+  static void (*glUniform1i) (GLint location, GLint v0);
+  static GLint (*glGetUniformLocation) (GLuint program, const GLchar *name);
+  static GLuint (*glCreateShader) (GLenum type);
+  static void (*glShaderSource) (GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length);
+  static void (*glCompileShader) (GLuint shader);
+  static void (*glGetShaderiv) (GLuint shader, GLenum pname, GLint *params);
+  static void (*glGetShaderInfoLog) (GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+  static GLuint (*glCreateProgram) (void);
+  static void (*glAttachShader) (GLuint program, GLuint shader);
+  static void (*glLinkProgram) (GLuint program);
+  static void (*glGetProgramiv) (GLuint program, GLenum pname, GLint *params);
+  static void (*glGetProgramInfoLog) (GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+  static void (*glDeleteShader) (GLuint shader);
+  static void (*glGenerateMipmap) (GLenum target);
+  static void (*glGenVertexArrays) (GLsizei n, GLuint *arrays);
+  static void (*glBindVertexArray) (GLuint array);
+  static void (*glGenBuffers) (GLsizei n, GLuint *buffers);
+  static void (*glBindBuffer) (GLenum target, GLuint buffer);
+  static void (*glBufferData) (GLenum target, GLsizeiptr size, const void *data, GLenum usage);
+  static void (*glUniform1f) (GLint location, GLfloat v0);
+  static void (*glUniform2f) (GLint location, GLfloat v0, GLfloat v1);
+  static void (*glUniform3f) (GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+  static void (*glUniform2i) (GLint location, GLint v0, GLint v1);
+  static void (*glBufferSubData) (GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
+  static void (*glUniform3fv) (GLint location, GLsizei count, const GLfloat *value);
 
 
 #ifndef gl_ok_or_die
@@ -138,9 +169,6 @@ struct Texture {
   int w,h;
 };
 
-struct Color {
-  float r,g,b;
-};
 bool operator==(Color a, Color b) {
   return a.r == b.r && a.g == b.g && a.b == b.b;
 }
@@ -160,20 +188,25 @@ static struct GraphicsTextState {
   bool initialized;
   GLuint shader;
   TextVertex *vertices;
-  int max_vertices, num_vertices;
+  int num_vertices;
+  int _vertex_buffer_size;
   int font_size;
   Texture text_atlas;
   static const int FIRST_CHAR = 32;
   static const int LAST_CHAR = 128;
   GLuint vertex_array, vertex_buffer;
   Glyph glyphs[GraphicsTextState::LAST_CHAR - GraphicsTextState::FIRST_CHAR];
-  int window_width, window_height;
 } graphics_text_state;
 
 // only makes sense for mono fonts
 static int graphics_get_font_advance() {
   return graphics_text_state.glyphs[0].advance;
 }
+
+static struct {
+  bool initialized;
+  int window_width, window_height;
+} graphics_state;
 
 // return 0 on success
 static int graphics_init(SDL_Window **window) {
@@ -209,8 +242,8 @@ static int graphics_init(SDL_Window **window) {
   int w,h;
   SDL_GetWindowSize(*window, &w, &h);
   glViewport(0, 0, w, h);
-  graphics_text_state.window_width = w;
-  graphics_text_state.window_height = h;
+  graphics_state.window_width = w;
+  graphics_state.window_height = h;
 
   if (!SDL_GL_CreateContext(*window)) {
     fprintf(stderr, "Failed to create gl context: %s\n", SDL_GetError());
@@ -279,6 +312,7 @@ static int graphics_init(SDL_Window **window) {
 
   gl_ok_or_die;
 
+  graphics_state.initialized = true;
   return 0;
 }
 
@@ -379,15 +413,15 @@ static GLuint graphics_compile_shader(const char *vertex_shader_src, const char 
   glDeleteShader(vertex_shader);
   glDeleteShader(fragment_shader);
   return result;
-
 }
 
-static int graphics_text_init(const char *ttf_file, int font_size = 20, int max_vertices = 2048) {
-  graphics_text_state.max_vertices = max_vertices;
-  graphics_text_state.vertices = (TextVertex*)malloc(sizeof(*graphics_text_state.vertices) * max_vertices);
+static int graphics_text_init(const char *ttf_file, int font_size) {
+  assert(graphics_state.initialized);
+
+  graphics_text_state._vertex_buffer_size = 512;
+  graphics_text_state.vertices = (TextVertex*)malloc(sizeof(TextVertex) * graphics_text_state._vertex_buffer_size);
   graphics_text_state.num_vertices = 0;
   graphics_text_state.font_size = font_size;
-  graphics_text_state.initialized = true;
   gl_ok_or_die;
 
   /* Allocate text buffer */
@@ -420,7 +454,7 @@ static int graphics_text_init(const char *ttf_file, int font_size = 20, int max_
   gl_ok_or_die;
 
   // @shader
-  static const char *vertex_src = "#version 330 core\n" \
+  const char *vertex_src = "#version 330 core\n" \
   "layout(location = 0) in ivec2 pos;\n" \
   "layout(location = 1) in vec2 tpos;\n" \
   "layout(location = 2) in vec3 color;\n" \
@@ -433,7 +467,8 @@ static int graphics_text_init(const char *ttf_file, int font_size = 20, int max_
   "ftpos = tpos;\n" \
   "fcolor = color;\n" \
   "}";
-  static const char *fragment_src =
+
+  const char *fragment_src =
   "#version 330 core\n" \
   "in vec2 ftpos;\n" \
   "in vec3 fcolor;\n" \
@@ -450,6 +485,7 @@ static int graphics_text_init(const char *ttf_file, int font_size = 20, int max_
   // gl_ok_or_die;
   glActiveTexture(GL_TEXTURE0);
 
+  graphics_text_state.initialized = true;
   return 0;
 }
 
@@ -478,16 +514,30 @@ static void render_textatlas(int x, int y, int w, int h) {
 }
 
 static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color) {
-  if (!str) return;
+  assert(graphics_text_state.initialized);
+
+  if (!str)
+    return;
 
   float ipw,iph, tx0,ty0,tx1,ty1;
-  TextVertex *v;
 
   ipw = 1.0f / graphics_text_state.text_atlas.w;
   iph = 1.0f / graphics_text_state.text_atlas.h;
 
-  if (graphics_text_state.num_vertices + (int)strlen(str) >= graphics_text_state.max_vertices)
-    return;
+  // allocate new memory if needed
+  int newsize = graphics_text_state.num_vertices + 6*strlen(str);
+  if (newsize > graphics_text_state._vertex_buffer_size) {
+    int newcap = graphics_text_state._vertex_buffer_size * 2;
+    while (newcap < newsize)
+      newcap *= 2;
+
+    TextVertex *v = (TextVertex*)malloc(sizeof(*v) * newcap);
+    memcpy(v, graphics_text_state.vertices, graphics_text_state.num_vertices * sizeof(TextVertex));
+    free(graphics_text_state.vertices);
+
+    graphics_text_state.vertices = v;
+    graphics_text_state._vertex_buffer_size = newcap;
+  }
 
   if (center) {
     // calc string width
@@ -498,7 +548,7 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
     /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
   }
 
-  for (int i = 0; i < n && graphics_text_state.num_vertices + 6 < graphics_text_state.max_vertices; ++i) {
+  for (int i = 0; i < n; ++i) {
     Glyph g = graphics_text_state.glyphs[str[i] - 32];
 
     int x = pos_x + g.offset_x;
@@ -508,7 +558,7 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
 
     pos_x += g.advance;
     if (x + w <= 0) continue;
-    if (x - w >= graphics_text_state.window_width) break;
+    if (x - w >= graphics_state.window_width) break;
 
     /* scale texture to atlas */
     tx0 = g.x0 * ipw,
@@ -516,7 +566,7 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
     ty0 = g.y0 * iph;
     ty1 = g.y1 * iph;
 
-    v = graphics_text_state.vertices + graphics_text_state.num_vertices;
+    TextVertex *v = graphics_text_state.vertices + graphics_text_state.num_vertices;
 
     *v++ = {x, y, tx0, ty0, color};
     *v++ = {x + w, y, tx1, ty0, color};
@@ -555,7 +605,7 @@ static void render_text() {
 
   // set screen size
   GLint loc = glGetUniformLocation(graphics_text_state.shader, "screensize");
-  glUniform2f(loc, 600.0f, 600.0f);
+  glUniform2f(loc, graphics_state.window_width, graphics_state.window_height);
 
   // set alpha blending
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -605,5 +655,119 @@ static GLuint graphics_compile_shader_from_file(const char* vertex_filename, con
   return result;
 }
 
+typedef Quad QuadVertex;
+
+static struct {
+  bool initialized;
+  GLuint shader;
+  QuadVertex *vertices;
+  int num_vertices, _vertex_buffer_size;
+  GLuint vertex_array, vertex_buffer;
+} graphics_quad_state;
+
+static int graphics_quad_init() {
+  assert(graphics_state.initialized);
+
+  graphics_quad_state._vertex_buffer_size = 512;
+  graphics_quad_state.vertices = (QuadVertex*)malloc(sizeof(QuadVertex) * graphics_quad_state._vertex_buffer_size);
+  graphics_quad_state.num_vertices = 0;
+  gl_ok_or_die;
+
+  /* Allocate quad buffer */
+  glGenVertexArrays(1, &graphics_quad_state.vertex_array);
+  glGenBuffers(1, &graphics_quad_state.vertex_buffer);
+  glBindVertexArray(graphics_quad_state.vertex_array);
+  glBindBuffer(GL_ARRAY_BUFFER, graphics_quad_state.vertex_buffer);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(graphics_quad_state.vertices), 0, GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) 0);
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
+  gl_ok_or_die;
+
+  // @shader
+  const char *vertex_src = "#version 330 core\n" \
+  "layout(location = 0) in vec2 pos;\n" \
+  "layout(location = 1) in vec3 color;\n" \
+  "out vec3 fcolor;\n" \
+  "uniform vec2 screensize;\n" \
+  "void main() { \n" \
+  "vec2 p = vec2(pos.x*2.0f/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);\n" \
+    "gl_Position = vec4(p, 0, 1);\n" \
+    "fcolor = color;\n" \
+  "}";
+
+  const char *fragment_src =
+  "#version 330 core\n" \
+  "in vec3 fcolor;\n" \
+  "out vec4 color;\n" \
+  "void main () { color = vec4(fcolor, 1.0); }\n";
+
+  graphics_quad_state.shader = graphics_compile_shader(vertex_src, fragment_src);
+  if (!graphics_quad_state.shader)
+    return 1;
+  gl_ok_or_die;
+
+  graphics_quad_state.initialized = true;
+  return 0;
+}
+
+static void push_quad(Quad a, Quad b, Quad c, Quad d) {
+  assert(graphics_quad_state.initialized);
+
+  // allocate new memory if needed
+  int newsize = graphics_quad_state.num_vertices + 6;
+  if (newsize > graphics_quad_state._vertex_buffer_size) {
+    int newcap = graphics_quad_state._vertex_buffer_size * 2;
+    while (newcap < newsize)
+      newcap *= 2;
+
+    QuadVertex *v = (QuadVertex*)malloc(sizeof(*v) * newcap);
+    memcpy(v, graphics_quad_state.vertices, graphics_quad_state.num_vertices * sizeof(QuadVertex));
+    free(graphics_quad_state.vertices);
+
+    graphics_quad_state.vertices = v;
+    graphics_quad_state._vertex_buffer_size = newcap;
+  }
+
+  QuadVertex *v = graphics_quad_state.vertices + graphics_quad_state.num_vertices;
+
+  *v++ = a;
+  *v++ = b;
+  *v++ = c;
+  *v++ = a;
+  *v++ = c;
+  *v++ = d;
+  graphics_quad_state.num_vertices += 6;
+}
+
+static void push_square_quad(float x0, float x1, float y0, float y1, Color c) {
+  push_quad({x0,y0,c}, {x1,y0,c}, {x1,y1,c}, {x0,y1,c});
+}
+
+
+static void render_quads() {
+  glUseProgram(graphics_quad_state.shader);
+
+  // set screen size
+  GLint loc = glGetUniformLocation(graphics_quad_state.shader, "screensize");
+  glUniform2f(loc, graphics_state.window_width, graphics_state.window_height);
+
+  // set alpha blending
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  // send vertex data
+  glBindVertexArray(graphics_quad_state.vertex_array);
+  glBindBuffer(GL_ARRAY_BUFFER, graphics_quad_state.vertex_buffer);
+  glBufferData(GL_ARRAY_BUFFER, graphics_quad_state.num_vertices*sizeof(*graphics_quad_state.vertices), graphics_quad_state.vertices, GL_DYNAMIC_DRAW);
+
+  //draw
+  glDrawArrays(GL_TRIANGLES, 0, graphics_quad_state.num_vertices);
+  glBindVertexArray(0);
+
+  // clear
+  graphics_quad_state.num_vertices = 0;
+  gl_ok_or_die;
+}
 
 #endif /* GRAPHICS_H */

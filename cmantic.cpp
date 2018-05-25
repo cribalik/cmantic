@@ -1,4 +1,4 @@
-/* CURRENT: utf-8 support
+/* _CURRENT: utf-8 support
  *
  * TODO:
  *
@@ -153,6 +153,10 @@ struct Style {
   Color background_color;
 };
 
+static bool operator==(Style a, Style b) {
+  return a.text_color == b.text_color && a.background_color == b.background_color;
+}
+
 struct Rect {
   float x,y,w,h;
 };
@@ -259,19 +263,24 @@ struct Pane {
   Buffer *buffer;
   int numchars_x() const;
   int numchars_y() const;
+  int slot2pixelx(int x) const;
+  int slot2pixely(int y) const;
 };
 
 struct State {
   /* @renderer some rendering state */
   SDL_Window *window;
-  int font_height;
   int font_width;
-  int line_margin;
+  int line_height;
   Array<char> tmp_render_buffer;
-
   int win_height, win_width;
+
+  /* some settings */
   Style default_style;
   Style default_gutter_style;
+  Color marker_background_color;
+  Color hairline_color;
+  Color highlight_background_color;
 
   /* some editor state */
   Pane main_pane,
@@ -283,6 +292,8 @@ struct State {
          status_message_buffer,
          dropdown_buffer;
   Mode mode;
+
+  Pane *selected_pane;
 
   /* insert state */
   int insert_mode_begin_y;
@@ -306,6 +317,10 @@ struct State {
 };
 
 State G;
+
+struct IRect {
+  int x,y,w,h;
+};
 
 struct Canvas {
   Utf8char *chars;
@@ -342,72 +357,122 @@ struct Canvas {
       this->styles[i] = s;
   }
 
-  void render_strn(int x, int y, Style style, const char *str, int n) {
+  // w,h: use -1 to say it goes to the end
+  void fill_background(int x, int y, int w, int h, Color c) {
+    if (w == -1)
+      w = this->w - x;
+    if (h == -1)
+      h = this->h - y;
+    w = at_most(w, this->w - x);
+    h = at_most(h, this->h - y);
+    if (w < 0 || h < 0)
+      return;
+
+    for (int yy = y; yy < y+h; ++yy)
+    for (int xx = x; xx < x+w; ++xx)
+      styles[yy*this->w + xx].background_color = c;
+  }
+
+  void render_strn(int x, int y, Style style, int xclip0, int xclip1, const char *str, int n) {
     if (!str)
       return;
 
+    if (xclip1 == -1)
+      xclip1 = this->w;
+
     Utf8char *row = &this->chars[y*w];
     Style *style_row = &this->styles[y*w];
-    int x0 = x;
-    for (const char *end = str+n; str != end && x0 < w;) {
+    for (const char *end = str+n; str != end && x < xclip1;) {
       if (*str == '\t') {
-        int e = x0 + at_most(G.tab_width, w - x0);
-        for (; x0 < e; ++x0) {
-          row[x0] = ' ';
-          style_row[x0] = style;
-        }
+        for (int i = 0; i < G.tab_width; ++i, ++x)
+          if (x >= xclip0 && x < xclip1) {
+            row[x] = ' ';
+            style_row[x] = style;
+          }
         ++str;
       }
       else {
-        row[x0] = Utf8char::from_string(str, end);
-        style_row[x0] = style;
-        ++x0;
+        Utf8char c = Utf8char::from_string(str, end);
+        if (x >= xclip0 && x < xclip1) {
+          row[x] = c;
+          style_row[x] = style;
+        }
+        ++x;
       }
     }
   }
 
-  void render_str_v(int x, int y, Style style, const char *fmt, va_list args) {
+  void render_str_v(int x, int y, Style style, int x0, int x1, const char *fmt, va_list args) {
     int max_chars = w-x+1;
     if (max_chars <= 0)
       return;
     array_resize(G.tmp_render_buffer, max_chars);
     int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
-    render_strn(x, y, style, G.tmp_render_buffer, min(max_chars, n));
+    render_strn(x, y, style, x0, x1, G.tmp_render_buffer, min(max_chars, n));
   }
 
-  void render_strf(int x, int y, Style style, const char *fmt, ...) {
+  void render_strf(int x, int y, Style style, int x0, int x1, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    this->render_str_v(x, y, style, fmt, args);
+    this->render_str_v(x, y, style, x0, x1, fmt, args);
     va_end(args);
   }
 
   void render(const Pane *p) {
-    int y = p->y + G.font_height;
+    #if 0
+    printf("PRINTING SCREEN\n\n");
+    for (int i = 0; i < h; ++i) {
+      for (int j = 0; j < w; ++j)
+        putchar('a' + styles[i*w + j].background_color.r * 10);
+      putchar('\n');
+    }
+    #endif
+
+    // render background
+    for (int y = 0; y < h; ++y) {
+      for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
+        if (styles[y*w + x1] == styles[y*w + x0] && x1 < w)
+          continue;
+        float xf0 = (float)p->slot2pixelx(x0);
+        float xf1 = (float)p->slot2pixelx(x1);
+        float yf0 = (float)p->slot2pixely(y);
+        float yf1 = (float)p->slot2pixely(y+1);
+        const Color c = styles[y*w + x0].background_color;
+        push_square_quad(xf0, xf1, yf0, yf1, c);
+        x0 = x1;
+      }
+    }
+
+    // render text
+    const float text_offset_y = -3; // TODO: get this from truetype?
     array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
     for (int row = 0; row < h; ++row) {
-      // write utf8chars to a string of regular chars
       Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
-      int x0 = 0;
-      int x1;
-      int y = p->y + G.font_height + (row) * (G.font_height + G.line_margin);
-      for (x1 = 1; x1 < w; ++x1) {
-        if (styles[row*w + x1].text_color == styles[x0].text_color)
+      int y = p->slot2pixely(row+1) + text_offset_y;
+      for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
+        if (styles[row*w + x1].text_color == styles[x0].text_color && x1 < w)
           continue;
         int x = p->x + x0*G.font_width;
         push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[x0].text_color);
         x0 = x1;
       }
-      push_textn(G.tmp_render_buffer.data + x0, x1 - x0, p->x + x0*G.font_width, y, false, styles[x0].text_color);
     }
   }
 };
+
+int Pane::slot2pixelx(int x) const {
+  return this->x + x*G.font_width;
+}
+
+int Pane::slot2pixely(int y) const {
+  return this->y + y*G.line_height;
+}
 
 int Pane::numchars_x() const {
   return this->pw / G.font_width + 1;
 }
 int Pane::numchars_y() const {
-  return this->ph / (G.font_height + G.line_margin) + 1;
+  return this->ph / G.line_height + 1;
 }
 
 enum {
@@ -670,15 +735,15 @@ static void buffer_pretty(Buffer *b, int y) {
 }
 
 
-static void buffer_insert_char(Buffer *b, unsigned char ch[4]) {
+static void buffer_insert_char(Buffer *b, Utf8char ch) {
   int n = 1;
-  if (IS_UTF8_HEAD(ch[0]))
-    while (n < 4 && IS_UTF8_TRAIL(ch[n]))
+  if (IS_UTF8_HEAD(ch.code[0]))
+    while (n < 4 && IS_UTF8_TRAIL(ch.code[n]))
       ++n;
   b->modified = 1;
-  array_inserta(b->lines[b->pos.y], b->pos.x, (char*)ch, n);
+  array_inserta(b->lines[b->pos.y], b->pos.x, (char*)ch.code, n);
   buffer_move_x(b, 1);
-  if (ch[0] == '}')
+  if (ch.code[0] == '}')
     buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
@@ -1665,16 +1730,16 @@ static void dropdown_autocomplete(Buffer *b) {
   G.dropdown_visible = 0;
 }
 
-static void dropdown_update_on_insert(Pane *active_pane, unsigned char input[4]) {
+static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
 
   if (!G.dropdown_visible) {
-    if (!IS_IDENTIFIER_HEAD(*input))
+    if (!IS_IDENTIFIER_HEAD(*input.code))
       goto dropdown_hide;
 
     G.dropdown_pos = active_pane->buffer->pos;
   }
   else
-    if (!IS_IDENTIFIER_TAIL(*input))
+    if (!IS_IDENTIFIER_TAIL(*input.code))
       goto dropdown_hide;
 
   G.dropdown_visible = 1;
@@ -1684,7 +1749,7 @@ static void dropdown_update_on_insert(Pane *active_pane, unsigned char input[4])
   G.dropdown_visible = 0;
 }
 
-static void insert_default(Pane *p, SpecialKey special_key, unsigned char input[4]) {
+static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
   Buffer *b;
 
   b = p->buffer;
@@ -1729,9 +1794,12 @@ static void state_init() {
   if (graphics_init(&G.window))
     exit(1);
 
-  G.font_height = 14;
+  const int font_height = 14;
 
-  if (graphics_text_init("/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf", G.font_height, 64*1024))
+  if (graphics_text_init("/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf", font_height))
+    exit(1);
+
+  if (graphics_quad_init())
     exit(1);
 
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
@@ -1739,12 +1807,17 @@ static void state_init() {
   G.font_width = graphics_get_font_advance();
   G.tab_width = 4;
   G.default_tab_type = 4;
-  G.line_margin = 5;
+  const int line_margin = 0;
+  G.line_height = font_height + line_margin;
 
   G.default_style.text_color = {0.9f, 0.9f, 0.9f};
   G.default_style.background_color = {0.1, 0.1, 0.1};
-  G.default_gutter_style.text_color = {0.2f, 0.7f, 0.7f};
-  G.default_gutter_style.background_color = {0.1, 0.1, 0.1};
+  G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
+  G.default_gutter_style.background_color = G.default_style.background_color;
+  G.marker_background_color = {0.92549, 0.25098, 0.4784};
+
+  G.hairline_color = {0.2f, 0.2f, 0.2f};
+  G.highlight_background_color = {0.2f, 0.2f, 0.2f};
 
   /* init predefined buffers */
   buffer_empty(&G.menu_buffer);
@@ -1756,6 +1829,8 @@ static void state_init() {
   G.main_pane.y = 0;
   G.main_pane.pw = G.win_width;
   G.main_pane.ph = G.win_height;
+
+  G.selected_pane = &G.main_pane;
 
   G.menu_buffer.identifiers = {};
   array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
@@ -1770,7 +1845,10 @@ static int pane_calc_top_visible_row(Pane *pane) {
 }
 
 static int pane_calc_left_visible_column(Pane *pane, int gutter_width) {
-  return at_least(0, to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], pane->buffer->pos.x) - (pane->numchars_x() - gutter_width - 3));
+  int x = pane->buffer->pos.x;
+  x = to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], x);
+  x -= (pane->numchars_x() - gutter_width)-2;
+  return at_least(x, 0);
 }
 
 static void render_pane(Pane *p, bool draw_gutter) {
@@ -1779,16 +1857,14 @@ static void render_pane(Pane *p, bool draw_gutter) {
   int buf_x0;
   Style style;
 
-
   // calc bounds 
   b = p->buffer;
   buf_y0 = pane_calc_top_visible_row(p);
   buf_y1 = at_most(buf_y0 + p->numchars_y(), b->lines.size);
 
   int gutter_width;
-  // calc gutter width 
   if (draw_gutter)
-    gutter_width = at_least(calc_num_chars(buf_y1) + 0, 2);
+    gutter_width = at_least(calc_num_chars(buf_y1) + 3, 2);
   else
     gutter_width = 0;
 
@@ -1802,41 +1878,240 @@ static void render_pane(Pane *p, bool draw_gutter) {
   // draw each line 
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
     Array<char> line = b->lines[buf_y];
-
     // gutter 
-    canvas.render_strf(0, y, G.default_gutter_style, "%i", buf_y+1);
-
-    if (line.size <= buf_x0)
-      continue;
-
+    canvas.render_strf(0, y, G.default_gutter_style, 0, gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_strn(gutter_width+1, y, G.default_style, line + buf_x0, line.size);
+    canvas.render_strn(gutter_width - buf_x0, y, G.default_style, gutter_width, -1, line, line.size);
   }
 
+  // highlight the line you're on
+  Pos pos = to_visual_pos(b, Pos{b->pos.x, b->pos.y});
+  canvas.fill_background(gutter_width, b->pos.y - buf_y0, -1, 1, G.highlight_background_color);
+  // draw marker
+  canvas.fill_background(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color);
+
+  #if 0
+  // fill gutter
+  canvas.fill_background(0, 0, gutter_width+1, p->numchars_y(), G.default_gutter_style.background_color);
+  // draw gutter line
+  push_square_quad(
+    p->x + (gutter_width-0.5)*G.font_width,
+    p->x + (gutter_width-0.5)*G.font_width + 1.0,
+    p->y,
+    p->y + p->ph,
+    G.hairline_color);
+  #endif
+
   canvas.render(p);
+
   canvas.free();
 }
 
-static void handle_text_input(Utf8char input) {
-  // TODO
-}
-
-static void handle_input(Utf8char input) {
-  // if it is utf8, we don't need to check for commands
-  if (IS_UTF8(input)) {
-    handle_text_input(input);
+static void handle_input(Utf8char input, SpecialKey special_key) {
+  // TODO: if it is utf8
+  if (!special_key && IS_UTF8(input))
     return;
-  }
 
-  switch (input.code[0]) {
-  case 'c':
-    exit(1);
-  case 'i':
-    puts("TODO: insert mode");
+  switch (G.mode) {
+  case MODE_GOTO:
+    if (isdigit(input.code[0])) {
+      G.goto_line_number *= 10;
+      G.goto_line_number += input.code[0] - '0';
+      buffer_move_to_y(G.main_pane.buffer, G.goto_line_number-1);
+      status_message_set("goto %u", G.goto_line_number);
+      break;
+    }
+
+    switch (special_key ? special_key : input.code[0]) {
+      case 't':
+        buffer_move_to(G.main_pane.buffer, 0, 0);
+        break;
+      case 'b':
+        buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->num_lines()-1);
+        break;
+    }
+    mode_normal(1);
     break;
-  }
 
-  handle_text_input(input);
+  case MODE_COUNT:
+    break;
+
+  case MODE_MENU:
+    G.bottom_pane.buffer = &G.menu_buffer;
+    if (special_key == KEY_RETURN) {
+      Array<char> line;
+      int i;
+
+      if (buffer_isempty(&G.menu_buffer)) {
+        mode_normal(1);
+        break;
+      }
+
+      if (G.dropdown_visible)
+        dropdown_autocomplete(&G.menu_buffer);
+
+      line = G.menu_buffer[0];
+      for (i = 0; i < (int)ARRAY_LEN(menu_options); ++i) {
+        const char *name = menu_options[i].name;
+
+        if (line.size != (int)strlen(name) || strncmp(line, name, line.size))
+          continue;
+        if (menu_options[i].fun())
+          exit(1);
+        goto done;
+      }
+      status_message_set("Unknown option '%.*s'", G.menu_buffer[0].size, G.menu_buffer[0].data);
+      done:
+
+
+      mode_normal(0);
+    }
+    else if (special_key == KEY_ESCAPE)
+      mode_normal(1);
+    else
+      insert_default(&G.bottom_pane, special_key, input);
+    /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
+    break;
+
+  case MODE_SEARCH: {
+    Array<char> search;
+
+    G.bottom_pane.buffer = &G.search_buffer;
+    if (special_key == KEY_ESCAPE)
+      dropdown_autocomplete(&G.search_buffer);
+    else
+      insert_default(&G.bottom_pane, special_key, input);
+
+    search = G.search_buffer.lines[0];
+    G.search_failed = buffer_find(G.main_pane.buffer,
+                             search,
+                             search.size,
+                             1);
+
+    if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
+      if (G.dropdown_visible) {
+        dropdown_get_first_line();
+        G.search_failed = buffer_find(G.main_pane.buffer,
+                                 search,
+                                 search.size,
+                                 1);
+      }
+      if (G.search_failed) {
+        G.main_pane.buffer->pos = G.search_begin_pos;
+        status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer.lines[0].data);
+        mode_normal(0);
+      } else
+        mode_normal(1);
+    }
+  } break;
+
+  case MODE_DELETE:
+    switch (special_key ? special_key : input.code[0]) {
+      case 'd':
+        buffer_delete_line(G.main_pane.buffer);
+        mode_normal(1);
+        break;
+
+      default:
+        mode_normal(1);
+        break;
+    }
+    break;
+
+  case MODE_INSERT:
+    insert_default(&G.main_pane, special_key, input);
+    break;
+
+  case MODE_NORMAL:
+    switch (input.code[0]) {
+    case 'q':
+      exit(1);
+      break;
+    case 'i':
+      mode_insert();
+      break;
+    case 'j':
+      buffer_move_y(G.selected_pane->buffer, 1);
+      break;
+    case 'k':
+      buffer_move_y(G.selected_pane->buffer, -1);
+      break;
+    case 'h':
+      buffer_move_x(G.selected_pane->buffer, -1);
+      break;
+    case 'l':
+      buffer_move_x(G.selected_pane->buffer, 1);
+      break;
+    case KEY_ESCAPE:
+      if (G.main_pane.buffer->modified)
+        status_message_set("You have unsaved changes. If you really want to exit, use :quit");
+      else
+        exit(1);
+      break;
+    case 'L':
+      buffer_goto_endline(G.main_pane.buffer);
+      break;
+    case 'H':
+      buffer_goto_beginline(G.main_pane.buffer);
+      break;
+    case 'n': {
+      int err;
+      Pos prev;
+
+      prev = G.main_pane.buffer->pos;
+
+      err = buffer_find(G.main_pane.buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
+      if (err) {
+        status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
+        break;
+      }
+      /*jumplist_push(prev);*/
+    } break;
+
+    case 'N': {
+      int err;
+      Pos prev;
+
+      prev = G.main_pane.buffer->pos;
+
+      err = buffer_find_r(G.main_pane.buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
+      if (err) {
+        status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
+        break;
+      }
+      /*jumplist_push(prev);*/
+    } break;
+
+    case ' ':
+      mode_search();
+      break;
+
+    case 'g':
+      mode_goto();
+      break;
+
+    case 'o':
+      buffer_insert_newline_below(G.main_pane.buffer);
+      mode_insert();
+      break;
+
+    case ':':
+      mode_menu();
+      break;
+
+    case 'd':
+      mode_delete();
+      break;
+
+    case 'J':
+      buffer_move_y(G.main_pane.buffer, G.main_pane.numchars_y()/2);
+      break;
+
+    case 'K':
+      buffer_move_y(G.main_pane.buffer, -G.main_pane.numchars_y()/2);
+      break;
+    }
+  }
 }
 
 #ifdef DEBUG
@@ -1885,6 +2160,7 @@ int main(int argc, const char **argv)
   for (;;) {
 
     Utf8char input = {};
+    SpecialKey special_key = KEY_NONE;
     for (SDL_Event event; SDL_PollEvent(&event);) {
 
       switch (event.type) {
@@ -1894,8 +2170,38 @@ int main(int argc, const char **argv)
         break;
 
       case SDL_KEYDOWN:
-        if (event.key.keysym.sym == SDLK_ESCAPE)
-          exit(0);
+        switch (event.key.keysym.sym) {
+        case SDLK_ESCAPE:
+          special_key = KEY_ESCAPE;
+          break;
+        case SDLK_DOWN:
+          special_key = KEY_ARROW_DOWN;
+          break;
+        case SDLK_UP:
+          special_key = KEY_ARROW_UP;
+          break;
+        case SDLK_LEFT:
+          special_key = KEY_ARROW_LEFT;
+          break;
+        case SDLK_RIGHT:
+          special_key = KEY_ARROW_RIGHT;
+          break;
+        case SDLK_RETURN:
+          special_key = KEY_RETURN;
+          break;
+        case SDLK_TAB:
+          special_key = KEY_TAB;
+          break;
+        case SDLK_BACKSPACE:
+          special_key = KEY_BACKSPACE;
+          break;
+        case SDLK_HOME:
+          special_key = KEY_HOME;
+          break;
+        case SDLK_END:
+          special_key = KEY_END;
+          break;
+        }
         break;
 
       case SDL_TEXTINPUT:
@@ -1908,16 +2214,15 @@ int main(int argc, const char **argv)
     }
 
     // handle input
-    if (input.code[0])
-      handle_input(input);
+    if (input.code[0] || special_key)
+      handle_input(input, special_key);
 
-    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glClearColor(0.9f, 0.9f, 0.1f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
     render_pane(&G.main_pane, true);
 
-    // TODO: render background
-
+    render_quads();
     render_text();
 
     // draw the 
