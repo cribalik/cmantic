@@ -139,3 +139,4 @@ void array_free(Array<T> &a) {
 #define array_foreach(a, ptr) for ((ptr) = (a).data; (ptr) && (ptr) < (a).data+(a).size; ++(ptr))
 
 #endif
+
