@@ -1847,7 +1847,7 @@ static int pane_calc_top_visible_row(Pane *pane) {
 static int pane_calc_left_visible_column(Pane *pane, int gutter_width) {
   int x = pane->buffer->pos.x;
   x = to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], x);
-  x -= (pane->numchars_x() - gutter_width)-2;
+  x -= (pane->numchars_x() - gutter_width)*6/7;
   return at_least(x, 0);
 }
 
