@@ -1,2 +1,4 @@
+ * Now that we have a full opengl environment, how about we do cool stuff like show images from image urls inline in code? 0_0
  * a TODO stack with buffer locations and maybe comments
+ * nested jumps
  * Intermittent saves of the file, and a history browser

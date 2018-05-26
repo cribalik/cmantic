@@ -60,7 +60,7 @@ struct Color {
   // h [0,360]
   // s [0,1]
   // v [0,1]
-  static Color from_hsv(float h, float s, float l) {
+  static Color from_hsl(float h, float s, float l) {
     const float c = (1.0f - fabsf(2*l - 1)) * s;
     const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
     const float m = l - c/2.0f;
