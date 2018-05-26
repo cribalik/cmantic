@@ -806,7 +806,7 @@ static void buffer_insert_char(Buffer *b, Utf8char ch) {
   b->modified = 1;
   array_inserta(b->lines[b->pos.y], b->pos.x, (char*)ch.code, n);
   buffer_move_x(b, 1);
-  if (ch.code[0] == '}')
+  if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
     buffer_move_x(b, buffer_autoindent(b, b->pos.y));
 }
 
@@ -914,6 +914,8 @@ static int buffer_indentdepth(const Buffer *buffer, int y, bool *has_statement) 
     switch (t) {
       case '{': ++depth; break;
       case '}': --depth; break;
+      case '[': ++depth; break;
+      case ']': --depth; break;
       case '(': ++depth; break;
       case ')': --depth; break;
       case TOKEN_IDENTIFIER: 
@@ -933,79 +935,62 @@ static int buffer_indentdepth(const Buffer *buffer, int y, bool *has_statement) 
   return depth;
 }
 
-static int buffer_autoindent(Buffer *buffer, int y) {
+static int buffer_autoindent(Buffer *buffer, const int y) {
   const char tab_char = buffer->tab_type ? ' ' : '\t';
   const int tab_size = buffer->tab_type ? buffer->tab_type : 1;
 
-  if (y == 0)
-    return -buffer_getindent(buffer, y);
-
-  /* count number of indents above */
-
-  /* skip empty lines */
-  int i;
-  for (i = y-1; i > 0; --i)
-    if (buffer->lines[i].size > 0)
-      break;
-  if (i == 0)
-    return -buffer_getindent(buffer, y);
-
-  #if 0
-  int l = buffer->lines[y-1].size - indent_above;
-  i = buffer->lines[y-1].size-1;
-  diff += buffer_indentdepth(buffer, y-1);
-  else if (y >= 2) {
-    int indent_two_above;
-
-    indent_two_above = buffer_getindent(buffer, y-2) * tab_size;
-    int l = buffer->lines[y-2].size - indent_two_above;
-    i = buffer->lines[y-2].size-1;
-    if (i >= 0 && buffer->lines[y-2][i] != '{' && buffer->lines[y-2][i] != '}' &&
-       ((l >= 3 && strncmp("for",   buffer->lines[y-2]+indent_two_above, 3) == 0) ||
-        (l >= 2 && strncmp("if",    buffer->lines[y-2]+indent_two_above, 2) == 0) ||
-        (l >= 5 && strncmp("while", buffer->lines[y-2]+indent_two_above, 5) == 0) ||
-        (l >= 4 && strncmp("else",  buffer->lines[y-2]+indent_two_above, 4) == 0)))
-    --diff;
-  }
-  #endif
-
-  bool above_is_statement;
-  const int above_depth = buffer_indentdepth(buffer, y-1, &above_is_statement);
-  const bool above_is_indenting = (above_depth > 0 || above_is_statement);
-  const int above_indent = buffer_getindent(buffer, y-1);
-  int target_indent = above_indent;
-  if (above_is_indenting)
-    ++target_indent;
-
-  bool this_is_statement;
-  int this_depth = buffer_indentdepth(buffer, y, &this_is_statement);
-  bool this_is_deintenting = this_depth < 0 && !this_is_statement;
-  if (this_is_deintenting)
-    --target_indent;
-
-  // fix special case of
-  // if (...)
-  //   if (...)
-  //     some_thing_not_if
-  // this_line
-  if (!above_is_indenting && above_depth == 0) {
-    puts("Special case");
-    for (int yy = y-2; yy >= 0; --yy) {
-      bool is_statement;
-      const int indent = buffer_indentdepth(buffer, yy, &is_statement);
-      if (is_statement && indent == 0)
-        --target_indent;
-      else
-        break;
-    }
-  }
+  int diff = 0;
 
   const int current_indent = buffer_getindent(buffer, y);
-  printf("%i %i %i %i %i\n", target_indent, current_indent, above_indent, above_is_indenting, (int)above_is_statement);
-  /* count number of indents */
-  int diff = tab_size * (target_indent - current_indent);
+
+  int y_above = y-1;
+  while (y_above >= 0 && buffer->lines[y_above].size == 0)
+    --y_above;
+  if (y_above == 0) {
+    diff = -buffer_getindent(buffer, y);
+    goto done;
+  } else {
+    /* skip empty lines */
+    bool above_is_statement;
+    const int above_depth = buffer_indentdepth(buffer, y_above, &above_is_statement);
+    const bool above_is_indenting = (above_depth > 0 || above_is_statement);
+    const int above_indent = buffer_getindent(buffer, y_above);
+    int target_indent = above_indent;
+    if (above_is_indenting)
+      ++target_indent;
+
+    bool this_is_statement;
+    int this_depth = buffer_indentdepth(buffer, y, &this_is_statement);
+    bool this_is_deintenting = this_depth < 0 && !this_is_statement;
+    if (this_is_deintenting)
+      --target_indent;
+
+    // fix special case of
+    // if (...)
+    //   if (...)
+    //     some_thing_not_if
+    // this_line
+    if (!above_is_indenting && above_depth == 0) {
+      for (int yy = y_above-1; yy >= 0; --yy) {
+        bool is_statement;
+        const int indent = buffer_indentdepth(buffer, yy, &is_statement);
+        if (is_statement && indent == 0)
+          --target_indent;
+        else
+          break;
+      }
+    }
+
+    diff = tab_size * (target_indent - current_indent);
+    printf("%i\n", tab_size);
+  }
+
+
+  done:
+  if (diff < -current_indent*tab_size)
+    diff = -current_indent*tab_size;
   if (diff < 0)
-    array_remove_slown(buffer->lines[y], 0, at_most(current_indent, -diff));
+    array_remove_slown(buffer->lines[y], 0, at_most(current_indent*tab_size, -diff));
   if (diff > 0) {
     array_insertn(buffer->lines[y], 0, diff);
     for (int i = 0; i < diff; ++i)
@@ -2032,6 +2017,15 @@ static void render_pane(Pane *p, bool draw_gutter) {
           text_color = G.comment_color;
           prev = {buf_x0, buf_y0};
           break;
+
+        case TOKEN_LINE_COMMENT_BEGIN: {
+          do_render = true;
+          // just fast forward to the end of the line, no need to parse it
+          p = {0, prev.y+1};
+          next = {b->lines[prev.y].size-1, prev.y};
+          text_color = G.comment_color;
+          break;
+        }
 
         case TOKEN_BLOCK_COMMENT_BEGIN: {
           do_render = true;
