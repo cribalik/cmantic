@@ -220,9 +220,9 @@ enum Token{
   TOKEN_NUMBER = -3,
   TOKEN_STRING = -4,
   TOKEN_STRING_BEGIN = -5,
-  TOKEN_BLOCK_COMMENT = -6,
-  TOKEN_BLOCK_COMMENT_BEGIN = -7,
-  TOKEN_BLOCK_COMMENT_END = -8
+  TOKEN_BLOCK_COMMENT_BEGIN = -6,
+  TOKEN_BLOCK_COMMENT_END = -7,
+  TOKEN_LINE_COMMENT_BEGIN = -8,
 };
 
 struct TokenInfo {
@@ -231,14 +231,8 @@ struct TokenInfo {
 };
 
 struct Pos {
-  #define GHOST_EOL -1
-  #define GHOST_BOL -2
-  int x, y;
-  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+  int x,y;
 };
-static Pos pos_create(int x, int y) {
-  return {x,y,x};
-}
 
 struct Buffer {
   Array<Array<char>> lines;
@@ -249,7 +243,10 @@ struct Buffer {
   Array<Array<TokenInfo>> tokens;
   Array<const char*> identifiers;
 
+#define GHOST_EOL -1
+#define GHOST_BOL -2
   Pos pos;
+  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
   int modified;
 
   // methods
@@ -281,6 +278,11 @@ struct State {
   Color marker_background_color;
   Color hairline_color;
   Color highlight_background_color;
+  Color number_color;
+  Color comment_color;
+  Color string_color;
+  Color keyword_color;
+  Color identifier_color;
 
   /* some editor state */
   Pane main_pane,
@@ -355,6 +357,60 @@ struct Canvas {
   void fill(Style s) {
     for (int i = 0; i < w*h; ++i)
       this->styles[i] = s;
+  }
+
+  // fills a to b with the bounds 
+  void fill_textcolor(Pos a, Pos b, IRect bounds, Color c) {
+    if (bounds.w == -1)
+      bounds.w = this->w - bounds.x;
+    if (bounds.h == -1)
+      bounds.h = this->h - bounds.y;
+    // single line outside of bounds, early exit
+    if (a.y == b.y && (b.x < 0 || a.x > this->w)) {
+      if (a.y == 0)
+        puts("Skipping");
+      return;
+    }
+
+    int x,y,x0,x1,y0,y1;
+    a.x = clampi(a.x, 0, bounds.w-1);
+    a.y = clampi(a.y, 0, bounds.h-1);
+    b.x = clampi(b.x, 0, bounds.w-1);
+    b.y = clampi(b.y, 0, bounds.h-1);
+    x0 = bounds.x;
+    x1 = bounds.x + bounds.w;
+    y0 = bounds.y + a.y;
+    y1 = bounds.y + b.y;
+
+    if (y0 == y1) {
+      for (x = x0 + a.x, y = y0; x <= x0 + b.x; ++x)
+        this->styles[y*this->w + x].text_color = c;
+      return;
+    }
+
+    for (x = x0 + a.x, y = y0; x < x1 && y < y1; ++x)
+      this->styles[y*this->w + x].text_color = c;
+    for (++y; y < y1; ++y)
+    for (x = x0; x < x1; ++x)
+      this->styles[y*this->w + x].text_color = c;
+    for (x = x0; x <= x0 + b.x; ++x)
+      this->styles[y*this->w + x].text_color = c;
+  }
+
+  // w,h: use -1 to say it goes to the end
+  void fill_textcolor(int x, int y, int w, int h, Color c) {
+    if (w == -1)
+      w = this->w - x;
+    if (h == -1)
+      h = this->h - y;
+    w = at_most(w, this->w - x);
+    h = at_most(h, this->h - y);
+    if (w < 0 || h < 0)
+      return;
+
+    for (int yy = y; yy < y+h; ++yy)
+    for (int xx = x; xx < x+w; ++xx)
+      styles[yy*this->w + xx].text_color = c;
   }
 
   // w,h: use -1 to say it goes to the end
@@ -450,10 +506,10 @@ struct Canvas {
       Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
       int y = p->slot2pixely(row+1) + text_offset_y;
       for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-        if (styles[row*w + x1].text_color == styles[x0].text_color && x1 < w)
+        if (styles[row*w + x1].text_color == styles[row*w + x0].text_color && x1 < w)
           continue;
         int x = p->x + x0*G.font_width;
-        push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[x0].text_color);
+        push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[row*w + x0].text_color);
         x0 = x1;
       }
     }
@@ -510,7 +566,7 @@ static void buffer_move_to_x(Buffer *b, int x);
 
 static void buffer_goto_endline(Buffer *b) {
   buffer_move_to_x(b, b->lines[b->pos.y].size);
-  b->pos.ghost_x = GHOST_EOL;
+  b->ghost_x = GHOST_EOL;
 }
 
 static int buffer_begin_of_line(Buffer *b, int y) {
@@ -527,7 +583,7 @@ static void buffer_goto_beginline(Buffer *b) {
 
   x = buffer_begin_of_line(b, b->pos.y);
   buffer_move_to_x(b, x);
-  b->pos.ghost_x = GHOST_BOL;
+  b->ghost_x = GHOST_BOL;
 }
 
 static void buffer_empty(Buffer *b) {
@@ -558,15 +614,14 @@ static void buffer_truncate_to_n_lines(Buffer *b, int n) {
   b->pos.y = at_most(b->pos.y, n-1);
 }
 
-static int buffer_advance_xy(Buffer *b, int *x, int *y) {
-  ++(*x);
-  if (*x >= b->lines[*y].size) {
+static int buffer_advance(Buffer *b, int *x, int *y) {
+  *x += 1;
+  if (*x > b->lines[*y].size) {
     *x = 0;
-    ++(*y);
-    while (*y < b->lines.size && b->lines[*y].size == 0)
-      ++(*y);
-    if (*y == b->lines.size) {
-      --(*y);
+    *y += 1;
+    if (*y >= b->lines.size) {
+      *y = b->lines.size - 1;
+      *x = b->lines[*y].size;
       return 1;
     }
   }
@@ -574,23 +629,20 @@ static int buffer_advance_xy(Buffer *b, int *x, int *y) {
 }
 
 static int buffer_advance(Buffer *b) {
-  int r;
-
-  r = buffer_advance_xy(b, &b->pos.x, &b->pos.y);
-  if (r)
-    return r;
-  b->pos.ghost_x = b->pos.x;
+  int err = buffer_advance(b, &b->pos.x, &b->pos.y);
+  if (err)
+    return err;
+  b->ghost_x = b->pos.x;
   return 0;
 }
 
-static int buffer_advance_r_xy(Buffer *b, int *x, int *y) {
-  --(*x);
+static int buffer_advance_r(Buffer *b, int *x, int *y) {
+  *x -= 1;
   if (*x < 0) {
-    --(*y);
-    while (!b->lines[*y] && *y > 0)
-      --(*y);
-    if (*y <= 0) {
-      *x = b->lines[0].size;
+    *y -= 1;
+    if (*y < 0) {
+      *y = 0;
+      *x = 0;
       return 1;
     }
     *x = b->lines[*y].size;
@@ -599,14 +651,14 @@ static int buffer_advance_r_xy(Buffer *b, int *x, int *y) {
 }
 
 static int buffer_advance_r(Buffer *b) {
-  int r;
-
-  r = buffer_advance_r_xy(b, &b->pos.x, &b->pos.y);
-  if (r)
-    return r;
-  b->pos.ghost_x = b->pos.x;
+  int err = buffer_advance_r(b, &b->pos.x, &b->pos.y);
+  if (err)
+    return err;
+  b->ghost_x = b->pos.x;
   return 0;
 }
+
+
 
 static Array<char>* buffer_getline(Buffer *b, int y) {
   return &b->lines[y];
@@ -616,12 +668,16 @@ static char *buffer_getstr(Buffer *b, int x, int y) {
   return b->lines[y]+x;
 }
 
-static char *buffer_getstr_p(Buffer *b, Pos p) {
+static char *buffer_getstr(Buffer *b, Pos p) {
   return &b->lines[p.y][p.x];
 }
 
 static char buffer_getchar(Buffer *b, int x, int y) {
   return x >= b->lines[y].size ? '\n' : b->lines[y][x];
+}
+
+static char buffer_getchar(Buffer *b) {
+  return b->pos.x >= b->lines[b->pos.y].size ? '\n' : b->lines[b->pos.y][b->pos.x];
 }
 
 static void buffer_move_to(Buffer *b, int x, int y);
@@ -889,9 +945,8 @@ static int buffer_autoindent(Buffer *b, int y) {
 
   /* count number of indents */
   diff = indent_above + diff*tab_size - indent_this;
-  if (diff < 0) {
-    array_remove_slown(b->lines[y], 0, -diff);
-  }
+  if (diff < 0)
+    array_remove_slown(b->lines[y], 0, at_most(b->lines[y].size, -diff));
   if (diff > 0) {
     array_insertn(b->lines[y], 0, diff);
     for (i = 0; i < diff; ++i)
@@ -921,11 +976,9 @@ static void buffer_push_line(Buffer *b, const char *str) {
 static void buffer_move_to_y(Buffer *b, int y);
 
 static void buffer_insert_newline(Buffer *b) {
-  int left_of_line;
-
   b->modified = 1;
 
-  left_of_line = b->lines[b->pos.y].size - b->pos.x;
+  int left_of_line = b->lines[b->pos.y].size - b->pos.x;
   array_insertz(b->lines, b->pos.y+1);
   array_pusha(b->lines[b->pos.y+1], b->lines[b->pos.y] + b->pos.x, left_of_line);
   b->lines[b->pos.y].size = b->pos.x;
@@ -1073,7 +1126,7 @@ static void buffer_move_to_y(Buffer *b, int y) {
 static void buffer_move_to_x(Buffer *b, int x) {
   x = clampi(x, 0, b->lines[b->pos.y].size);
   b->pos.x = x;
-  b->pos.ghost_x = x;
+  b->ghost_x = x;
 }
 
 static void buffer_move_to(Buffer *b, int x, int y) {
@@ -1081,15 +1134,20 @@ static void buffer_move_to(Buffer *b, int x, int y) {
   buffer_move_to_x(b, x);
 }
 
+static void buffer_move_to(Buffer *b, Pos p) {
+  buffer_move_to_y(b, p.y);
+  buffer_move_to_x(b, p.x);
+}
+
 static void buffer_move_y(Buffer *b, int dy) {
   b->pos.y = clampi(b->pos.y + dy, 0, b->lines.size - 1);
 
-  if (b->pos.ghost_x == GHOST_EOL)
+  if (b->ghost_x == GHOST_EOL)
     b->pos.x = b->lines[b->pos.y].size;
-  else if (b->pos.ghost_x == GHOST_BOL)
+  else if (b->ghost_x == GHOST_BOL)
     b->pos.x = buffer_begin_of_line(b, b->pos.y);
   else
-    b->pos.x = from_visual_offset(b->lines[b->pos.y], b->pos.ghost_x);
+    b->pos.x = from_visual_offset(b->lines[b->pos.y], b->ghost_x);
 }
 
 static void buffer_move_x(Buffer *b, int dx) {
@@ -1110,7 +1168,7 @@ static void buffer_move_x(Buffer *b, int dx) {
     }
   }
   b->pos.x = clampi(b->pos.x, 0, w);
-  b->pos.ghost_x = to_visual_offset(b->lines[b->pos.y], b->pos.x);
+  b->ghost_x = to_visual_offset(b->lines[b->pos.y], b->pos.x);
 }
 
 static void buffer_move(Buffer *b, int dx, int dy) {
@@ -1156,7 +1214,7 @@ static void tokenize(Buffer *b) {
   for (;;) {
     /* whitespace */
     while (isspace(buffer_getchar(b, x, y)))
-      if (buffer_advance_xy(b, &x, &y))
+      if (buffer_advance(b, &x, &y))
         return;
 
     /* TODO: how do we handle comments ? */
@@ -1200,12 +1258,12 @@ static void tokenize(Buffer *b) {
     /* single char token */
     else {
       tokenizer_push_token(&b->tokens, x, y, row[x]);
-      if (buffer_advance_xy(b, &x, &y))
+      if (buffer_advance(b, &x, &y))
         return;
     }
 
     if (x == rowsize)
-      if (buffer_advance_xy(b, &x, &y))
+      if (buffer_advance(b, &x, &y))
         return;
   }
 }
@@ -1214,14 +1272,12 @@ static void tokenize(Buffer *b) {
 #define IS_NUMBER_TAIL(c) (isdigit(c) || ((c) >= 'A' && (c) <= 'F') || ((c) >= 'a' && (c) <= 'f') || (c) == 'x')
 #define IS_IDENTIFIER_HEAD(c) (isalpha(c) || (c) == '_' || IS_UTF8_HEAD(c))
 #define IS_IDENTIFIER_TAIL(c) (isalnum(c) || (c) == '_' || IS_UTF8_TRAIL(c))
-static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *end) {
+static int token_read(Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) {
   int token;
   int x,y;
-  x = *xp, y = *yp;
+  x = p->x, y = p->y;
 
   for (;;) {
-    char c;
-
     if (y >= y_end || y >= b->lines.size) {
       token = TOKEN_NULL;
       break;
@@ -1232,8 +1288,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       continue;
     }
 
-
-    c = b->lines[y][x];
+    char c = b->lines[y][x];
 
     if (isspace(c)) {
       ++x;
@@ -1244,10 +1299,10 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     if (IS_IDENTIFIER_HEAD(c)) {
       token = TOKEN_IDENTIFIER;
       if (start)
-        *start = pos_create(x, y);
+        *start = {x, y};
       while (x < b->lines[y].size) {
         if (end)
-          *end = pos_create(x, y);
+          *end = {x, y};
         c = b->lines[y][++x];
         if (!IS_IDENTIFIER_TAIL(c))
           break;
@@ -1255,35 +1310,14 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       break;
     }
 
-    /* block comment */
+    /* start of block comment */
     else if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '*') {
-      token = TOKEN_BLOCK_COMMENT;
+      token = TOKEN_BLOCK_COMMENT_BEGIN;
       if (start)
-        *start = pos_create(x, y);
+        *start = {x, y};
+      if (end)
+        *end = {x+1, y};
       x += 2;
-      /* goto matching end block */
-      for (;;) {
-        if (y >= y_end || y >= b->lines.size) {
-          if (end)
-            *end = pos_create(x, y);
-          token = TOKEN_BLOCK_COMMENT_BEGIN;
-          break;
-        }
-        if (x >= b->lines[y].size) {
-          ++y;
-          x = 0;
-          continue;
-        }
-
-        c = b->lines[y][x];
-        if (c == '*' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
-          if (end)
-            *end = pos_create(x+1, y);
-          x += 2;
-          break;
-        }
-        ++x;
-      }
       break;
     }
 
@@ -1291,9 +1325,20 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     else if (c == '*' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
       token = TOKEN_BLOCK_COMMENT_END;
       if (start)
-        *start = pos_create(x, y);
+        *start = {x, y};
       if (end)
-        *end = pos_create(x+1, y);
+        *end = {x+1, y};
+      x += 2;
+      break;
+    }
+
+    /* line comment */
+    else if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
+      token = TOKEN_LINE_COMMENT_BEGIN;
+      if (start)
+        *start = {x, y};
+      if (end)
+        *end = {x+1, y};
       x += 2;
       break;
     }
@@ -1302,10 +1347,10 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     else if (IS_NUMBER_HEAD(c)) {
       token = TOKEN_NUMBER;
       if (start)
-        *start = pos_create(x, y);
+        *start = {x, y};
       while (x < b->lines[y].size) {
         if (end)
-          *end = pos_create(x, y);
+          *end = {x, y};
         c = b->lines[y][++x];
         if (!IS_NUMBER_TAIL(c))
           break;
@@ -1316,7 +1361,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
         c = b->lines[y][++x];
         while (isdigit(c) && x < b->lines[y].size) {
           if (end)
-            *end = pos_create(x, y);
+            *end = {x, y};
           c = b->lines[y][++x];
         }
         if (x == b->lines[y].size)
@@ -1324,7 +1369,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       }
       while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < b->lines[y].size) {
         if (end)
-          *end = pos_create(x, y);
+          *end = {x, y};
         c = b->lines[y][++x];
       }
       break;
@@ -1334,13 +1379,13 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
       char str_char = c;
       token = TOKEN_STRING;
       if (start)
-        *start = pos_create(x, y);
+        *start = {x, y};
       ++x;
       for (;;) {
         if (x >= b->lines[y].size) {
           token = TOKEN_STRING_BEGIN;
           if (end)
-            *end = pos_create(x, y);
+            *end = {x, y};
           ++y;
           x = 0;
           break;
@@ -1349,7 +1394,7 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
         c = b->lines[y][x];
         if (c == str_char) {
           if (end)
-            *end = pos_create(x, y);
+            *end = {x, y};
           ++x;
           break;
         }
@@ -1362,16 +1407,16 @@ static int token_read(Buffer *b, int *xp, int *yp, int y_end, Pos *start, Pos *e
     else {
       token = c;
       if (start)
-        *start = pos_create(x, y);
+        *start = {x, y};
       if (end)
-        *end = pos_create(x, y);
+        *end = {x, y};
       ++x;
       break;
     }
   }
 
-  *xp = x;
-  *yp = y;
+  p->x = x;
+  p->y = y;
   return token;
 }
 
@@ -1504,7 +1549,6 @@ static const char* cman_strerror(int e) {
 #define file_write(file, str, len) fwrite(str, len, 1, file)
 #define file_read(file, buf, n) fread(buf, n, 1, file)
 
-
 static void save_buffer(Buffer *b) {
   FILE* f;
   int i;
@@ -1633,7 +1677,7 @@ static void fill_dropdown_buffer(Pane *active_pane) {
   }
 
   /* find matching identifiers */
-  char *input_str = buffer_getstr_p(active_pane->buffer, G.dropdown_pos);
+  char *input_str = buffer_getstr(active_pane->buffer, G.dropdown_pos);
   int input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
   num_best_matches = 0;
 
@@ -1810,11 +1854,16 @@ static void state_init() {
   const int line_margin = 0;
   G.line_height = font_height + line_margin;
 
-  G.default_style.text_color = {0.9f, 0.9f, 0.9f};
+  G.default_style.text_color = {0.8f, 0.8f, 0.8f};
   G.default_style.background_color = {0.1, 0.1, 0.1};
   G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
   G.default_gutter_style.background_color = G.default_style.background_color;
   G.marker_background_color = {0.92549, 0.25098, 0.4784};
+  G.number_color = {1.0f, 0.921568627451f, 0.23137254902f};
+  G.comment_color = {0.329411764706f, 0.43137254902f, 0.478431372549f};
+  G.string_color = {0.611764705882f, 0.152941176471f, 0.690196078431f};
+  G.identifier_color = {0.262745098039f, 0.627450980392f, 0.278431372549f};
+  G.keyword_color = {0.92549, 0.25098, 0.4784};
 
   G.hairline_color = {0.2f, 0.2f, 0.2f};
   G.highlight_background_color = {0.2f, 0.2f, 0.2f};
@@ -1864,7 +1913,7 @@ static void render_pane(Pane *p, bool draw_gutter) {
 
   int gutter_width;
   if (draw_gutter)
-    gutter_width = at_least(calc_num_chars(buf_y1) + 3, 2);
+    gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   else
     gutter_width = 0;
 
@@ -1885,22 +1934,126 @@ static void render_pane(Pane *p, bool draw_gutter) {
   }
 
   // highlight the line you're on
-  Pos pos = to_visual_pos(b, Pos{b->pos.x, b->pos.y});
+  Pos pos = to_visual_pos(b, b->pos);
   canvas.fill_background(gutter_width, b->pos.y - buf_y0, -1, 1, G.highlight_background_color);
   // draw marker
   canvas.fill_background(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color);
 
-  #if 0
-  // fill gutter
-  canvas.fill_background(0, 0, gutter_width+1, p->numchars_y(), G.default_gutter_style.background_color);
-  // draw gutter line
-  push_square_quad(
-    p->x + (gutter_width-0.5)*G.font_width,
-    p->x + (gutter_width-0.5)*G.font_width + 1.0,
-    p->y,
-    p->y + p->ph,
-    G.hairline_color);
-  #endif
+  if (1) {
+    int token;
+    bool in_block_comment = false;
+    Pos prev_block_comment_start = {buf_x0, buf_y0};
+
+    Pos p = {0, buf_y0};
+    for (;;) {
+      Pos prev, next;
+
+      token = token_read(b, &p, buf_y1, &prev, &next);
+
+      check_token:
+
+      bool do_render = false;
+
+      Color text_color;
+
+      if (token == TOKEN_NULL)
+        break;
+      switch (token) {
+
+        case TOKEN_NUMBER:
+          do_render = true;
+          text_color = G.number_color;
+          break;
+
+        case TOKEN_BLOCK_COMMENT_END:
+          do_render = true;
+          text_color = G.comment_color;
+          in_block_comment = false;
+          prev = prev_block_comment_start;
+          break;
+
+        case TOKEN_BLOCK_COMMENT_BEGIN:
+          do_render = false;
+          text_color = G.comment_color;
+          in_block_comment = true;
+          prev_block_comment_start = prev;
+          break;
+
+        case TOKEN_STRING:
+          do_render = true;
+          text_color = G.string_color;
+          break;
+
+        case TOKEN_STRING_BEGIN:
+          do_render = true;
+          text_color = G.string_color;
+          break;
+
+        case TOKEN_IDENTIFIER: {
+          /* check for keywords */
+          int identifier_len = next.y > prev.y ? b->lines[prev.y].size - prev.x : next.x - prev.x + 1;
+          for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
+            if ((int)strlen(keywords[i]) == identifier_len && memcmp(b->lines[prev.y]+prev.x, keywords[i], identifier_len) == 0) {
+              text_color = G.keyword_color;
+              goto done;
+            }
+          }
+
+          /* otherwise check for functions */
+          /* should not be indented */
+          if (isspace(buffer_getchar(b, 0, prev.y)))
+            break;
+          Pos prev_tmp, next_tmp;
+          token = token_read(b, &p, buf_y1, &prev_tmp, &next_tmp);
+          if (token != '(') {
+            prev = prev_tmp;
+            next = next_tmp;
+            goto check_token;
+          }
+          text_color = G.identifier_color;
+
+          done:
+          do_render = true;
+        } break;
+
+        case '#':
+          do_render = true;
+          text_color = G.keyword_color;
+          break;
+
+        default:
+          break;
+      }
+      if (do_render) {
+        prev = to_visual_pos(b, prev);
+        next = to_visual_pos(b, next);
+
+        prev.x -= buf_x0;
+        prev.y -= buf_y0;
+        next.x -= buf_x0;
+        next.y -= buf_y0;
+
+        canvas.fill_textcolor(prev, next, IRect{gutter_width, 0, -1, -1}, text_color);
+      }
+
+      if (p.y > buf_y1)
+        break;
+    }
+    if (in_block_comment) {
+      Pos prev = prev_block_comment_start;
+      Pos next = {b->lines[buf_y1-1].size, buf_y1-1};
+
+      prev = to_visual_pos(b, prev);
+      next = to_visual_pos(b, next);
+
+      prev.x -= buf_x0;
+      prev.y -= buf_y0;
+      next.x -= buf_x0;
+      next.y -= buf_y0;
+
+      canvas.fill_textcolor(prev, next, IRect{gutter_width, 0, -1, -1}, G.comment_color);
+    }
+  }
 
   canvas.render(p);
 
@@ -1912,22 +2065,24 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
   if (!special_key && IS_UTF8(input))
     return;
 
+  Buffer *buffer = G.main_pane.buffer;
+
   switch (G.mode) {
   case MODE_GOTO:
     if (isdigit(input.code[0])) {
       G.goto_line_number *= 10;
       G.goto_line_number += input.code[0] - '0';
-      buffer_move_to_y(G.main_pane.buffer, G.goto_line_number-1);
+      buffer_move_to_y(buffer, G.goto_line_number-1);
       status_message_set("goto %u", G.goto_line_number);
       break;
     }
 
     switch (special_key ? special_key : input.code[0]) {
       case 't':
-        buffer_move_to(G.main_pane.buffer, 0, 0);
+        buffer_move_to(buffer, 0, 0);
         break;
       case 'b':
-        buffer_move_to(G.main_pane.buffer, 0, G.main_pane.buffer->num_lines()-1);
+        buffer_move_to(buffer, 0, buffer->num_lines()-1);
         break;
     }
     mode_normal(1);
@@ -1983,7 +2138,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       insert_default(&G.bottom_pane, special_key, input);
 
     search = G.search_buffer.lines[0];
-    G.search_failed = buffer_find(G.main_pane.buffer,
+    G.search_failed = buffer_find(buffer,
                              search,
                              search.size,
                              1);
@@ -1991,13 +2146,13 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
       if (G.dropdown_visible) {
         dropdown_get_first_line();
-        G.search_failed = buffer_find(G.main_pane.buffer,
+        G.search_failed = buffer_find(buffer,
                                  search,
                                  search.size,
                                  1);
       }
       if (G.search_failed) {
-        G.main_pane.buffer->pos = G.search_begin_pos;
+        buffer->pos = G.search_begin_pos;
         status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer.lines[0].data);
         mode_normal(0);
       } else
@@ -2008,7 +2163,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
   case MODE_DELETE:
     switch (special_key ? special_key : input.code[0]) {
       case 'd':
-        buffer_delete_line(G.main_pane.buffer);
+        buffer_delete_line(buffer);
         mode_normal(1);
         break;
 
@@ -2024,8 +2179,34 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
 
   case MODE_NORMAL:
     switch (input.code[0]) {
+    case 'w': {
+      char c = buffer_getchar(buffer);
+      if (!isspace(c))
+        while (c = buffer_getchar(buffer), !isspace(c))
+          if (buffer_advance(buffer))
+            break;
+      while (c = buffer_getchar(buffer), isspace(c))
+        if (buffer_advance(buffer))
+          break;
+      // Pos p, prev, next;
+      // p = buffer->pos;
+      // token_read(buffer, &p, buffer->lines.size, &prev, 0);
+      // while (1) {
+      //   int t = token_read(buffer, &p, buffer->lines.size, &prev, 0);
+      //   if (t == TOKEN_NULL)
+      //     break;
+      //   if (t == TOKEN_IDENTIFIER) {
+      //     buffer_move_to(buffer, prev);
+      //     break;
+      //   }
+      // }
+    } break;
+
     case 'q':
-      exit(1);
+      if (buffer->modified)
+        status_message_set("You have unsaved changes. If you really want to exit, use :quit");
+      else
+        exit(0);
       break;
     case 'i':
       mode_insert();
@@ -2037,30 +2218,24 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       buffer_move_y(G.selected_pane->buffer, -1);
       break;
     case 'h':
-      buffer_move_x(G.selected_pane->buffer, -1);
+      buffer_advance_r(buffer);
       break;
     case 'l':
-      buffer_move_x(G.selected_pane->buffer, 1);
-      break;
-    case KEY_ESCAPE:
-      if (G.main_pane.buffer->modified)
-        status_message_set("You have unsaved changes. If you really want to exit, use :quit");
-      else
-        exit(1);
+      buffer_advance(buffer);
       break;
     case 'L':
-      buffer_goto_endline(G.main_pane.buffer);
+      buffer_goto_endline(buffer);
       break;
     case 'H':
-      buffer_goto_beginline(G.main_pane.buffer);
+      buffer_goto_beginline(buffer);
       break;
     case 'n': {
       int err;
       Pos prev;
 
-      prev = G.main_pane.buffer->pos;
+      prev = buffer->pos;
 
-      err = buffer_find(G.main_pane.buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
+      err = buffer_find(buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
       if (err) {
         status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
         break;
@@ -2069,12 +2244,9 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     } break;
 
     case 'N': {
-      int err;
-      Pos prev;
+      Pos prev = buffer->pos;
 
-      prev = G.main_pane.buffer->pos;
-
-      err = buffer_find_r(G.main_pane.buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
+      int err = buffer_find_r(buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
       if (err) {
         status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
         break;
@@ -2091,7 +2263,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       break;
 
     case 'o':
-      buffer_insert_newline_below(G.main_pane.buffer);
+      buffer_insert_newline_below(buffer);
       mode_insert();
       break;
 
@@ -2104,11 +2276,11 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       break;
 
     case 'J':
-      buffer_move_y(G.main_pane.buffer, G.main_pane.numchars_y()/2);
+      buffer_move_y(buffer, G.main_pane.numchars_y()/2);
       break;
 
     case 'K':
-      buffer_move_y(G.main_pane.buffer, -G.main_pane.numchars_y()/2);
+      buffer_move_y(buffer, -G.main_pane.numchars_y()/2);
       break;
     }
   }
