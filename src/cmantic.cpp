@@ -1,4 +1,5 @@
-/* _CURRENT: utf-8 support
+/*
+ * CURRENT: refactory token_read to return a TokenResult struct
  *
  * TODO:
  *
@@ -215,10 +216,10 @@ bool operator==(char c, Utf8char uc) {
 
 enum Token{
   TOKEN_NULL = 0,
-  TOKEN_EOF = -1,
   TOKEN_IDENTIFIER = -2,
   TOKEN_NUMBER = -3,
   TOKEN_STRING = -4,
+  TOKEN_EOL = -4,
   TOKEN_STRING_BEGIN = -5,
   TOKEN_BLOCK_COMMENT_BEGIN = -6,
   TOKEN_BLOCK_COMMENT_END = -7,
@@ -366,11 +367,8 @@ struct Canvas {
     if (bounds.h == -1)
       bounds.h = this->h - bounds.y;
     // single line outside of bounds, early exit
-    if (a.y == b.y && (b.x < 0 || a.x > this->w)) {
-      if (a.y == 0)
-        puts("Skipping");
+    if (a.y == b.y && (b.x < 0 || a.x > this->w))
       return;
-    }
 
     int x,y,x0,x1,y0,y1;
     a.x = clampi(a.x, 0, bounds.w-1);
@@ -562,6 +560,8 @@ enum SpecialKey {
 
 /* @TOKENIZER */
 
+static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end);
+
 static void buffer_move_to_x(Buffer *b, int x);
 
 static void buffer_goto_endline(Buffer *b) {
@@ -597,6 +597,13 @@ static void buffer_empty(Buffer *b) {
   b->lines.size = 0;
   array_pushz(b->lines);
   b->pos.x = b->pos.y = 0;
+}
+
+bool buffer_streq(const Buffer *buf, Pos a, Pos b, const char *str) {
+  assert(b.y - a.y <= 1);
+  int identifier_len = b.y > a.y ? buf->lines[a.y].size - a.x : b.x - a.x + 1;
+  return identifier_len == (int)strlen(str)
+         && !memcmp(buf->lines[a.y]+a.x, str, identifier_len);
 }
 
 static void buffer_truncate_to_n_lines(Buffer *b, int n) {
@@ -888,69 +895,121 @@ static int buffer_getindent(Buffer *b, int y) {
   return n/tab_size;
 }
 
-static int buffer_autoindent(Buffer *b, int y) {
-  int i,indent_above,indent_this,l, diff;
-  int tab_size;
-  char tab_char;
+static int buffer_indentdepth(const Buffer *buffer, int y, bool *has_statement) {
+  if (has_statement)
+    *has_statement = false;
+  if (y < 0)
+    return 0;
 
-  tab_char = b->tab_type ? ' ' : '\t';
-  tab_size = b->tab_type ? b->tab_type : 1;
+
+  int depth = 0;
+  Pos p = {0,y};
+  Pos a,b;
+
+  bool first = true;
+  while (1) {
+    int t = token_read(buffer, &p, y+1, &a, &b);
+    if (t == TOKEN_NULL)
+      break;
+    switch (t) {
+      case '{': ++depth; break;
+      case '}': --depth; break;
+      case '(': ++depth; break;
+      case ')': --depth; break;
+      case TOKEN_IDENTIFIER: 
+        if (first && (
+            buffer_streq(buffer, a, b, "for") ||
+            buffer_streq(buffer, a, b, "if") ||
+            buffer_streq(buffer, a, b, "while") ||
+            buffer_streq(buffer, a, b, "else"))) {
+          if (has_statement)
+            *has_statement = true;
+        }
+        break;
+      default: break;
+    }
+    first = false;
+  }
+  return depth;
+}
+
+static int buffer_autoindent(Buffer *buffer, int y) {
+  const char tab_char = buffer->tab_type ? ' ' : '\t';
+  const int tab_size = buffer->tab_type ? buffer->tab_type : 1;
 
   if (y == 0)
-    return -buffer_getindent(b, y);
+    return -buffer_getindent(buffer, y);
 
   /* count number of indents above */
+
   /* skip empty lines */
+  int i;
   for (i = y-1; i > 0; --i)
-    if (b->lines[i].size > 0)
+    if (buffer->lines[i].size > 0)
       break;
   if (i == 0)
-    return -buffer_getindent(b, y);
-  indent_above = buffer_getindent(b, i) * tab_size;
+    return -buffer_getindent(buffer, y);
 
-  /* TODO: open braces */
-  l = b->lines[y-1].size - indent_above;
-  diff = 0;
-  i = b->lines[y-1].size-1;
-  if (i >= 0 && b->lines[y-1][i] == '{')
-    ++diff;
-  else if (i >= 0 && b->lines[y-1][i] != '}' &&
-          ((l >= 3 && strncmp("for",   b->lines[y-1]+indent_above, 3) == 0) ||
-           (l >= 2 && strncmp("if",    b->lines[y-1]+indent_above, 2) == 0) ||
-           (l >= 5 && strncmp("while", b->lines[y-1]+indent_above, 5) == 0) ||
-           (l >= 4 && strncmp("else",  b->lines[y-1]+indent_above, 4) == 0)))
-    ++diff;
+  #if 0
+  int l = buffer->lines[y-1].size - indent_above;
+  i = buffer->lines[y-1].size-1;
+  diff += buffer_indentdepth(buffer, y-1);
   else if (y >= 2) {
     int indent_two_above;
 
-    indent_two_above = buffer_getindent(b, y-2) * tab_size;
-    l = b->lines[y-2].size - indent_two_above;
-    i = b->lines[y-2].size-1;
-    if (i >= 0 && b->lines[y-2][i] != '{' && b->lines[y-2][i] != '}' &&
-       ((l >= 3 && strncmp("for",   b->lines[y-2]+indent_two_above, 3) == 0) ||
-        (l >= 2 && strncmp("if",    b->lines[y-2]+indent_two_above, 2) == 0) ||
-        (l >= 5 && strncmp("while", b->lines[y-2]+indent_two_above, 5) == 0) ||
-        (l >= 4 && strncmp("else",  b->lines[y-2]+indent_two_above, 4) == 0)))
+    indent_two_above = buffer_getindent(buffer, y-2) * tab_size;
+    int l = buffer->lines[y-2].size - indent_two_above;
+    i = buffer->lines[y-2].size-1;
+    if (i >= 0 && buffer->lines[y-2][i] != '{' && buffer->lines[y-2][i] != '}' &&
+       ((l >= 3 && strncmp("for",   buffer->lines[y-2]+indent_two_above, 3) == 0) ||
+        (l >= 2 && strncmp("if",    buffer->lines[y-2]+indent_two_above, 2) == 0) ||
+        (l >= 5 && strncmp("while", buffer->lines[y-2]+indent_two_above, 5) == 0) ||
+        (l >= 4 && strncmp("else",  buffer->lines[y-2]+indent_two_above, 4) == 0)))
     --diff;
   }
+  #endif
 
-  indent_this = buffer_getindent(b, y) * tab_size;
-  i = b->lines[y].size-1;
-  if (i >= 0 && b->lines[y][i] == '}' && !(
-        (l >= 3 && strncmp("for",   b->lines[y]+indent_this, 3) == 0) ||
-        (l >= 2 && strncmp("if",    b->lines[y]+indent_this, 2) == 0) ||
-        (l >= 5 && strncmp("while", b->lines[y]+indent_this, 5) == 0) ||
-        (l >= 4 && strncmp("else",  b->lines[y]+indent_this, 4) == 0)))
-    --diff;
+  bool above_is_statement;
+  const int above_depth = buffer_indentdepth(buffer, y-1, &above_is_statement);
+  const bool above_is_indenting = (above_depth > 0 || above_is_statement);
+  const int above_indent = buffer_getindent(buffer, y-1);
+  int target_indent = above_indent;
+  if (above_is_indenting)
+    ++target_indent;
 
+  bool this_is_statement;
+  int this_depth = buffer_indentdepth(buffer, y, &this_is_statement);
+  bool this_is_deintenting = this_depth < 0 && !this_is_statement;
+  if (this_is_deintenting)
+    --target_indent;
+
+  // fix special case of
+  // if (...)
+  //   if (...)
+  //     some_thing_not_if
+  // this_line
+  if (!above_is_indenting && above_depth == 0) {
+    puts("Special case");
+    for (int yy = y-2; yy >= 0; --yy) {
+      bool is_statement;
+      const int indent = buffer_indentdepth(buffer, yy, &is_statement);
+      if (is_statement && indent == 0)
+        --target_indent;
+      else
+        break;
+    }
+  }
+
+  const int current_indent = buffer_getindent(buffer, y);
+  printf("%i %i %i %i %i\n", target_indent, current_indent, above_indent, above_is_indenting, (int)above_is_statement);
   /* count number of indents */
-  diff = indent_above + diff*tab_size - indent_this;
+  int diff = tab_size * (target_indent - current_indent);
   if (diff < 0)
-    array_remove_slown(b->lines[y], 0, at_most(b->lines[y].size, -diff));
+    array_remove_slown(buffer->lines[y], 0, at_most(current_indent, -diff));
   if (diff > 0) {
-    array_insertn(b->lines[y], 0, diff);
-    for (i = 0; i < diff; ++i)
-      b->lines[y][i] = tab_char;
+    array_insertn(buffer->lines[y], 0, diff);
+    for (int i = 0; i < diff; ++i)
+      buffer->lines[y][i] = tab_char;
   }
   return diff;
 }
@@ -1272,7 +1331,7 @@ static void tokenize(Buffer *b) {
 #define IS_NUMBER_TAIL(c) (isdigit(c) || ((c) >= 'A' && (c) <= 'F') || ((c) >= 'a' && (c) <= 'f') || (c) == 'x')
 #define IS_IDENTIFIER_HEAD(c) (isalpha(c) || (c) == '_' || IS_UTF8_HEAD(c))
 #define IS_IDENTIFIER_TAIL(c) (isalnum(c) || (c) == '_' || IS_UTF8_TRAIL(c))
-static int token_read(Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) {
+static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) {
   int token;
   int x,y;
   x = p->x, y = p->y;
@@ -1282,10 +1341,17 @@ static int token_read(Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) {
       token = TOKEN_NULL;
       break;
     }
+
+    // endline
     if (x >= b->lines[y].size) {
+      token = TOKEN_EOL;
+      if (start)
+        *start = {x,y};
+      if (end)
+        *end = {x,y};
       x = 0;
       ++y;
-      continue;
+      break;
     }
 
     char c = b->lines[y][x];
@@ -1940,15 +2006,11 @@ static void render_pane(Pane *p, bool draw_gutter) {
   canvas.fill_background(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color);
 
   if (1) {
-    int token;
-    bool in_block_comment = false;
-    Pos prev_block_comment_start = {buf_x0, buf_y0};
-
     Pos p = {0, buf_y0};
     for (;;) {
       Pos prev, next;
 
-      token = token_read(b, &p, buf_y1, &prev, &next);
+      int token = token_read(b, &p, buf_y1, &prev, &next);
 
       check_token:
 
@@ -1968,16 +2030,18 @@ static void render_pane(Pane *p, bool draw_gutter) {
         case TOKEN_BLOCK_COMMENT_END:
           do_render = true;
           text_color = G.comment_color;
-          in_block_comment = false;
-          prev = prev_block_comment_start;
+          prev = {buf_x0, buf_y0};
           break;
 
-        case TOKEN_BLOCK_COMMENT_BEGIN:
-          do_render = false;
+        case TOKEN_BLOCK_COMMENT_BEGIN: {
+          do_render = true;
+          Pos start = prev;
+          while (token != TOKEN_BLOCK_COMMENT_END && token != TOKEN_NULL)
+            token = token_read(b, &p, buf_y1, &prev, &next);
+          prev = start;
           text_color = G.comment_color;
-          in_block_comment = true;
-          prev_block_comment_start = prev;
           break;
+        }
 
         case TOKEN_STRING:
           do_render = true;
@@ -1991,9 +2055,8 @@ static void render_pane(Pane *p, bool draw_gutter) {
 
         case TOKEN_IDENTIFIER: {
           /* check for keywords */
-          int identifier_len = next.y > prev.y ? b->lines[prev.y].size - prev.x : next.x - prev.x + 1;
           for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-            if ((int)strlen(keywords[i]) == identifier_len && memcmp(b->lines[prev.y]+prev.x, keywords[i], identifier_len) == 0) {
+            if (buffer_streq(b, prev, next, keywords[i])) {
               text_color = G.keyword_color;
               goto done;
             }
@@ -2038,20 +2101,6 @@ static void render_pane(Pane *p, bool draw_gutter) {
 
       if (p.y > buf_y1)
         break;
-    }
-    if (in_block_comment) {
-      Pos prev = prev_block_comment_start;
-      Pos next = {b->lines[buf_y1-1].size, buf_y1-1};
-
-      prev = to_visual_pos(b, prev);
-      next = to_visual_pos(b, next);
-
-      prev.x -= buf_x0;
-      prev.y -= buf_y0;
-      next.x -= buf_x0;
-      next.y -= buf_y0;
-
-      canvas.fill_textcolor(prev, next, IRect{gutter_width, 0, -1, -1}, G.comment_color);
     }
   }
 
@@ -2179,6 +2228,11 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
 
   case MODE_NORMAL:
     switch (input.code[0]) {
+    case '=':
+      buffer->modified = true;
+      buffer_move_x(buffer, buffer_autoindent(buffer, buffer->pos.y));
+      break;
+
     case 'w': {
       char c = buffer_getchar(buffer);
       if (!isspace(c))
@@ -2188,18 +2242,6 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       while (c = buffer_getchar(buffer), isspace(c))
         if (buffer_advance(buffer))
           break;
-      // Pos p, prev, next;
-      // p = buffer->pos;
-      // token_read(buffer, &p, buffer->lines.size, &prev, 0);
-      // while (1) {
-      //   int t = token_read(buffer, &p, buffer->lines.size, &prev, 0);
-      //   if (t == TOKEN_NULL)
-      //     break;
-      //   if (t == TOKEN_IDENTIFIER) {
-      //     buffer_move_to(buffer, prev);
-      //     break;
-      //   }
-      // }
     } break;
 
     case 'q':

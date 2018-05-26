@@ -23,6 +23,7 @@ struct Array {
 	T& operator[](int i) {return data[i];}
 	const T& operator[](int i) const {return data[i];}
 	operator T*() {return data;}
+	operator const T*() const {return data;}
 };
 
 template<class T>
