@@ -126,6 +126,10 @@
   template<class T>
   T min(T a, T b) {return b < a ? b : a;}
 
+  float angle_to_range(float v, float a, float b) {
+    return (sin(v)*0.5 + 0.5)*(b-a) + a;
+  }
+
   template<class T>
   void swap(T &a, T &b) {
     T tmp;
@@ -146,6 +150,7 @@ enum Mode {
   MODE_DELETE,
   MODE_GOTO,
   MODE_SEARCH,
+  MODE_HIGHLIGHT,
   MODE_COUNT
 };
 
@@ -266,24 +271,35 @@ struct Pane {
 };
 
 struct State {
+
   /* @renderer some rendering state */
   SDL_Window *window;
   int font_width;
+  int font_height;
+  int line_margin;
   int line_height;
   Array<char> tmp_render_buffer;
   int win_height, win_width;
 
   /* some settings */
-  Style default_style;
+  Color default_background_color;
+  Color default_text_color;
   Style default_gutter_style;
   Color marker_background_color;
-  Color hairline_color;
+  Color default_marker_background_color;
+  Color default_highlight_background_color;
   Color highlight_background_color;
   Color number_color;
+  Color default_number_color;
   Color comment_color;
   Color string_color;
   Color keyword_color;
+  Color default_keyword_color;
   Color identifier_color;
+  Color search_term_color;
+
+  /* highlighting flags */
+  bool highlight_number;
 
   /* some editor state */
   Pane main_pane,
@@ -498,7 +514,7 @@ struct Canvas {
     }
 
     // render text
-    const float text_offset_y = -3; // TODO: get this from truetype?
+    const float text_offset_y = -G.font_height*3.0f/15.0f; // TODO: get this from truetype?
     array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
     for (int row = 0; row < h; ++row) {
       Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
@@ -528,18 +544,6 @@ int Pane::numchars_x() const {
 int Pane::numchars_y() const {
   return this->ph / G.line_height + 1;
 }
-
-enum {
-  COLOR_BLACK,
-  COLOR_RED,
-  COLOR_GREEN,
-  COLOR_YELLOW,
-  COLOR_BLUE,
-  COLOR_MAGENTA,
-  COLOR_CYAN,
-  COLOR_WHITE,
-  COLOR_COUNT
-};
 
 enum SpecialKey {
   KEY_NONE = 0,
@@ -688,6 +692,7 @@ static char buffer_getchar(Buffer *b) {
 }
 
 static void buffer_move_to(Buffer *b, int x, int y);
+static void buffer_move_to(Buffer *b, Pos p);
 static void buffer_move(Buffer *b, int x, int y);
 static void status_message_set(const char *fmt, ...);
 
@@ -724,16 +729,15 @@ static int buffer_find_r(Buffer *b, char *str, int n, int stay) {
   }
 }
 
-static int buffer_find(Buffer *b, char *str, int n, int stay) {
+static int buffer_find(Buffer *b, char *str, int n, bool stay, Pos *pos) {
   int x, y;
-
   if (!n)
     return 1;
 
-  x = b->pos.x;
+  x = pos->x;
   if (!stay)
     ++x;
-  y = b->pos.y;
+  y = pos->y;
 
   for (; y < b->lines.size; ++y, x = 0) {
     char *p;
@@ -745,10 +749,19 @@ static int buffer_find(Buffer *b, char *str, int n, int stay) {
       continue;
 
     x = p - b->lines[y];
-    buffer_move_to(b, x, y);
+    pos->x = x;
+    pos->y = y;
     return 0;
   }
   return 1;
+}
+
+static int buffer_find_and_move(Buffer *b, char *str, int n, bool stay) {
+  Pos p = b->pos;
+  if (buffer_find(b, str, n, stay, &p))
+    return 1;
+  buffer_move_to(b, p);
+  return 0;
 }
 
 static int buffer_autoindent(Buffer *b, int y);
@@ -1556,6 +1569,23 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
 
 /* a, b relative inside bounds */
 static const char *keywords[] = {
+  "bool",
+  "uint64_t",
+  "uint32_t",
+  "uint16_t",
+  "uint8_t",
+  "int64_t",
+  "int32_t",
+  "int16_t",
+  "int8_t",
+  "u64",
+  "u32",
+  "u16",
+  "u8",
+  "i64",
+  "i32",
+  "i16",
+  "i8",
   "static",
   "const",
   "char",
@@ -1584,7 +1614,8 @@ static const char *keywords[] = {
   "return",
   "continue",
   "break",
-  "goto"
+  "goto",
+  "ifndef"
 };
 
 static const char* cman_strerror(int e) {
@@ -1660,6 +1691,10 @@ static void mode_search() {
   buffer_empty(&G.search_buffer);
 }
 
+static void mode_highlight() {
+  G.mode = MODE_HIGHLIGHT;
+}
+
 static void mode_goto() {
   G.mode = MODE_GOTO;
   G.goto_line_number = 0;
@@ -1673,7 +1708,7 @@ static void mode_delete() {
   status_message_set("delete");
 }
 
-static void mode_normal(int set_message) {
+static void mode_normal(bool set_message) {
   G.mode = MODE_NORMAL;
   G.bottom_pane.buffer = &G.status_message_buffer;
 
@@ -1852,7 +1887,7 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
   /* TODO: should not set `modifier` if we just enter and exit insert mode */
   if (special_key == KEY_ESCAPE) {
     buffer_pretty_range(G.main_pane.buffer, G.insert_mode_begin_y, G.main_pane.buffer->pos.y+1);
-    mode_normal(1);
+    mode_normal(true);
     return;
   }
 
@@ -1884,14 +1919,25 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
   }
 }
 
+static const char *ttf_file = "/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf";
+static const Color COLOR_PINK = {0.92549, 0.25098, 0.4784};
+static const Color COLOR_YELLOW = {1.0f, 0.921568627451f, 0.23137254902f};
+static const Color COLOR_BLUEGREY = {0.329411764706f, 0.43137254902f, 0.478431372549f};
+static const Color COLOR_PURPLE = {0.711764705882f, 0.252941176471f, 0.790196078431f};
+static const Color COLOR_GREEN = {0.262745098039f, 0.627450980392f, 0.278431372549f};
+static const Color COLOR_GREY = {0.2f, 0.2f, 0.2f};
+static const Color COLOR_BLACK = {0.1f, 0.1f, 0.1f};
+static const Color COLOR_WHITE = {0.9f, 0.9f, 0.9f};
+static const Color COLOR_BLUE = {128/255.0f,216/255.0f,255/255.0f};
+
 static void state_init() {
 
   if (graphics_init(&G.window))
     exit(1);
 
-  const int font_height = 14;
+  G.font_height = 14;
 
-  if (graphics_text_init("/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf", font_height))
+  if (graphics_text_init(ttf_file, G.font_height))
     exit(1);
 
   if (graphics_quad_init())
@@ -1902,22 +1948,22 @@ static void state_init() {
   G.font_width = graphics_get_font_advance();
   G.tab_width = 4;
   G.default_tab_type = 4;
-  const int line_margin = 0;
-  G.line_height = font_height + line_margin;
+  G.line_margin = 0;
+  G.line_height = G.font_height + G.line_margin;
 
-  G.default_style.text_color = {0.8f, 0.8f, 0.8f};
-  G.default_style.background_color = {0.1, 0.1, 0.1};
+  G.default_highlight_background_color = G.highlight_background_color = COLOR_GREY;
+  G.default_text_color = {0.8f, 0.8f, 0.8f};
+  G.default_background_color = {0.1, 0.1, 0.1};
   G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
-  G.default_gutter_style.background_color = G.default_style.background_color;
-  G.marker_background_color = {0.92549, 0.25098, 0.4784};
-  G.number_color = {1.0f, 0.921568627451f, 0.23137254902f};
-  G.comment_color = {0.329411764706f, 0.43137254902f, 0.478431372549f};
-  G.string_color = {0.611764705882f, 0.152941176471f, 0.690196078431f};
-  G.identifier_color = {0.262745098039f, 0.627450980392f, 0.278431372549f};
-  G.keyword_color = {0.92549, 0.25098, 0.4784};
+  G.default_gutter_style.background_color = G.default_background_color;
+  G.default_marker_background_color = G.marker_background_color = COLOR_PINK;
+  G.default_number_color = G.number_color = COLOR_YELLOW;
+  G.comment_color = COLOR_BLUEGREY;
+  G.string_color = COLOR_PURPLE;
+  G.identifier_color = COLOR_GREEN;
+  G.keyword_color = G.default_keyword_color = COLOR_BLUE; // COLOR_PINK;
 
-  G.hairline_color = {0.2f, 0.2f, 0.2f};
-  G.highlight_background_color = {0.2f, 0.2f, 0.2f};
+  G.default_marker_background_color = COLOR_GREY;
 
   /* init predefined buffers */
   buffer_empty(&G.menu_buffer);
@@ -1973,7 +2019,7 @@ static void render_pane(Pane *p, bool draw_gutter) {
   Canvas canvas;
   canvas.init(p->numchars_x(), p->numchars_y());
   canvas.fill(Utf8char{' '});
-  canvas.fill(G.default_style);
+  canvas.fill(Style{G.default_text_color, G.default_background_color});
 
   // draw each line 
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
@@ -1981,16 +2027,14 @@ static void render_pane(Pane *p, bool draw_gutter) {
     // gutter 
     canvas.render_strf(0, y, G.default_gutter_style, 0, gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_strn(gutter_width - buf_x0, y, G.default_style, gutter_width, -1, line, line.size);
+    canvas.render_strn(gutter_width - buf_x0, y, Style{G.default_text_color, G.default_background_color}, gutter_width, -1, line, line.size);
   }
 
   // highlight the line you're on
   Pos pos = to_visual_pos(b, b->pos);
   canvas.fill_background(gutter_width, b->pos.y - buf_y0, -1, 1, G.highlight_background_color);
-  // draw marker
-  canvas.fill_background(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color);
-
-  if (1) {
+  // syntax @highlighting
+  {
     Pos p = {0, buf_y0};
     for (;;) {
       Pos prev, next;
@@ -2048,7 +2092,7 @@ static void render_pane(Pane *p, bool draw_gutter) {
           break;
 
         case TOKEN_IDENTIFIER: {
-          /* check for keywords */
+          // check for keywords
           for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
             if (buffer_streq(b, prev, next, keywords[i])) {
               text_color = G.keyword_color;
@@ -2056,8 +2100,8 @@ static void render_pane(Pane *p, bool draw_gutter) {
             }
           }
 
-          /* otherwise check for functions */
-          /* should not be indented */
+          // otherwise check for functions
+          // we assume something not indented and followed by a '(' is a function
           if (isspace(buffer_getchar(b, 0, prev.y)))
             break;
           Pos prev_tmp, next_tmp;
@@ -2097,6 +2141,25 @@ static void render_pane(Pane *p, bool draw_gutter) {
         break;
     }
   }
+  // if there is a search term, highlight that as well
+  #if 1
+  if (G.search_buffer.lines[0].size > 0) {
+    // printf("Looking for search term %.*s...\n", G.search_buffer.lines[0].size, G.search_buffer.lines[0].data);
+    Pos p = {0, buf_y0};
+    while (!buffer_find(b, G.search_buffer.lines[0], G.search_buffer.lines[0].size, false, &p) && p.y < buf_y1) {
+      // puts("Found search term");
+      int x0 = to_visual_offset(b->lines[p.y], p.x);
+      int x1 = to_visual_offset(b->lines[p.y], p.x + G.search_buffer.lines[0].size);
+      x0 -= buf_x0;
+      x1 -= buf_x0;
+      canvas.fill_background(gutter_width + x0, p.y - buf_y0, x1-x0, 1, G.search_term_color);
+      canvas.fill_textcolor(gutter_width + x0, p.y - buf_y0, x1-x0, 1, COLOR_BLACK);
+    }
+  }
+  #endif
+
+  // draw marker
+  canvas.fill_background(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color);
 
   canvas.render(p);
 
@@ -2109,6 +2172,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     return;
 
   Buffer *buffer = G.main_pane.buffer;
+  int key = special_key ? special_key : input.code[0];
 
   switch (G.mode) {
   case MODE_GOTO:
@@ -2120,7 +2184,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       break;
     }
 
-    switch (special_key ? special_key : input.code[0]) {
+    switch (key) {
       case 't':
         buffer_move_to(buffer, 0, 0);
         break;
@@ -2128,10 +2192,20 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
         buffer_move_to(buffer, 0, buffer->num_lines()-1);
         break;
     }
-    mode_normal(1);
+    mode_normal(true);
     break;
 
   case MODE_COUNT:
+    break;
+
+  case MODE_HIGHLIGHT:
+    switch (key) {
+      case 'n':
+        G.highlight_number = !G.highlight_number;
+        mode_normal(false);
+        break;
+    }
+    mode_normal(false);
     break;
 
   case MODE_MENU:
@@ -2141,7 +2215,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       int i;
 
       if (buffer_isempty(&G.menu_buffer)) {
-        mode_normal(1);
+        mode_normal(true);
         break;
       }
 
@@ -2162,10 +2236,10 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       done:
 
 
-      mode_normal(0);
+      mode_normal(false);
     }
     else if (special_key == KEY_ESCAPE)
-      mode_normal(1);
+      mode_normal(true);
     else
       insert_default(&G.bottom_pane, special_key, input);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
@@ -2181,37 +2255,37 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       insert_default(&G.bottom_pane, special_key, input);
 
     search = G.search_buffer.lines[0];
-    G.search_failed = buffer_find(buffer,
+    G.search_failed = buffer_find_and_move(buffer,
                              search,
                              search.size,
-                             1);
+                             true);
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
       if (G.dropdown_visible) {
         dropdown_get_first_line();
-        G.search_failed = buffer_find(buffer,
+        G.search_failed = buffer_find_and_move(buffer,
                                  search,
                                  search.size,
-                                 1);
+                                 true);
       }
       if (G.search_failed) {
         buffer->pos = G.search_begin_pos;
         status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer.lines[0].data);
-        mode_normal(0);
+        mode_normal(false);
       } else
-        mode_normal(1);
+        mode_normal(true);
     }
   } break;
 
   case MODE_DELETE:
-    switch (special_key ? special_key : input.code[0]) {
+    switch (key) {
       case 'd':
         buffer_delete_line(buffer);
-        mode_normal(1);
+        mode_normal(true);
         break;
 
       default:
-        mode_normal(1);
+        mode_normal(true);
         break;
     }
     break;
@@ -2223,8 +2297,22 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
   case MODE_NORMAL:
     switch (input.code[0]) {
     case '=':
+      if (buffer->lines[buffer->pos.y].size == 0)
+        break;
       buffer->modified = true;
       buffer_move_x(buffer, buffer_autoindent(buffer, buffer->pos.y));
+      break;
+
+    case '+':
+      G.font_height = at_most(G.font_height+1, 50);
+      if (graphics_set_font_options(ttf_file, G.font_height))
+        exit(1);
+      break;
+
+    case '-':
+      G.font_height = at_least(G.font_height-1, 7);
+      if (graphics_set_font_options(ttf_file, G.font_height))
+        exit(1);
       break;
 
     case 'w': {
@@ -2266,16 +2354,12 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       buffer_goto_beginline(buffer);
       break;
     case 'n': {
-      int err;
-      Pos prev;
-
-      prev = buffer->pos;
-
-      err = buffer_find(buffer, G.search_buffer[0], G.search_buffer[0].size, 0);
-      if (err) {
+      Pos p = buffer->pos;
+      if (buffer_find(buffer, G.search_buffer[0], G.search_buffer[0].size, false, &p)) {
         status_message_set("'%.*s' not found", G.search_buffer[0].size, G.search_buffer[0].data);
         break;
       }
+      buffer_move_to(buffer, p);
       /*jumplist_push(prev);*/
     } break;
 
@@ -2297,24 +2381,22 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     case 'g':
       mode_goto();
       break;
-
+    case 'v':
+      mode_highlight();
+      break;
     case 'o':
       buffer_insert_newline_below(buffer);
       mode_insert();
       break;
-
     case ':':
       mode_menu();
       break;
-
     case 'd':
       mode_delete();
       break;
-
     case 'J':
       buffer_move_y(buffer, G.main_pane.numchars_y()/2);
       break;
-
     case 'K':
       buffer_move_y(buffer, -G.main_pane.numchars_y()/2);
       break;
@@ -2425,15 +2507,44 @@ int main(int argc, const char **argv)
     if (input.code[0] || special_key)
       handle_input(input, special_key);
 
-    glClearColor(0.9f, 0.9f, 0.1f, 1.0f);
+    // cycle some colors
+    static float alpha;
+    alpha += 0.1f;
+    float off = angle_to_range(alpha, 0.5f, 1.0f);
+    switch (G.mode) {
+      case MODE_INSERT:
+        G.default_marker_background_color = COLOR_PINK;
+        break;
+      default:
+        G.default_marker_background_color = COLOR_YELLOW;
+        break;
+    }
+    G.marker_background_color = Color::blend(G.highlight_background_color, G.default_marker_background_color, off);
+    G.highlight_background_color = Color::blend(G.default_background_color, G.default_highlight_background_color, off);
+
+    // highlight some collors
+    static float hue;
+    hue = fmodf(hue + 7.0f, 360.0f);
+    if (G.highlight_number)
+      G.number_color = Color::from_hsv(hue, 1.0f, 0.7f);
+    else
+      G.number_color = G.default_number_color;
+    G.search_term_color = Color::from_hsv(hue, 1.0f, 0.7f);
+
+    // render
+    G.font_width = graphics_get_font_advance();
+    G.line_height = G.font_height + G.line_margin;
+    SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
+    glClearColor(G.default_background_color.r, G.default_background_color.g, G.default_background_color.g, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    render_pane(&G.main_pane, true);
+    // reflow panes
+    G.main_pane.pw = G.win_width;
+    G.main_pane.ph = G.win_height;
 
+    render_pane(&G.main_pane, true);
     render_quads();
     render_text();
-
-    // draw the 
     // render_textatlas(0, 0, 200, 200);
 
     SDL_GL_SwapWindow(G.window);

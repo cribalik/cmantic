@@ -20,6 +20,72 @@
 static int graphics_init(SDL_Window **window);
 struct Color {
   float r,g,b;
+
+  // returns
+  // h [0,360]
+  // s [0,1]
+  // v [0,1]
+  Color hsv() const {
+    float max,min, d, h,s,v;
+    max = r > g ? r : g;
+    max = max > b ? max : b;
+    min = r < g ? r : g;
+    min = min < b ? min : b;
+
+    d = max - min;
+    if (d < 0.00001f)
+      return {};
+    if (max <= 0.0f)
+      return {};
+
+    s = d/max;
+    if (max == r)
+      h = (g-b)/d;
+    else if (max == g)
+      h = 2.0f + (b-r)/d;
+    else
+      h = 4.0f + (r-g)/d;
+
+    h *= 60.0f;
+
+    while (h > 1.0f)
+      h -= 360.0f;
+    while (h < 0.0f)
+      h += 360.0f;
+
+    v = max;
+    return  {h,s,v};
+  }
+
+  // h [0,360]
+  // s [0,1]
+  // v [0,1]
+  static Color from_hsv(float h, float s, float l) {
+    const float c = (1.0f - fabsf(2*l - 1)) * s;
+    const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
+    const float m = l - c/2.0f;
+    Color result;
+
+    if (h > 300.0f)
+      result = {c,0.0f,x};
+    else if (h > 240.0f)
+      result = {x,0.0f,c};
+    else if (h > 180.0f)
+      result = {0.0f,x,c};
+    else if (h > 120.0f)
+      result = {0.0f,c,x};
+    else if (h > 60.0f)
+      result = {x,c,0.0f};
+    else
+      result = {c,x,0.0f};
+
+    result.r += m;
+    result.g += m;
+    result.b += m;
+    return result;
+  }
+
+  static Color blend(Color back, Color front, float alpha);
 };
 
 /**************
@@ -204,6 +270,7 @@ static int graphics_get_font_advance() {
 }
 
 static struct {
+  SDL_Window *window;
   bool initialized;
   int window_width, window_height;
 } graphics_state;
@@ -229,7 +296,7 @@ static int graphics_init(SDL_Window **window) {
   }
 
   // #ifdef DEBUG
-  *window = SDL_CreateWindow("cmantic", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 600, 600, SDL_WINDOW_OPENGL);
+  graphics_state.window = *window = SDL_CreateWindow("cmantic", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 600, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
   // #else
   // TODO: How de we make this not change the resolution on linux?
   // SDL_Window *window = SDL_CreateWindow("cmantic", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
@@ -415,6 +482,13 @@ static GLuint graphics_compile_shader(const char *vertex_shader_src, const char 
   return result;
 }
 
+static int graphics_set_font_options(const char *ttf_file, int font_size) {
+  graphics_text_state.font_size = font_size;
+  if (load_font_from_file(ttf_file, graphics_text_state.text_atlas.id, graphics_text_state.text_atlas.w, graphics_text_state.text_atlas.h, GraphicsTextState::FIRST_CHAR, GraphicsTextState::LAST_CHAR, graphics_text_state.font_size, graphics_text_state.glyphs))
+    return 1;
+  return 0;
+}
+
 static int graphics_text_init(const char *ttf_file, int font_size) {
   assert(graphics_state.initialized);
 
@@ -490,6 +564,9 @@ static int graphics_text_init(const char *ttf_file, int font_size) {
 }
 
 static void render_textatlas(int x, int y, int w, int h) {
+  SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
+  glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
+
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -599,6 +676,9 @@ static void push_textf(int pos_x, int pos_y, bool center, Color color, const cha
 }
 
 static void render_text() {
+  SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
+  glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
+
   /* draw text */
   gl_ok_or_die;
   glUseProgram(graphics_text_state.shader);
@@ -745,8 +825,10 @@ static void push_square_quad(float x0, float x1, float y0, float y1, Color c) {
   push_quad({x0,y0,c}, {x1,y0,c}, {x1,y1,c}, {x0,y1,c});
 }
 
-
 static void render_quads() {
+  SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
+  glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
+
   glUseProgram(graphics_quad_state.shader);
 
   // set screen size
@@ -769,5 +851,20 @@ static void render_quads() {
   graphics_quad_state.num_vertices = 0;
   gl_ok_or_die;
 }
+
+Color Color::blend(Color back, Color front, float alpha) {
+  Color result;
+
+  if (alpha > 0.0001f) {
+    result.r = back.r*(1.0f-alpha) + front.r*alpha;
+    result.g = back.g*(1.0f-alpha) + front.g*alpha;
+    result.b = back.b*(1.0f-alpha) + front.b*alpha;
+  }
+  else {
+    result = back;
+  }
+  return result;
+}
+
 
 #endif /* GRAPHICS_H */
