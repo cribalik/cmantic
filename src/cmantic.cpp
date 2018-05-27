@@ -171,10 +171,6 @@ static bool operator==(Style a, Style b) {
   return a.text_color == b.text_color && a.background_color == b.background_color;
 }
 
-struct Rect {
-  float x,y,w,h;
-};
-
 struct Utf8char {
   char code[4];
 
@@ -273,14 +269,37 @@ struct Buffer {
   int num_lines() const {return lines.size;}
 };
 
+struct v2 {
+  int x,y;
+};
+
+union Rect {
+  struct {
+    Pos p;
+    v2 _dummy;
+  };
+  struct {
+    int x,y,w,h;
+  };
+};
+
+namespace Draw {
+  
+};
+
 struct Pane {
-  int x,y,pw,ph; // in pixels
+  Rect bounds;
   Color background_color;
   Buffer *buffer;
+
+  int gutter_width;
+
   int numchars_x() const;
   int numchars_y() const;
+  Pos slot2pixel(Pos p) const;
   int slot2pixelx(int x) const;
   int slot2pixely(int y) const;
+  Pos slot2global(Pos p) const;
 };
 
 struct PoppedColor {
@@ -356,9 +375,9 @@ struct State {
   int insert_mode_begin_y;
 
   /* dropdown state */
-  Pos dropdown_pos; /* where dropdown was initialized */
-  int dropdown_backwards;
-  int dropdown_visible;
+  Pos dropdown_pos;
+  bool dropdown_backwards;
+  bool dropdown_visible;
 
   /* goto state */
   unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
@@ -374,10 +393,6 @@ struct State {
 };
 
 State G;
-
-struct IRect {
-  int x,y,w,h;
-};
 
 struct Canvas {
   Utf8char *chars;
@@ -419,7 +434,7 @@ struct Canvas {
   }
 
   // fills a to b with the bounds 
-  void fill_textcolor(Pos a, Pos b, IRect bounds, Color c) {
+  void fill_textcolor(Pos a, Pos b, Rect bounds, Color c) {
     if (bounds.w == -1)
       bounds.w = this->w - bounds.x;
     if (bounds.h == -1)
@@ -570,7 +585,7 @@ struct Canvas {
       for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
         if (styles[row*w + x1].text_color == styles[row*w + x0].text_color && x1 < w)
           continue;
-        int x = p->x + x0*G.font_width;
+        int x = p->bounds.x + x0*G.font_width;
         push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[row*w + x0].text_color);
         x0 = x1;
       }
@@ -578,19 +593,24 @@ struct Canvas {
   }
 };
 
+Pos Pane::slot2pixel(Pos p) const {
+  return {this->bounds.x + p.x*G.font_width, this->bounds.y + p.y*G.line_height};
+}
+
 int Pane::slot2pixelx(int x) const {
-  return this->x + x*G.font_width;
+  return this->bounds.x + x*G.font_width;
 }
 
 int Pane::slot2pixely(int y) const {
-  return this->y + y*G.line_height;
+  return this->bounds.y + y*G.line_height;
 }
 
 int Pane::numchars_x() const {
-  return this->pw / G.font_width + 1;
+  return this->bounds.w / G.font_width + 1;
 }
+
 int Pane::numchars_y() const {
-  return this->ph / G.line_height + 1;
+  return this->bounds.h / G.line_height + 1;
 }
 
 enum SpecialKey {
@@ -1755,7 +1775,7 @@ static void mode_normal(bool set_message) {
   G.mode = MODE_NORMAL;
   G.bottom_pane.buffer = &G.status_message_buffer;
 
-  G.dropdown_visible = 0;
+  G.dropdown_visible = false;
 
   if (set_message)
     status_message_set("normal");
@@ -1766,7 +1786,7 @@ static void mode_insert() {
 
   G.mode = MODE_INSERT;
   G.bottom_pane.buffer = &G.status_message_buffer;
-  G.dropdown_visible = 0;
+  G.dropdown_visible = false;
   G.insert_mode_begin_y = G.main_pane.buffer->pos.y;
   status_message_set("insert");
 }
@@ -1803,7 +1823,7 @@ static void fill_dropdown_buffer(Pane *active_pane) {
 
   /* this shouldn't happen.. but just to be safe */
   if (G.dropdown_pos.y != active_pane->buffer->pos.y) {
-    G.dropdown_visible = 0;
+    G.dropdown_visible = false;
     return;
   }
 
@@ -1902,26 +1922,25 @@ static void dropdown_autocomplete(Buffer *b) {
   str = G.dropdown_buffer[y];
   l = G.dropdown_buffer[y].size;
   buffer_replace(b, G.dropdown_pos.x, b->pos.x, b->pos.y, str, l);
-  G.dropdown_visible = 0;
+  G.dropdown_visible = false;
 }
 
 static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
 
   if (!G.dropdown_visible) {
-    if (!IS_IDENTIFIER_HEAD(*input.code))
-      goto dropdown_hide;
+    if (!IS_IDENTIFIER_HEAD(*input.code)) {
+      G.dropdown_visible = false;
+      return;
+    }
 
     G.dropdown_pos = active_pane->buffer->pos;
   }
-  else
-    if (!IS_IDENTIFIER_TAIL(*input.code))
-      goto dropdown_hide;
+  else if (!IS_IDENTIFIER_TAIL(*input.code)) {
+    G.dropdown_visible = false;
+    return;
+  }
 
-  G.dropdown_visible = 1;
-  return;
-
-  dropdown_hide:
-  G.dropdown_visible = 0;
+  G.dropdown_visible = true;
 }
 
 static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
@@ -1937,7 +1956,6 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
   }
 
   if (!special_key) {
-    /*if (p != &G.bottom_pane)*/
     dropdown_update_on_insert(p, input);
     buffer_insert_char(b, input);
     return;
@@ -2178,21 +2196,17 @@ static void state_init() {
   buffer_empty(&G.status_message_buffer);
   buffer_empty(&G.dropdown_buffer);
 
-  G.main_pane.x = 0;
-  G.main_pane.y = 0;
-  G.main_pane.pw = G.win_width;
-  G.main_pane.ph = G.win_height;
   G.main_pane.background_color = G.default_background_color;
   G.bottom_pane.background_color = {0.2f, 0.2f, 0.2f};
-  G.bottom_pane.buffer = &G.status_message_buffer;
 
-  G.selected_pane = &G.main_pane;
 
   G.menu_buffer.identifiers = {};
   array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
     G.menu_buffer.identifiers[i] = menu_options[i].name;
 
+  G.bottom_pane.buffer = &G.status_message_buffer;
+  G.selected_pane = &G.main_pane;
   G.dropdown_pane.buffer = &G.dropdown_buffer;
 }
 
@@ -2351,7 +2365,7 @@ static void render_pane(Pane *p, bool draw_gutter) {
         next.x -= buf_x0;
         next.y -= buf_y0;
 
-        canvas.fill_textcolor(prev, next, IRect{gutter_width, 0, -1, -1}, text_color);
+        canvas.fill_textcolor(prev, next, Rect{gutter_width, 0, -1, -1}, text_color);
       }
 
       if (p.y > buf_y1)
@@ -2381,6 +2395,27 @@ static void render_pane(Pane *p, bool draw_gutter) {
   canvas.render(p);
 
   canvas.free();
+}
+
+static v2 char2pixel(int x, int y) {
+  return {x*G.font_width, y*G.line_height};
+}
+
+static void render_dropdown(Pane *active_pane) {
+  fill_dropdown_buffer(active_pane);
+
+  int max_width = 0;
+  for (int i = 0; i < G.dropdown_buffer.lines.size; ++i)
+    max_width = max(max_width, G.dropdown_buffer.lines[i].size);
+
+  /* position pane */
+  G.dropdown_pane.bounds = Rect{
+    G.dropdown_pos,
+    char2pixel(G.dropdown_buffer.lines.size, max_width)
+  };
+
+  if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
+    render_pane(&G.dropdown_pane, false);
 }
 
 static void handle_input(Utf8char input, SpecialKey special_key) {
@@ -2756,19 +2791,7 @@ int main(int argc, const char **argv)
     G.highlight_background_color.tick();
     G.search_term_background_color.tick();
 
-    #if 0
-    switch (G.mode) {
-      case MODE_INSERT:
-        G.marker_background_color.popped_color = COLOR_PINK;
-        break;
-      default:
-        G.marker_background_color.popped_color = COLOR_YELLOW;
-        break;
-    }
-    #endif
-
     // highlight some colors
-    #if 1
     static float hue;
     const float sat = 0.3f;
     hue = fmodf(hue + 7.0f, 360.0f);
@@ -2778,7 +2801,6 @@ int main(int argc, const char **argv)
       G.number_color = G.default_number_color;
     G.default_marker_background_color.tick();
     G.marker_background_color.popped_color = G.default_marker_background_color.get();
-    #endif
 
     // render
     G.font_width = graphics_get_font_advance();
@@ -2788,18 +2810,18 @@ int main(int argc, const char **argv)
     glClear(GL_COLOR_BUFFER_BIT);
 
     // reflow panes
-    G.main_pane.pw = G.win_width;
-    G.main_pane.ph = G.win_height - G.line_height;
-    G.main_pane.x = 0;
-    G.main_pane.y = 0;
-
-    G.bottom_pane.pw = G.win_width;
-    G.bottom_pane.ph = G.line_height;
-    G.bottom_pane.y = G.main_pane.y + G.main_pane.ph;
-    G.bottom_pane.x = 0;
+    G.main_pane.bounds = {0, 0, G.win_width, G.win_height - G.line_height};
+    G.bottom_pane.bounds = {0, G.main_pane.bounds.y + G.main_pane.bounds.h, G.win_width, G.line_height};
 
     render_pane(&G.main_pane, true);
     render_pane(&G.bottom_pane, false);
+    /* draw dropdown ? */
+    G.search_buffer.identifiers = G.main_pane.buffer->identifiers;
+    // if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
+    //   render_dropdown(&G.bottom_pane);
+    // else
+    render_dropdown(&G.main_pane);
+
     render_quads();
     render_text();
     // render_textatlas(0, 0, 200, 200);
