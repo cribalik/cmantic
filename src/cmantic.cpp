@@ -241,12 +241,24 @@ struct TokenInfo {
   int x;
 };
 
+static int calc_num_chars(int i) {
+  int result = 0;
+  while (i > 0) {
+    ++result;
+    i /= 10;
+  }
+  return result;
+}
+
 struct Pos {
   int x,y;
   bool operator!=(Pos p) {
     return x != p.x || y != p.y;
   }
 };
+Pos operator+(Pos a, Pos b) {
+  return {a.x+b.x, a.y+b.y};
+}
 
 struct Buffer {
   Array<Array<char>> lines;
@@ -269,30 +281,58 @@ struct Buffer {
   int num_lines() const {return lines.size;}
 };
 
+static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end);
+
 struct v2 {
   int x,y;
 };
 
+struct Range {
+  Pos a,b;
+};
 union Rect {
   struct {
     Pos p;
-    v2 _dummy;
+    Pos size;
   };
   struct {
     int x,y,w,h;
   };
 };
 
-namespace Draw {
-  
+struct Canvas {
+  Utf8char *chars;
+  Style *styles;
+  int w, h;
+
+  void render_strf(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
+  void render(Pos offset);
+  void render_str_v(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
+  void render_strn(int x, int y, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n);
+  void fill_background(Rect r, Color c);
+  void fill_textcolor(Rect r, Color c);
+  void fill_textcolor(Range range, Rect bounds, Color c);
+  void invert_color(int x, int y);
+  void fill(Style s);
+  void fill(Utf8char c);
+  void free();
+  void resize(int w, int h);
+  void init(int w, int h);
+
 };
+
 
 struct Pane {
   Rect bounds;
   Color background_color;
   Buffer *buffer;
 
+  // visual settings
   int gutter_width;
+
+  void render(bool draw_gutter);
+  int calc_top_visible_row() const;
+  int calc_left_visible_column(int gutter_width) const;
 
   int numchars_x() const;
   int numchars_y() const;
@@ -300,6 +340,7 @@ struct Pane {
   int slot2pixelx(int x) const;
   int slot2pixely(int y) const;
   Pos slot2global(Pos p) const;
+  Pos buf2slot(Pos p) const;
 };
 
 struct PoppedColor {
@@ -394,223 +435,47 @@ struct State {
 
 State G;
 
-struct Canvas {
-  Utf8char *chars;
-  Style *styles;
-  int w, h;
+static int to_visual_offset(Array<char> line, int x) {
+  int result = 0;
+  int i;
 
-  void init(int w, int h) {
-    this->w = w;
-    this->h = h;
-    this->chars = new Utf8char[w*h]();
-    this->styles = new Style[w*h]();
+  if (!line) return result;
+
+  for (i = 0; i < x; ++i) {
+    if (IS_UTF8_TRAIL(line[i]))
+      continue;
+
+    ++result;
+    if (line[i] == '\t')
+      result += G.tab_width-1;
   }
-
-  void resize(int w, int h) {
-    if (this->chars)
-      delete [] this->chars;
-    if (this->styles)
-      delete [] this->styles;
-    this->init(w, h);
-  }
-
-  void free() {
-    delete [] this->chars;
-    delete [] this->styles;
-  }
-
-  void fill(Utf8char c) {
-    for (int i = 0; i < w*h; ++i)
-      this->chars[i] = c;
-  }
-
-  void fill(Style s) {
-    for (int i = 0; i < w*h; ++i)
-      this->styles[i] = s;
-  }
-
-  void invert_color(int x, int y) {
-    swap(styles[y*w + x].text_color, styles[y*w + x].background_color);
-  }
-
-  // fills a to b with the bounds 
-  void fill_textcolor(Pos a, Pos b, Rect bounds, Color c) {
-    if (bounds.w == -1)
-      bounds.w = this->w - bounds.x;
-    if (bounds.h == -1)
-      bounds.h = this->h - bounds.y;
-    // single line outside of bounds, early exit
-    if (a.y == b.y && (b.x < 0 || a.x > this->w))
-      return;
-
-    int x,y,x0,x1,y0,y1;
-    a.x = clamp(a.x, 0, bounds.w-1);
-    a.y = clamp(a.y, 0, bounds.h-1);
-    b.x = clamp(b.x, 0, bounds.w-1);
-    b.y = clamp(b.y, 0, bounds.h-1);
-    x0 = bounds.x;
-    x1 = bounds.x + bounds.w;
-    y0 = bounds.y + a.y;
-    y1 = bounds.y + b.y;
-
-    if (y0 == y1) {
-      for (x = x0 + a.x, y = y0; x <= x0 + b.x; ++x)
-        this->styles[y*this->w + x].text_color = c;
-      return;
-    }
-
-    for (x = x0 + a.x, y = y0; x < x1 && y < y1; ++x)
-      this->styles[y*this->w + x].text_color = c;
-    for (++y; y < y1; ++y)
-    for (x = x0; x < x1; ++x)
-      this->styles[y*this->w + x].text_color = c;
-    for (x = x0; x <= x0 + b.x; ++x)
-      this->styles[y*this->w + x].text_color = c;
-  }
-
-  // w,h: use -1 to say it goes to the end
-  void fill_textcolor(int x, int y, int w, int h, Color c) {
-    if (w == -1)
-      w = this->w - x;
-    if (h == -1)
-      h = this->h - y;
-    w = at_most(w, this->w - x);
-    h = at_most(h, this->h - y);
-    if (w < 0 || h < 0)
-      return;
-
-    for (int yy = y; yy < y+h; ++yy)
-    for (int xx = x; xx < x+w; ++xx)
-      styles[yy*this->w + xx].text_color = c;
-  }
-
-  // w,h: use -1 to say it goes to the end
-  void fill_background(int x, int y, int w, int h, Color c) {
-    if (w == -1)
-      w = this->w - x;
-    if (h == -1)
-      h = this->h - y;
-    w = at_most(w, this->w - x);
-    h = at_most(h, this->h - y);
-    if (w < 0 || h < 0)
-      return;
-
-    for (int yy = y; yy < y+h; ++yy)
-    for (int xx = x; xx < x+w; ++xx)
-      styles[yy*this->w + xx].background_color = c;
-  }
-
-  void render_strn(int x, int y, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n) {
-    if (!str)
-      return;
-
-    if (xclip1 == -1)
-      xclip1 = this->w;
-
-    Utf8char *row = &this->chars[y*w];
-    Style *style_row = &this->styles[y*w];
-    for (const char *end = str+n; str != end && x < xclip1;) {
-      if (*str == '\t') {
-        for (int i = 0; i < G.tab_width; ++i, ++x)
-          if (x >= xclip0 && x < xclip1) {
-            row[x] = ' ';
-            if (text_color)
-              style_row[x].text_color = *text_color;
-            if (background_color)
-              style_row[x].background_color = *background_color;
-          }
-        ++str;
-      }
-      else {
-        Utf8char c = Utf8char::from_string(str, end);
-        if (x >= xclip0 && x < xclip1) {
-          row[x] = c;
-          if (text_color)
-            style_row[x].text_color = *text_color;
-          if (background_color)
-            style_row[x].background_color = *background_color;
-        }
-        ++x;
-      }
-    }
-  }
-
-  void render_str_v(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
-    int max_chars = w-x+1;
-    if (max_chars <= 0)
-      return;
-    array_resize(G.tmp_render_buffer, max_chars);
-    int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
-    render_strn(x, y, text_color, background_color, x0, x1, G.tmp_render_buffer, min(max_chars, n));
-  }
-
-  void render_strf(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    this->render_str_v(x, y, text_color, background_color, x0, x1, fmt, args);
-    va_end(args);
-  }
-
-  void render(const Pane *p) {
-    #if 0
-    printf("PRINTING SCREEN\n\n");
-    for (int i = 0; i < h; ++i) {
-      for (int j = 0; j < w; ++j)
-        putchar('a' + styles[i*w + j].background_color.r * 10);
-      putchar('\n');
-    }
-    #endif
-
-    // render background
-    for (int y = 0; y < h; ++y) {
-      for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-        if (styles[y*w + x1] == styles[y*w + x0] && x1 < w)
-          continue;
-        float xf0 = (float)p->slot2pixelx(x0);
-        float xf1 = (float)p->slot2pixelx(x1);
-        float yf0 = (float)p->slot2pixely(y);
-        float yf1 = (float)p->slot2pixely(y+1);
-        const Color c = styles[y*w + x0].background_color;
-        push_square_quad(xf0, xf1, yf0, yf1, c);
-        x0 = x1;
-      }
-    }
-
-    // render text
-    const float text_offset_y = -G.font_height*3.0f/15.0f; // TODO: get this from truetype?
-    array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
-    for (int row = 0; row < h; ++row) {
-      Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
-      int y = p->slot2pixely(row+1) + text_offset_y;
-      for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-        if (styles[row*w + x1].text_color == styles[row*w + x0].text_color && x1 < w)
-          continue;
-        int x = p->bounds.x + x0*G.font_width;
-        push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[row*w + x0].text_color);
-        x0 = x1;
-      }
-    }
-  }
-};
-
-Pos Pane::slot2pixel(Pos p) const {
-  return {this->bounds.x + p.x*G.font_width, this->bounds.y + p.y*G.line_height};
+  return result;
 }
 
-int Pane::slot2pixelx(int x) const {
-  return this->bounds.x + x*G.font_width;
+/* returns the logical index located visually at x */
+static int from_visual_offset(Array<char> line, int x) {
+  int visual = 0;
+  int i;
+
+  if (!line) return 0;
+
+  for (i = 0; i < line.size; ++i) {
+    if (IS_UTF8_TRAIL(line[i]))
+      continue;
+    ++visual;
+    if (line[i] == '\t')
+      visual += G.tab_width-1;
+
+    if (visual > x)
+      return i;
+  }
+
+  return i;
 }
 
-int Pane::slot2pixely(int y) const {
-  return this->bounds.y + y*G.line_height;
-}
-
-int Pane::numchars_x() const {
-  return this->bounds.w / G.font_width + 1;
-}
-
-int Pane::numchars_y() const {
-  return this->bounds.h / G.line_height + 1;
+static Pos to_visual_pos(Buffer *b, Pos p) {
+  p.x = to_visual_offset(b->lines[p.y], p.x);
+  return p;
 }
 
 enum SpecialKey {
@@ -631,8 +496,6 @@ enum SpecialKey {
 };
 
 /* @TOKENIZER */
-
-static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end);
 
 static void buffer_move_to_x(Buffer *b, int x);
 
@@ -1199,49 +1062,6 @@ static int utf8_to_wide(const char *str, const char *end, char res[4]) {
   return 4;
 }
 
-static int to_visual_offset(Array<char> line, int x) {
-  int result = 0;
-  int i;
-
-  if (!line) return result;
-
-  for (i = 0; i < x; ++i) {
-    if (IS_UTF8_TRAIL(line[i]))
-      continue;
-
-    ++result;
-    if (line[i] == '\t')
-      result += G.tab_width-1;
-  }
-  return result;
-}
-
-static Pos to_visual_pos(Buffer *b, Pos p) {
-  p.x = to_visual_offset(b->lines[p.y], p.x);
-  return p;
-}
-
-/* returns the logical index located visually at x */
-static int from_visual_offset(Array<char> line, int x) {
-  int visual = 0;
-  int i;
-
-  if (!line) return 0;
-
-  for (i = 0; i < line.size; ++i) {
-    if (IS_UTF8_TRAIL(line[i]))
-      continue;
-    ++visual;
-    if (line[i] == '\t')
-      visual += G.tab_width-1;
-
-    if (visual > x)
-      return i;
-  }
-
-  return i;
-}
-
 static void buffer_move_to_y(Buffer *b, int y) {
   y = clamp(y, 0, b->lines.size-1);
   b->pos.y = y;
@@ -1592,15 +1412,6 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
   p->x = x;
   p->y = y;
   return token;
-}
-
-static int calc_num_chars(int i) {
-  int result = 0;
-  while (i > 0) {
-    ++result;
-    i /= 10;
-  }
-  return result;
 }
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
@@ -2210,195 +2021,16 @@ static void state_init() {
   G.dropdown_pane.buffer = &G.dropdown_buffer;
 }
 
-static int pane_calc_top_visible_row(Pane *pane) {
-  return at_least(0, pane->buffer->pos.y - pane->numchars_y()/2);
+static int char2pixelx(int x) {
+  return x*G.line_height;
 }
 
-static int pane_calc_left_visible_column(Pane *pane, int gutter_width) {
-  int x = pane->buffer->pos.x;
-  x = to_visual_offset(pane->buffer->lines[pane->buffer->pos.y], x);
-  x -= (pane->numchars_x() - gutter_width)*6/7;
-  return at_least(x, 0);
+static int char2pixely(int y) {
+  return y*G.line_height;
 }
 
-static void render_pane(Pane *p, bool draw_gutter) {
-  Buffer *b;
-  int buf_y, buf_y0, buf_y1;
-  int buf_x0;
-  Style style;
-
-  // calc bounds 
-  b = p->buffer;
-  buf_y0 = pane_calc_top_visible_row(p);
-  buf_y1 = at_most(buf_y0 + p->numchars_y(), b->lines.size);
-
-  int gutter_width;
-  if (draw_gutter)
-    gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
-  else
-    gutter_width = 0;
-
-  buf_x0 = pane_calc_left_visible_column(p, gutter_width);
-
-  Canvas canvas;
-  canvas.init(p->numchars_x(), p->numchars_y());
-  canvas.fill(Utf8char{' '});
-  canvas.fill(Style{G.default_text_color, p->background_color});
-
-  // draw each line 
-  for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
-    Array<char> line = b->lines[buf_y];
-    // gutter 
-    canvas.render_strf(0, y, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, gutter_width, " %i", buf_y+1);
-    // text 
-    canvas.render_strn(gutter_width - buf_x0, y, &G.default_text_color, 0, gutter_width, -1, line, line.size);
-  }
-
-  // highlight the line you're on
-  if (G.selected_pane == p) {
-    Pos pos = to_visual_pos(b, b->pos);
-    canvas.fill_background(0, b->pos.y - buf_y0, -1, 1, G.highlight_background_color.get());
-  }
-  // syntax @highlighting
-  {
-    Pos p = {0, buf_y0};
-    for (;;) {
-      Pos prev, next;
-
-      int token = token_read(b, &p, buf_y1, &prev, &next);
-
-      check_token:
-
-      bool do_render = false;
-
-      Color text_color;
-
-      if (token == TOKEN_NULL)
-        break;
-      switch (token) {
-
-        case TOKEN_NUMBER:
-          do_render = true;
-          text_color = G.number_color;
-          break;
-
-        case TOKEN_BLOCK_COMMENT_END:
-          do_render = true;
-          text_color = G.comment_color;
-          prev = {buf_x0, buf_y0};
-          break;
-
-        case TOKEN_LINE_COMMENT_BEGIN: {
-          do_render = true;
-          // just fast forward to the end of the line, no need to parse it
-          p = {0, prev.y+1};
-          next = {b->lines[prev.y].size-1, prev.y};
-          text_color = G.comment_color;
-          break;
-        }
-
-        case TOKEN_BLOCK_COMMENT_BEGIN: {
-          do_render = true;
-          Pos start = prev;
-          while (token != TOKEN_BLOCK_COMMENT_END && token != TOKEN_NULL)
-            token = token_read(b, &p, buf_y1, &prev, &next);
-          prev = start;
-          text_color = G.comment_color;
-          break;
-        }
-
-        case TOKEN_STRING:
-          do_render = true;
-          text_color = G.string_color;
-          break;
-
-        case TOKEN_STRING_BEGIN:
-          do_render = true;
-          text_color = G.string_color;
-          break;
-
-        case TOKEN_OPERATOR:
-          do_render = true;
-          text_color = G.operator_color;
-          break;
-
-        case TOKEN_IDENTIFIER: {
-          // check for keywords
-          for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-            if (buffer_streq(b, prev, next, keywords[i].name)) {
-              text_color = keyword_colors[keywords[i].type];
-              goto done;
-            }
-          }
-
-          // otherwise check for functions
-          // we assume something not indented and followed by a '(' is a function
-          if (isspace(buffer_getchar(b, 0, prev.y)))
-            break;
-          Pos prev_tmp, next_tmp;
-          token = token_read(b, &p, buf_y1, &prev_tmp, &next_tmp);
-          if (token != '(') {
-            prev = prev_tmp;
-            next = next_tmp;
-            goto check_token;
-          }
-          text_color = G.identifier_color;
-
-          done:
-          do_render = true;
-        } break;
-
-        case '#':
-          do_render = true;
-          text_color = keyword_colors[KEYWORD_MACRO];
-          break;
-
-        default:
-          break;
-      }
-      if (do_render) {
-        prev = to_visual_pos(b, prev);
-        next = to_visual_pos(b, next);
-
-        prev.x -= buf_x0;
-        prev.y -= buf_y0;
-        next.x -= buf_x0;
-        next.y -= buf_y0;
-
-        canvas.fill_textcolor(prev, next, Rect{gutter_width, 0, -1, -1}, text_color);
-      }
-
-      if (p.y > buf_y1)
-        break;
-    }
-  }
-
-  // if there is a search term, highlight that as well
-  if (G.selected_pane == p && G.search_buffer.lines[0].size > 0) {
-    Pos p = {0, buf_y0};
-    while (!buffer_find(b, G.search_buffer.lines[0], G.search_buffer.lines[0].size, false, &p) && p.y < buf_y1) {
-      int x0 = to_visual_offset(b->lines[p.y], p.x);
-      int x1 = to_visual_offset(b->lines[p.y], p.x + G.search_buffer.lines[0].size);
-      x0 -= buf_x0;
-      x1 -= buf_x0;
-      canvas.fill_background(gutter_width + x0, p.y - buf_y0, x1-x0, 1, G.search_term_background_color.get());
-      // canvas.fill_textcolor(gutter_width + x0, p.y - buf_y0, x1-x0, 1, G.search_term_text_color);
-    }
-  }
-
-  // draw marker
-  if (G.selected_pane == p) {
-    canvas.fill_background(gutter_width + b->pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color.get());
-    // canvas.invert_color(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0);
-  }
-
-  canvas.render(p);
-
-  canvas.free();
-}
-
-static v2 char2pixel(int x, int y) {
-  return {x*G.font_width, y*G.line_height};
+static Pos char2pixel(int x, int y) {
+  return {char2pixelx(x), char2pixely(y)};
 }
 
 static void render_dropdown(Pane *active_pane) {
@@ -2415,7 +2047,7 @@ static void render_dropdown(Pane *active_pane) {
   };
 
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
-    render_pane(&G.dropdown_pane, false);
+    G.dropdown_pane.render(false);
 }
 
 static void handle_input(Utf8char input, SpecialKey special_key) {
@@ -2676,6 +2308,408 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
   }
 }
 
+void Canvas::init(int w, int h) {
+  this->w = w;
+  this->h = h;
+  this->chars = new Utf8char[w*h]();
+  this->styles = new Style[w*h]();
+}
+
+void Canvas::resize(int w, int h) {
+  if (this->chars)
+    delete [] this->chars;
+  if (this->styles)
+    delete [] this->styles;
+  this->init(w, h);
+}
+
+void Canvas::free() {
+  delete [] this->chars;
+  delete [] this->styles;
+}
+
+void Canvas::fill(Utf8char c) {
+  for (int i = 0; i < w*h; ++i)
+    this->chars[i] = c;
+}
+
+void Canvas::fill(Style s) {
+  for (int i = 0; i < w*h; ++i)
+    this->styles[i] = s;
+}
+
+void Canvas::invert_color(int x, int y) {
+  swap(styles[y*w + x].text_color, styles[y*w + x].background_color);
+}
+
+void Pane::render(bool draw_gutter) {
+  int buf_y, buf_y0, buf_y1;
+  int buf_x0;
+  Style style;
+
+  // calc bounds 
+  buf_y0 = this->calc_top_visible_row();
+  buf_y1 = at_most(buf_y0 + this->numchars_y(), buffer->lines.size);
+
+  if (draw_gutter)
+    this->gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
+  else
+    this->gutter_width = 0;
+
+  Canvas canvas;
+  canvas.init(this->numchars_x(), this->numchars_y());
+  canvas.fill(Utf8char{' '});
+  canvas.fill(Style{G.default_text_color, this->background_color});
+
+  // draw each line 
+  for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
+    Array<char> line = buffer->lines[buf_y];
+    // gutter 
+    canvas.render_strf(0, y, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
+    // text 
+    canvas.render_strn(buf2slot(  this->gutter_width - buf_x0, y, &G.default_text_color, 0, this->gutter_width, -1, line, line.size);
+  }
+
+  // highlight the line you're on
+  if (G.selected_pane == this)
+    canvas.fill_background({buf2slot(buffer->pos), {-1, 1}}, G.highlight_background_color.get());
+
+  // syntax @highlighting
+  {
+    Pos pos = {0, buf_y0};
+    for (;;) {
+      Pos prev, next;
+
+      int token = token_read(buffer, &pos, buf_y1, &prev, &next);
+
+      check_token:
+
+      bool do_render = false;
+
+      Color text_color;
+
+      if (token == TOKEN_NULL)
+        break;
+      switch (token) {
+
+        case TOKEN_NUMBER:
+          do_render = true;
+          text_color = G.number_color;
+          break;
+
+        case TOKEN_BLOCK_COMMENT_END:
+          do_render = true;
+          text_color = G.comment_color;
+          prev = {buf_x0, buf_y0};
+          break;
+
+        case TOKEN_LINE_COMMENT_BEGIN: {
+          do_render = true;
+          // just fast forward to the end of the line, no need to parse it
+          pos = {0, prev.y+1};
+          next = {buffer->lines[prev.y].size-1, prev.y};
+          text_color = G.comment_color;
+          break;
+        }
+
+        case TOKEN_BLOCK_COMMENT_BEGIN: {
+          do_render = true;
+          Pos start = prev;
+          while (token != TOKEN_BLOCK_COMMENT_END && token != TOKEN_NULL)
+            token = token_read(buffer, &pos, buf_y1, &prev, &next);
+          prev = start;
+          text_color = G.comment_color;
+          break;
+        }
+
+        case TOKEN_STRING:
+          do_render = true;
+          text_color = G.string_color;
+          break;
+
+        case TOKEN_STRING_BEGIN:
+          do_render = true;
+          text_color = G.string_color;
+          break;
+
+        case TOKEN_OPERATOR:
+          do_render = true;
+          text_color = G.operator_color;
+          break;
+
+        case TOKEN_IDENTIFIER: {
+          // check for keywords
+          for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
+            if (buffer_streq(buffer, prev, next, keywords[i].name)) {
+              text_color = keyword_colors[keywords[i].type];
+              goto done;
+            }
+          }
+
+          // otherwise check for functions
+          // we assume something not indented and followed by a '(' is a function
+          if (isspace(buffer_getchar(buffer, 0, prev.y)))
+            break;
+          Pos prev_tmp, next_tmp;
+          token = token_read(buffer, &pos, buf_y1, &prev_tmp, &next_tmp);
+          if (token != '(') {
+            prev = prev_tmp;
+            next = next_tmp;
+            goto check_token;
+          }
+          text_color = G.identifier_color;
+
+          done:
+          do_render = true;
+        } break;
+
+        case '#':
+          do_render = true;
+          text_color = keyword_colors[KEYWORD_MACRO];
+          break;
+
+        default:
+          break;
+      }
+      if (do_render) {
+        prev = to_visual_pos(buffer, prev);
+        next = to_visual_pos(buffer, next);
+
+        prev.x -= buf_x0;
+        prev.y -= buf_y0;
+        next.x -= buf_x0;
+        next.y -= buf_y0;
+
+        canvas.fill_textcolor({prev, next}, Rect{this->gutter_width, 0, -1, -1}, text_color);
+      }
+
+      if (pos.y > buf_y1)
+        break;
+    }
+  }
+
+  // if there is a search term, highlight that as well
+  if (G.selected_pane == this && G.search_buffer.lines[0].size > 0) {
+    Pos pos = {0, buf_y0};
+    while (!buffer_find(buffer, G.search_buffer.lines[0], G.search_buffer.lines[0].size, false, &pos) && pos.y < buf_y1) {
+      canvas.fill_background({this->buf2slot(pos), G.search_buffer.lines[0].size, 1}, G.search_term_background_color.get());
+      // canvas.fill_textcolor(this->gutter_width + x0, pos.y - buf_y0, x1-x0, 1, G.search_term_text_color);
+    }
+  }
+
+  // draw marker
+  if (G.selected_pane == this) {
+    Rect r = {this->buf2slot(buffer->pos), {1, 1}};
+    printf("%i %i %i %i\n", r.x, r.y, r.w, r.h);
+    canvas.fill_background({this->buf2slot(buffer->pos), {1, 1}}, G.marker_background_color.get());
+    // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b->pos.y - buf_y0);
+  }
+
+  canvas.render(this->bounds.p);
+
+  canvas.free();
+}
+
+Pos Pane::buf2slot(Pos p) const {
+  p = to_visual_pos(this->buffer, p);
+  p.x -= this->calc_left_visible_column(gutter_width);
+  p.y -= this->calc_top_visible_row();
+  p.x += this->gutter_width;
+  return p;
+}
+
+int Pane::calc_top_visible_row() const {
+  return at_least(0, this->buffer->pos.y - this->numchars_y()/2);
+}
+
+int Pane::calc_left_visible_column(int gutter_width) const {
+  int x = this->buffer->pos.x;
+  x = to_visual_offset(this->buffer->lines[this->buffer->pos.y], x);
+  x -= (this->numchars_x() - gutter_width)*6/7;
+  return at_least(x, 0);
+}
+
+
+// fills a to b with the bounds 
+void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
+  Pos a = range.a;
+  Pos b = range.b;
+  if (bounds.w == -1)
+    bounds.w = this->w - bounds.x;
+  if (bounds.h == -1)
+    bounds.h = this->h - bounds.y;
+  // single line outside of bounds, early exit
+  if (a.y == b.y && (b.x < 0 || a.x > this->w))
+    return;
+
+  int x,y,x0,x1,y0,y1;
+  a.x = clamp(a.x, 0, bounds.w-1);
+  a.y = clamp(a.y, 0, bounds.h-1);
+  b.x = clamp(b.x, 0, bounds.w-1);
+  b.y = clamp(b.y, 0, bounds.h-1);
+  x0 = bounds.x;
+  x1 = bounds.x + bounds.w;
+  y0 = bounds.y + a.y;
+  y1 = bounds.y + b.y;
+
+  if (y0 == y1) {
+    for (x = x0 + a.x, y = y0; x <= x0 + b.x; ++x)
+      this->styles[y*this->w + x].text_color = c;
+    return;
+  }
+
+  for (x = x0 + a.x, y = y0; x < x1 && y < y1; ++x)
+    this->styles[y*this->w + x].text_color = c;
+  for (++y; y < y1; ++y)
+  for (x = x0; x < x1; ++x)
+    this->styles[y*this->w + x].text_color = c;
+  for (x = x0; x <= x0 + b.x; ++x)
+    this->styles[y*this->w + x].text_color = c;
+}
+
+// w,h: use -1 to say it goes to the end
+void Canvas::fill_textcolor(Rect r, Color c) {
+  if (r.w == -1)
+    r.w = this->w - r.x;
+  if (r.h == -1)
+    r.h = this->h - r.y;
+  r.w = at_most(r.w, this->w - r.x);
+  r.h = at_most(r.h, this->h - r.y);
+  if (r.w < 0 || r.h < 0)
+    return;
+
+  for (int y = r.y; y < r.y+r.h; ++y)
+  for (int x = r.x; x < r.x+r.w; ++x)
+    styles[y*this->w + x].text_color = c;
+}
+
+// w,h: use -1 to say it goes to the end
+void Canvas::fill_background(Rect r, Color c) {
+  if (w == -1)
+    w = this->w - r.x;
+  if (h == -1)
+    h = this->h - r.y;
+  w = at_most(w, this->w - r.x);
+  h = at_most(h, this->h - r.y);
+  if (w < 0 || h < 0)
+    return;
+
+  for (int y = r.y; y < r.y+r.h; ++y)
+  for (int x = r.x; x < r.x+r.w; ++x)
+    styles[y*this->w + x].background_color = c;
+}
+
+void Canvas::render_strn(int x, int y, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n) {
+  if (!str)
+    return;
+
+  if (xclip1 == -1)
+    xclip1 = this->w;
+
+  Utf8char *row = &this->chars[y*w];
+  Style *style_row = &this->styles[y*w];
+  for (const char *end = str+n; str != end && x < xclip1;) {
+    if (*str == '\t') {
+      for (int i = 0; i < G.tab_width; ++i, ++x)
+        if (x >= xclip0 && x < xclip1) {
+          row[x] = ' ';
+          if (text_color)
+            style_row[x].text_color = *text_color;
+          if (background_color)
+            style_row[x].background_color = *background_color;
+        }
+      ++str;
+    }
+    else {
+      Utf8char c = Utf8char::from_string(str, end);
+      if (x >= xclip0 && x < xclip1) {
+        row[x] = c;
+        if (text_color)
+          style_row[x].text_color = *text_color;
+        if (background_color)
+          style_row[x].background_color = *background_color;
+      }
+      ++x;
+    }
+  }
+}
+
+void Canvas::render_str_v(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
+  int max_chars = w-x+1;
+  if (max_chars <= 0)
+    return;
+  array_resize(G.tmp_render_buffer, max_chars);
+  int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
+  render_strn(x, y, text_color, background_color, x0, x1, G.tmp_render_buffer, min(max_chars, n));
+}
+
+void Canvas::render_strf(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  this->render_str_v(x, y, text_color, background_color, x0, x1, fmt, args);
+  va_end(args);
+}
+
+void Canvas::render(Pos offset) {
+  #if 0
+  printf("PRINTING SCREEN\n\n");
+  for (int i = 0; i < h; ++i) {
+    for (int j = 0; j < w; ++j)
+      putchar('a' + styles[i*w + j].background_color.r * 10);
+    putchar('\n');
+  }
+  #endif
+
+  // render background
+  for (int y = 0; y < h; ++y) {
+    for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
+      if (styles[y*w + x1] == styles[y*w + x0] && x1 < w)
+        continue;
+      Pos p0 = char2pixel(x0,y) + offset;
+      Pos p1 = char2pixel(x1,y+1) + offset;
+      const Color c = styles[y*w + x0].background_color;
+      push_square_quad(p0.x, p1.x, p0.y, p1.y, c);
+      x0 = x1;
+    }
+  }
+
+  // render text
+  const float text_offset_y = -G.font_height*3.0f/15.0f; // TODO: get this from truetype?
+  array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
+  for (int row = 0; row < h; ++row) {
+    Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
+    int y = char2pixely(row+1) + text_offset_y + offset.y;
+    for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
+      if (styles[row*w + x1].text_color == styles[row*w + x0].text_color && x1 < w)
+        continue;
+      int x = char2pixelx(x0) + offset.x;
+      push_textn(G.tmp_render_buffer.data + x0, x1 - x0, x, y, false, styles[row*w + x0].text_color);
+      x0 = x1;
+    }
+  }
+}
+
+Pos Pane::slot2pixel(Pos p) const {
+  return {this->bounds.x + p.x*G.font_width, this->bounds.y + p.y*G.line_height};
+}
+
+int Pane::slot2pixelx(int x) const {
+  return this->bounds.x + x*G.font_width;
+}
+
+int Pane::slot2pixely(int y) const {
+  return this->bounds.y + y*G.line_height;
+}
+
+int Pane::numchars_x() const {
+  return this->bounds.w / G.font_width + 1;
+}
+
+int Pane::numchars_y() const {
+  return this->bounds.h / G.line_height + 1;
+}
+
+
 #ifdef DEBUG
 static void test() {
   assert(memmem("a", 1, "a", 1));
@@ -2813,8 +2847,9 @@ int main(int argc, const char **argv)
     G.main_pane.bounds = {0, 0, G.win_width, G.win_height - G.line_height};
     G.bottom_pane.bounds = {0, G.main_pane.bounds.y + G.main_pane.bounds.h, G.win_width, G.line_height};
 
-    render_pane(&G.main_pane, true);
-    render_pane(&G.bottom_pane, false);
+    G.main_pane.render(true);
+    G.bottom_pane.render(false);
+
     /* draw dropdown ? */
     G.search_buffer.identifiers = G.main_pane.buffer->identifiers;
     // if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
