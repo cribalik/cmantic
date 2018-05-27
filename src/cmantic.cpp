@@ -319,13 +319,13 @@ struct Canvas {
   void free();
   void resize(int w, int h);
   void init(int w, int h);
-
 };
-
 
 struct Pane {
   Rect bounds;
   Color background_color;
+  Color text_color;
+  bool syntax_highlight;
   Buffer *buffer;
 
   // visual settings
@@ -341,7 +341,8 @@ struct Pane {
   int slot2pixelx(int x) const;
   int slot2pixely(int y) const;
   Pos slot2global(Pos p) const;
-  Pos buf2slot(Pos p) const;
+  Pos buf2char(Pos p) const;
+  Pos buf2pixel(Pos p) const;
 };
 
 struct PoppedColor {
@@ -948,15 +949,13 @@ static int buffer_isempty(Buffer *b) {
 }
 
 static void buffer_push_line(Buffer *b, const char *str) {
-  int y, l;
-
   b->modified = 1;
-  y = b->lines.size;
+  int y = b->lines.size;
   if (!buffer_isempty(b))
     array_pushz(b->lines);
   else
     y = 0;
-  l = strlen(str);
+  int l = strlen(str);
   array_pushn(b->lines[y], l);
   memcpy(b->lines[y], str, l);
 }
@@ -1622,7 +1621,7 @@ static int dropdown_match_cmp(const void *aa, const void *bb) {
   return strlen(a->str) - strlen(b->str);
 }
 
-static void fill_dropdown_buffer(Pane *active_pane) {
+static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
   static DropdownMatch best_matches[DROPDOWN_SIZE];
 
   if (!G.dropdown_visible)
@@ -1705,13 +1704,9 @@ static void fill_dropdown_buffer(Pane *active_pane) {
 
   qsort(best_matches, num_best_matches, sizeof(*best_matches), dropdown_match_cmp);
 
-  int max_width = 0;
-  for (int i = 0; i < num_best_matches; ++i)
-    max_width = max(max_width, (int)strlen(best_matches[i].str));
-
   buffer_empty(&G.dropdown_buffer);
   for (int i = 0; i < num_best_matches; ++i) {
-    int which = G.dropdown_backwards ? num_best_matches-1-i : i;
+    int which = grow_upwards ? num_best_matches-1-i : i;
     buffer_push_line(&G.dropdown_buffer, best_matches[which].str);
   }
 }
@@ -1724,15 +1719,16 @@ static int dropdown_get_first_line() {
 }
 
 static void dropdown_autocomplete(Buffer *b) {
-  char *str;
-  int l,y;
-
   if (!G.dropdown_visible || buffer_isempty(&G.dropdown_buffer))
     return;
 
-  y = dropdown_get_first_line();
-  str = G.dropdown_buffer[y];
-  l = G.dropdown_buffer[y].size;
+  int y;
+  if (G.dropdown_backwards)
+    y = G.dropdown_buffer.num_lines()-1;
+  else
+    y = 0;
+  char *str = G.dropdown_buffer[y];
+  int l = G.dropdown_buffer[y].size;
   buffer_replace(b, G.dropdown_pos.x, b->pos.x, b->pos.y, str, l);
   G.dropdown_visible = false;
 }
@@ -1746,6 +1742,7 @@ static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
     }
 
     G.dropdown_pos = active_pane->buffer->pos;
+    // printf("%i %i\n", G.dropdown_pos.x, G.dropdown_pos.y);
   }
   else if (!IS_IDENTIFIER_TAIL(*input.code)) {
     G.dropdown_visible = false;
@@ -2008,17 +2005,27 @@ static void state_init() {
   buffer_empty(&G.status_message_buffer);
   buffer_empty(&G.dropdown_buffer);
 
+  // some pane settings
+  G.main_pane.syntax_highlight = true;
   G.main_pane.background_color = G.default_background_color;
+  G.main_pane.text_color = G.default_text_color;
+
+  G.bottom_pane.syntax_highlight = true;
   G.bottom_pane.background_color = {0.2f, 0.2f, 0.2f};
+  G.bottom_pane.buffer = &G.status_message_buffer;
+  G.bottom_pane.text_color = G.default_text_color;
+
+  G.dropdown_pane.background_color = COLOR_DEEP_ORANGE;
+  G.dropdown_pane.text_color = COLOR_BLACK;
+  G.dropdown_pane.buffer = &G.dropdown_buffer;
+
+  G.selected_pane = &G.main_pane;
 
   G.menu_buffer.identifiers = {};
   array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
     G.menu_buffer.identifiers[i] = menu_options[i].name;
 
-  G.bottom_pane.buffer = &G.status_message_buffer;
-  G.selected_pane = &G.main_pane;
-  G.dropdown_pane.buffer = &G.dropdown_buffer;
 }
 
 static int char2pixelx(int x) {
@@ -2033,18 +2040,31 @@ static Pos char2pixel(int x, int y) {
   return {char2pixelx(x), char2pixely(y)};
 }
 
-static void render_dropdown(Pane *active_pane) {
-  fill_dropdown_buffer(active_pane);
+static Pos char2pixel(Pos p) {
+  return char2pixel(p.x, p.y);
+}
 
+static void render_dropdown(Pane *active_pane) {
+  G.dropdown_backwards = active_pane == &G.bottom_pane;
+  fill_dropdown_buffer(active_pane, G.dropdown_backwards);
+
+  // resize dropdown pane
   int max_width = 0;
   for (int i = 0; i < G.dropdown_buffer.lines.size; ++i)
     max_width = max(max_width, G.dropdown_buffer.lines[i].size);
+  G.dropdown_pane.bounds.size = char2pixel(max_width, G.dropdown_buffer.lines.size-1);
+  G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
 
   /* position pane */
-  G.dropdown_pane.bounds = Rect{
-    G.dropdown_pos,
-    char2pixel(G.dropdown_buffer.lines.size, max_width)
-  };
+  Pos p = G.dropdown_pos;
+  if (G.dropdown_backwards) --p.y;
+  else ++p.y;
+  p = active_pane->buf2pixel(p);
+  if (G.dropdown_backwards)
+    p.y -= G.dropdown_pane.bounds.h;
+  printf("%i %i %i\n", (int)p.x, (int)p.y, G.dropdown_backwards);
+  G.dropdown_pane.bounds.p = p;
+  // printf("%i %i %i %i\n", G.dropdown_pane.bounds.x, G.dropdown_pane.bounds.y, G.dropdown_pane.bounds.w, G.dropdown_pane.bounds.h);
 
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
     G.dropdown_pane.render(false);
@@ -2357,7 +2377,7 @@ void Pane::render(bool draw_gutter) {
   Canvas canvas;
   canvas.init(this->numchars_x(), this->numchars_y());
   canvas.fill(Utf8char{' '});
-  canvas.fill(Style{G.default_text_color, this->background_color});
+  canvas.fill(Style{this->text_color, this->background_color});
 
   // draw each line 
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
@@ -2365,15 +2385,15 @@ void Pane::render(bool draw_gutter) {
     // gutter 
     canvas.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_strn(buf2slot({buf_x0, buf_y}), &G.default_text_color, 0, 0, -1, line, line.size);
+    canvas.render_strn(buf2char({buf_x0, buf_y}), &this->text_color, 0, 0, -1, line, line.size);
   }
 
   // highlight the line you're on
   if (G.selected_pane == this)
-    canvas.fill_background({buf2slot(buffer->pos), {-1, 1}}, G.highlight_background_color.get());
+    canvas.fill_background({buf2char(buffer->pos), {-1, 1}}, G.highlight_background_color.get());
 
   // syntax @highlighting
-  {
+  if (this->syntax_highlight) {
     Pos pos = {0, buf_y0};
     for (;;) {
       Pos prev, next;
@@ -2384,7 +2404,7 @@ void Pane::render(bool draw_gutter) {
 
       bool do_render = false;
 
-      Color text_color = {};
+      Color highlighted_text_color = {};
 
       if (token == TOKEN_NULL)
         break;
@@ -2392,12 +2412,12 @@ void Pane::render(bool draw_gutter) {
 
         case TOKEN_NUMBER:
           do_render = true;
-          text_color = G.number_color;
+          highlighted_text_color = G.number_color;
           break;
 
         case TOKEN_BLOCK_COMMENT_END:
           do_render = true;
-          text_color = G.comment_color;
+          highlighted_text_color = G.comment_color;
           prev = {buf_x0, buf_y0};
           break;
 
@@ -2406,7 +2426,7 @@ void Pane::render(bool draw_gutter) {
           // just fast forward to the end of the line, no need to parse it
           pos = {0, prev.y+1};
           next = {buffer->lines[prev.y].size-1, prev.y};
-          text_color = G.comment_color;
+          highlighted_text_color = G.comment_color;
           break;
         }
 
@@ -2416,30 +2436,30 @@ void Pane::render(bool draw_gutter) {
           while (token != TOKEN_BLOCK_COMMENT_END && token != TOKEN_NULL)
             token = token_read(buffer, &pos, buf_y1, &prev, &next);
           prev = start;
-          text_color = G.comment_color;
+          highlighted_text_color = G.comment_color;
           break;
         }
 
         case TOKEN_STRING:
           do_render = true;
-          text_color = G.string_color;
+          highlighted_text_color = G.string_color;
           break;
 
         case TOKEN_STRING_BEGIN:
           do_render = true;
-          text_color = G.string_color;
+          highlighted_text_color = G.string_color;
           break;
 
         case TOKEN_OPERATOR:
           do_render = true;
-          text_color = G.operator_color;
+          highlighted_text_color = G.operator_color;
           break;
 
         case TOKEN_IDENTIFIER: {
           // check for keywords
           for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
             if (buffer_streq(buffer, prev, next, keywords[i].name)) {
-              text_color = keyword_colors[keywords[i].type];
+              highlighted_text_color = keyword_colors[keywords[i].type];
               goto done;
             }
           }
@@ -2455,7 +2475,7 @@ void Pane::render(bool draw_gutter) {
             next = next_tmp;
             goto check_token;
           }
-          text_color = G.identifier_color;
+          highlighted_text_color = G.identifier_color;
 
           done:
           do_render = true;
@@ -2463,7 +2483,7 @@ void Pane::render(bool draw_gutter) {
 
         case '#':
           do_render = true;
-          text_color = keyword_colors[KEYWORD_MACRO];
+          highlighted_text_color = keyword_colors[KEYWORD_MACRO];
           break;
 
         default:
@@ -2478,7 +2498,7 @@ void Pane::render(bool draw_gutter) {
         next.x -= buf_x0;
         next.y -= buf_y0;
 
-        canvas.fill_textcolor({prev, next}, Rect{this->gutter_width, 0, -1, -1}, text_color);
+        canvas.fill_textcolor({prev, next}, Rect{this->gutter_width, 0, -1, -1}, highlighted_text_color);
       }
 
       if (pos.y > buf_y1)
@@ -2490,23 +2510,34 @@ void Pane::render(bool draw_gutter) {
   if (G.selected_pane == this && G.search_buffer.lines[0].size > 0) {
     Pos pos = {0, buf_y0};
     while (!buffer_find(buffer, G.search_buffer.lines[0], G.search_buffer.lines[0].size, false, &pos) && pos.y < buf_y1) {
-      canvas.fill_background({this->buf2slot(pos), G.search_buffer.lines[0].size, 1}, G.search_term_background_color.get());
+      canvas.fill_background({this->buf2char(pos), G.search_buffer.lines[0].size, 1}, G.search_term_background_color.get());
       // canvas.fill_textcolor(this->gutter_width + x0, pos.y - buf_y0, x1-x0, 1, G.search_term_text_color);
     }
   }
 
   // draw marker
   if (G.selected_pane == this) {
-    canvas.fill_background({this->buf2slot(buffer->pos), {1, 1}}, G.marker_background_color.get());
+    canvas.fill_background({this->buf2char(buffer->pos), {1, 1}}, G.marker_background_color.get());
     // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b->pos.y - buf_y0);
   }
 
   canvas.render(this->bounds.p);
 
   canvas.free();
+  render_quads();
+  render_text();
 }
 
-Pos Pane::buf2slot(Pos p) const {
+Pos Pane::buf2pixel(Pos p) const {
+  p = to_visual_pos(this->buffer, p);
+  p.x -= this->calc_left_visible_column();
+  p.y -= this->calc_top_visible_row();
+  p.x += this->gutter_width;
+  p = char2pixel(p) + this->bounds.p;
+  return p;
+}
+
+Pos Pane::buf2char(Pos p) const {
   p = to_visual_pos(this->buffer, p);
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
@@ -2850,11 +2881,11 @@ int main(int, const char *[])
     if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
       render_dropdown(&G.bottom_pane);
     else
-    render_dropdown(&G.main_pane);
+      render_dropdown(&G.main_pane);
 
+    // render_textatlas(0, 0, 200, 200);
     render_quads();
     render_text();
-    // render_textatlas(0, 0, 200, 200);
 
     SDL_GL_SwapWindow(G.window);
   }
