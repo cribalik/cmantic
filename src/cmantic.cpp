@@ -5,8 +5,6 @@
  *   - refactor buffer_advance to be utf8 awar
  *   - Revert back to the old way of tokenizing comments
  *   - refactor token_read to return a TokenResult struct
- *   - refactor canvas to be more of a "View", which is gutter and buffer-offset-aware
- *   - add outline to canvas?
  *
  * TODO:
  *
@@ -1903,6 +1901,7 @@ static Keyword keywords[] = {
   // declarations
 
   {"struct", KEYWORD_DECLARATION},
+  {"class", KEYWORD_DECLARATION},
   {"union", KEYWORD_DECLARATION},
   {"enum", KEYWORD_DECLARATION},
   {"typedef", KEYWORD_DECLARATION},
@@ -2062,9 +2061,7 @@ static void render_dropdown(Pane *active_pane) {
   p = active_pane->buf2pixel(p);
   if (G.dropdown_backwards)
     p.y -= G.dropdown_pane.bounds.h;
-  printf("%i %i %i\n", (int)p.x, (int)p.y, G.dropdown_backwards);
   G.dropdown_pane.bounds.p = p;
-  // printf("%i %i %i %i\n", G.dropdown_pane.bounds.x, G.dropdown_pane.bounds.y, G.dropdown_pane.bounds.w, G.dropdown_pane.bounds.h);
 
   if (G.dropdown_visible && !buffer_isempty(&G.dropdown_buffer))
     G.dropdown_pane.render(false);
