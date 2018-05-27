@@ -53,6 +53,7 @@
     #ifndef WIN32_LEAN_AND_MEAN
       #define WIN32_LEAN_AND_MEAN 1
     #endif
+    #define NOMINMAX
     #include <windows.h>
   #endif
   #include <ctype.h>
@@ -135,7 +136,7 @@
   T min(T a, T b) {return b < a ? b : a;}
 
   float angle_to_range(float v, float a, float b) {
-    return (sin(v)*0.5 + 0.5)*(b-a) + a;
+    return (sinf(v)*0.5f + 0.5f)*(b-a) + a;
   }
 
   template<class T>
@@ -305,14 +306,14 @@ struct Canvas {
   Style *styles;
   int w, h;
 
-  void render_strf(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
+  void render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
   void render(Pos offset);
-  void render_str_v(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
-  void render_strn(int x, int y, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n);
+  void render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
+  void render_strn(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
   void fill_textcolor(Range range, Rect bounds, Color c);
-  void invert_color(int x, int y);
+  void invert_color(Pos p);
   void fill(Style s);
   void fill(Utf8char c);
   void free();
@@ -332,7 +333,7 @@ struct Pane {
 
   void render(bool draw_gutter);
   int calc_top_visible_row() const;
-  int calc_left_visible_column(int gutter_width) const;
+  int calc_left_visible_column() const;
 
   int numchars_x() const;
   int numchars_y() const;
@@ -1793,10 +1794,10 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
   }
 }
 
-static const char *ttf_file = "/usr/share/fonts/truetype/ubuntu-font-family/UbuntuMono-R.ttf";
+static const char *ttf_file = "font.ttf";
 
 #define rgb(r,g,b) {(r)/255.0f, (g)/255.0f, (b)/255.0f}
-static const Color COLOR_PINK = {0.92549, 0.25098, 0.4784};
+static const Color COLOR_PINK = {0.92549f, 0.25098f, 0.4784f};
 static const Color COLOR_YELLOW = {1.0f, 0.921568627451f, 0.23137254902f};
 static const Color COLOR_AMBER = rgb(255,193,7);
 static const Color COLOR_DEEP_ORANGE = rgb(255,138,101);
@@ -1957,7 +1958,7 @@ static void state_init() {
 
   // @colors!
   G.default_text_color = {0.8f, 0.8f, 0.8f};
-  G.default_background_color = {0.13, 0.13, 0.13};
+  G.default_background_color = {0.13f, 0.13f, 0.13f};
   G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
   G.default_gutter_style.background_color = G.default_background_color;
   G.default_number_color = G.number_color = COLOR_RED;
@@ -2308,19 +2309,19 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
   }
 }
 
-void Canvas::init(int w, int h) {
-  this->w = w;
-  this->h = h;
+void Canvas::init(int width, int height) {
+  this->w = width;
+  this->h = height;
   this->chars = new Utf8char[w*h]();
   this->styles = new Style[w*h]();
 }
 
-void Canvas::resize(int w, int h) {
+void Canvas::resize(int width, int height) {
   if (this->chars)
     delete [] this->chars;
   if (this->styles)
     delete [] this->styles;
-  this->init(w, h);
+  this->init(width, height);
 }
 
 void Canvas::free() {
@@ -2338,23 +2339,21 @@ void Canvas::fill(Style s) {
     this->styles[i] = s;
 }
 
-void Canvas::invert_color(int x, int y) {
-  swap(styles[y*w + x].text_color, styles[y*w + x].background_color);
+void Canvas::invert_color(Pos p) {
+  swap(styles[p.y*w + p.x].text_color, styles[p.y*w + p.x].background_color);
 }
 
 void Pane::render(bool draw_gutter) {
-  int buf_y, buf_y0, buf_y1;
-  int buf_x0;
-  Style style;
-
   // calc bounds 
-  buf_y0 = this->calc_top_visible_row();
-  buf_y1 = at_most(buf_y0 + this->numchars_y(), buffer->lines.size);
+  int buf_y0 = this->calc_top_visible_row();
+  int buf_y1 = at_most(buf_y0 + this->numchars_y(), buffer->lines.size);
 
   if (draw_gutter)
     this->gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   else
     this->gutter_width = 0;
+
+  int buf_x0 = this->calc_left_visible_column();
 
   Canvas canvas;
   canvas.init(this->numchars_x(), this->numchars_y());
@@ -2365,9 +2364,9 @@ void Pane::render(bool draw_gutter) {
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
     Array<char> line = buffer->lines[buf_y];
     // gutter 
-    canvas.render_strf(0, y, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
+    canvas.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_strn(buf2slot(  this->gutter_width - buf_x0, y, &G.default_text_color, 0, this->gutter_width, -1, line, line.size);
+    canvas.render_strn(buf2slot({buf_x0, buf_y}), &G.default_text_color, 0, 0, -1, line, line.size);
   }
 
   // highlight the line you're on
@@ -2386,7 +2385,7 @@ void Pane::render(bool draw_gutter) {
 
       bool do_render = false;
 
-      Color text_color;
+      Color text_color = {};
 
       if (token == TOKEN_NULL)
         break;
@@ -2512,7 +2511,7 @@ void Pane::render(bool draw_gutter) {
 
 Pos Pane::buf2slot(Pos p) const {
   p = to_visual_pos(this->buffer, p);
-  p.x -= this->calc_left_visible_column(gutter_width);
+  p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
   p.x += this->gutter_width;
   return p;
@@ -2522,10 +2521,10 @@ int Pane::calc_top_visible_row() const {
   return at_least(0, this->buffer->pos.y - this->numchars_y()/2);
 }
 
-int Pane::calc_left_visible_column(int gutter_width) const {
+int Pane::calc_left_visible_column() const {
   int x = this->buffer->pos.x;
   x = to_visual_offset(this->buffer->lines[this->buffer->pos.y], x);
-  x -= (this->numchars_x() - gutter_width)*6/7;
+  x -= (this->numchars_x() - this->gutter_width)*6/7;
   return at_least(x, 0);
 }
 
@@ -2599,7 +2598,9 @@ void Canvas::fill_background(Rect r, Color c) {
     styles[y*this->w + x].background_color = c;
 }
 
-void Canvas::render_strn(int x, int y, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n) {
+void Canvas::render_strn(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n) {
+  int x = p.x;
+  int y = p.y;
   if (!str)
     return;
 
@@ -2634,19 +2635,19 @@ void Canvas::render_strn(int x, int y, const Color *text_color, const Color *bac
   }
 }
 
-void Canvas::render_str_v(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
-  int max_chars = w-x+1;
+void Canvas::render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
+  int max_chars = w-p.x+1;
   if (max_chars <= 0)
     return;
   array_resize(G.tmp_render_buffer, max_chars);
   int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
-  render_strn(x, y, text_color, background_color, x0, x1, G.tmp_render_buffer, min(max_chars, n));
+  render_strn(p, text_color, background_color, x0, x1, G.tmp_render_buffer, min(max_chars, n));
 }
 
-void Canvas::render_strf(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
+void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
-  this->render_str_v(x, y, text_color, background_color, x0, x1, fmt, args);
+  this->render_str_v(p, text_color, background_color, x0, x1, fmt, args);
   va_end(args);
 }
 
@@ -2668,13 +2669,13 @@ void Canvas::render(Pos offset) {
       Pos p0 = char2pixel(x0,y) + offset;
       Pos p1 = char2pixel(x1,y+1) + offset;
       const Color c = styles[y*w + x0].background_color;
-      push_square_quad(p0.x, p1.x, p0.y, p1.y, c);
+      push_square_quad((float)p0.x, (float)p1.x, (float)p0.y, (float)p1.y, c);
       x0 = x1;
     }
   }
 
   // render text
-  const float text_offset_y = -G.font_height*3.0f/15.0f; // TODO: get this from truetype?
+  const int text_offset_y = (int) (-G.font_height*3.0f/15.0f); // TODO: get this from truetype?
   array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
   for (int row = 0; row < h; ++row) {
     Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
@@ -2726,22 +2727,17 @@ static void test() {
 #endif
 
 #ifdef OS_WINDOWS
-int wmain(int argc, const char* argv)
+int wmain(int, const wchar_t *[], wchar_t *[])
 #else
-int main(int argc, const char **argv)
+int main(int, const char *[])
 #endif
 {
-
-  if (argc < 2) {
-    fprintf(stderr, "Usage: cedit <file>\n");
-    return 1;
-  }
 
   state_init();
 
   /* open a buffer */
   {
-    const char *filename = argv[1];
+    const char *filename = "src/cmantic.cpp";
     G.main_pane.buffer = (Buffer*)malloc(sizeof(*G.main_pane.buffer));
     int err = buffer_from_file(filename, G.main_pane.buffer);
     if (err) {
@@ -2863,6 +2859,4 @@ int main(int argc, const char **argv)
 
     SDL_GL_SwapWindow(G.window);
   }
-
-  return 0;
 }

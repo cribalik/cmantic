@@ -6,3 +6,6 @@ include
 *.pdb
 *.lib
 *.sublime-workspace
+*.db
+*.suo
+*.lnk
