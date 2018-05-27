@@ -1,6 +1,8 @@
 /*
  * TODO:
  * HIGH:
+ *   - refactor buffer_getchar to return Utf8char
+ *   - refactor buffer_advance to be utf8 awar
  *   - Revert back to the old way of tokenizing comments
  *   - refactor token_read to return a TokenResult struct
  *   - refactor canvas to be more of a "View", which is gutter and buffer-offset-aware
@@ -225,16 +227,17 @@ bool operator==(char c, Utf8char uc) {
   return uc == c;
 }
 
-enum Token{
+enum Token {
   TOKEN_NULL = 0,
   TOKEN_IDENTIFIER = -2,
   TOKEN_NUMBER = -3,
   TOKEN_STRING = -4,
-  TOKEN_EOL = -4,
-  TOKEN_STRING_BEGIN = -5,
-  TOKEN_BLOCK_COMMENT_BEGIN = -6,
-  TOKEN_BLOCK_COMMENT_END = -7,
-  TOKEN_LINE_COMMENT_BEGIN = -8,
+  TOKEN_EOL = -5,
+  TOKEN_STRING_BEGIN = -6,
+  TOKEN_BLOCK_COMMENT_BEGIN = -7,
+  TOKEN_BLOCK_COMMENT_END = -8,
+  TOKEN_LINE_COMMENT_BEGIN = -9,
+  TOKEN_OPERATOR = -10,
 };
 
 struct TokenInfo {
@@ -1366,10 +1369,35 @@ static void tokenize(Buffer *b) {
   }
 }
 
+// MUST BE REVERSE SIZE ORDER
+static const struct {const char *str; int len;} operators[] = {
+  {"===", 3},
+  {"!==", 3},
+  {"<<=", 3},
+  {">>=", 3},
+  {"||", 2},
+  {"&&", 2},
+  {"==", 2},
+  {"!=", 2},
+  {"<<", 2},
+  {">>", 2},
+  {"++", 2},
+  {"--", 2},
+  {"+", 1},
+  {"-", 1},
+  {"*", 1},
+  {"&", 1},
+  {"%", 1},
+  {"=", 1},
+  {"<", 1},
+  {">", 1},
+};
+
 #define IS_NUMBER_HEAD(c) (isdigit(c))
 #define IS_NUMBER_TAIL(c) (isdigit(c) || ((c) >= 'A' && (c) <= 'F') || ((c) >= 'a' && (c) <= 'f') || (c) == 'x')
 #define IS_IDENTIFIER_HEAD(c) (isalpha(c) || (c) == '_' || (c) == '#' || IS_UTF8_HEAD(c))
 #define IS_IDENTIFIER_TAIL(c) (isalnum(c) || (c) == '_' || IS_UTF8_TRAIL(c))
+
 static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) {
   int token;
   int x,y;
@@ -1378,7 +1406,7 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
   for (;;) {
     if (y >= y_end || y >= b->lines.size) {
       token = TOKEN_NULL;
-      break;
+      goto done;
     }
 
     // endline
@@ -1390,7 +1418,7 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
         *end = {x,y};
       x = 0;
       ++y;
-      break;
+      goto done;
     }
 
     char c = b->lines[y][x];
@@ -1412,44 +1440,44 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
         if (!IS_IDENTIFIER_TAIL(c))
           break;
       }
-      break;
+      goto done;
     }
 
     /* start of block comment */
-    else if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '*') {
+    if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '*') {
       token = TOKEN_BLOCK_COMMENT_BEGIN;
       if (start)
         *start = {x, y};
       if (end)
         *end = {x+1, y};
       x += 2;
-      break;
+      goto done;
     }
 
     /* end of block comment */
-    else if (c == '*' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
+    if (c == '*' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
       token = TOKEN_BLOCK_COMMENT_END;
       if (start)
         *start = {x, y};
       if (end)
         *end = {x+1, y};
       x += 2;
-      break;
+      goto done;
     }
 
     /* line comment */
-    else if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
+    if (c == '/' && x+1 < b->lines[y].size && b->lines[y][x+1] == '/') {
       token = TOKEN_LINE_COMMENT_BEGIN;
       if (start)
         *start = {x, y};
       if (end)
         *end = {x+1, y};
       x += 2;
-      break;
+      goto done;
     }
 
     /* number */
-    else if (IS_NUMBER_HEAD(c)) {
+    if (IS_NUMBER_HEAD(c)) {
       token = TOKEN_NUMBER;
       if (start)
         *start = {x, y};
@@ -1461,7 +1489,7 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
           break;
       }
       if (x == b->lines[y].size)
-        break;
+        goto done;
       if (c == '.' && x+1 < b->lines[y].size && isdigit(b->lines[y][x+1])) {
         c = b->lines[y][++x];
         while (isdigit(c) && x < b->lines[y].size) {
@@ -1470,17 +1498,18 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
           c = b->lines[y][++x];
         }
         if (x == b->lines[y].size)
-          break;
+          goto done;
       }
       while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < b->lines[y].size) {
         if (end)
           *end = {x, y};
         c = b->lines[y][++x];
       }
-      break;
+      goto done;
     }
 
-    else if (c == '"' || c == '\'') {
+    /* string */
+    if (c == '"' || c == '\'') {
       char str_char = c;
       token = TOKEN_STRING;
       if (start)
@@ -1505,21 +1534,33 @@ static int token_read(const Buffer *b, Pos *p, int y_end, Pos *start, Pos *end) 
         }
         ++x;
       }
-      break;
+      goto done;
+    }
+
+    /* operators */
+    for (int i = 0; i < (int)ARRAY_LEN(operators); ++i) {
+      if (x + operators[i].len <= b->lines[y].size && memcmp(operators[i].str, b->lines[y]+x, operators[i].len) == 0) {
+        token = TOKEN_OPERATOR;
+        if (start)
+          *start = {x,y};
+        if (end)
+          *end = {x+operators[i].len-1, y};
+        x += operators[i].len;
+        goto done;
+      }
     }
 
     /* single char token */
-    else {
-      token = c;
-      if (start)
-        *start = {x, y};
-      if (end)
-        *end = {x, y};
-      ++x;
-      break;
-    }
+    token = c;
+    if (start)
+      *start = {x, y};
+    if (end)
+      *end = {x, y};
+    ++x;
+    goto done;
   }
 
+  done:
   p->x = x;
   p->y = y;
   return token;
@@ -2082,8 +2123,8 @@ static void state_init() {
   G.default_background_color = {0.13, 0.13, 0.13};
   G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
   G.default_gutter_style.background_color = G.default_background_color;
-  G.default_number_color = G.number_color = COLOR_DEEP_PURPLE;
-  G.string_color =                          COLOR_DEEP_PURPLE;
+  G.default_number_color = G.number_color = COLOR_RED;
+  G.string_color =                          COLOR_RED;
   G.comment_color = COLOR_BLUEGREY;
   G.identifier_color = COLOR_GREEN;
   G.default_search_term_text_color = G.search_term_text_color = COLOR_WHITE;
@@ -2118,7 +2159,7 @@ static void state_init() {
   G.search_term_background_color.base_color = G.default_background_color;
   G.search_term_background_color.popped_color = COLOR_LIGHT_BLUE;
   G.search_term_background_color.speed = 1.0f;
-  G.search_term_background_color.cooldown = 0.2f;
+  G.search_term_background_color.cooldown = 4.0f;
   G.search_term_background_color.min = 0.4f;
   G.search_term_background_color.max = 1.0f;
 
@@ -2246,6 +2287,11 @@ static void render_pane(Pane *p, bool draw_gutter) {
         case TOKEN_STRING_BEGIN:
           do_render = true;
           text_color = G.string_color;
+          break;
+
+        case TOKEN_OPERATOR:
+          do_render = true;
+          text_color = COLOR_DEEP_ORANGE;
           break;
 
         case TOKEN_IDENTIFIER: {
@@ -2472,13 +2518,29 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
         exit(1);
       break;
 
+    case 'b': {
+      if (buffer_advance_r(buffer))
+        break;
+      // if not in word, back to word
+      char c = buffer_getchar(buffer);
+      if (!(IS_IDENTIFIER_TAIL(c) || IS_IDENTIFIER_HEAD(c)))
+        while (c = buffer_getchar(buffer), !(IS_IDENTIFIER_TAIL(c) || IS_IDENTIFIER_HEAD(c)))
+          if (buffer_advance_r(buffer))
+            break;
+      // go to beginning of word
+      while (c = buffer_getchar(buffer), IS_IDENTIFIER_TAIL(c) || IS_IDENTIFIER_HEAD(c))
+        if (buffer_advance_r(buffer))
+          break;
+      buffer_advance(buffer);
+    } break;
+
     case 'w': {
       char c = buffer_getchar(buffer);
-      if (!isspace(c))
-        while (c = buffer_getchar(buffer), !isspace(c))
+      if (IS_IDENTIFIER_TAIL(c) || IS_IDENTIFIER_HEAD(c))
+        while (c = buffer_getchar(buffer), IS_IDENTIFIER_TAIL(c) || IS_IDENTIFIER_HEAD(c))
           if (buffer_advance(buffer))
             break;
-      while (c = buffer_getchar(buffer), isspace(c))
+      while (c = buffer_getchar(buffer), !IS_IDENTIFIER_HEAD(c))
         if (buffer_advance(buffer))
           break;
     } break;
