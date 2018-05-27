@@ -2011,7 +2011,6 @@ static void state_init() {
   G.main_pane.background_color = G.default_background_color;
   G.bottom_pane.background_color = {0.2f, 0.2f, 0.2f};
 
-
   G.menu_buffer.identifiers = {};
   array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
@@ -2023,7 +2022,7 @@ static void state_init() {
 }
 
 static int char2pixelx(int x) {
-  return x*G.line_height;
+  return x*G.font_width;
 }
 
 static int char2pixely(int y) {
@@ -2498,8 +2497,6 @@ void Pane::render(bool draw_gutter) {
 
   // draw marker
   if (G.selected_pane == this) {
-    Rect r = {this->buf2slot(buffer->pos), {1, 1}};
-    printf("%i %i %i %i\n", r.x, r.y, r.w, r.h);
     canvas.fill_background({this->buf2slot(buffer->pos), {1, 1}}, G.marker_background_color.get());
     // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b->pos.y - buf_y0);
   }
@@ -2584,13 +2581,13 @@ void Canvas::fill_textcolor(Rect r, Color c) {
 
 // w,h: use -1 to say it goes to the end
 void Canvas::fill_background(Rect r, Color c) {
-  if (w == -1)
-    w = this->w - r.x;
-  if (h == -1)
-    h = this->h - r.y;
-  w = at_most(w, this->w - r.x);
-  h = at_most(h, this->h - r.y);
-  if (w < 0 || h < 0)
+  if (r.w == -1)
+    r.w = this->w - r.x;
+  if (r.h == -1)
+    r.h = this->h - r.y;
+  r.w = at_most(r.w, this->w - r.x);
+  r.h = at_most(r.h, this->h - r.y);
+  if (r.w < 0 || r.h < 0)
     return;
 
   for (int y = r.y; y < r.y+r.h; ++y)
@@ -2656,7 +2653,7 @@ void Canvas::render(Pos offset) {
   printf("PRINTING SCREEN\n\n");
   for (int i = 0; i < h; ++i) {
     for (int j = 0; j < w; ++j)
-      putchar('a' + styles[i*w + j].background_color.r * 10);
+      putchar('a' + (int)(styles[i*w + j].background_color.r * 25.0f));
     putchar('\n');
   }
   #endif
@@ -2675,7 +2672,7 @@ void Canvas::render(Pos offset) {
   }
 
   // render text
-  const int text_offset_y = (int) (-G.font_height*3.0f/15.0f); // TODO: get this from truetype?
+  const int text_offset_y = (int)(-G.font_height*4.0f/15.0f); // TODO: get this from truetype?
   array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
   for (int row = 0; row < h; ++row) {
     Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
@@ -2809,13 +2806,15 @@ int main(int, const char *[])
     if (input.code[0] || special_key)
       handle_input(input, special_key);
 
-    // boost marker when you move
+    // boost marker when you move or change modes
     static Pos prev_pos;
-    if (prev_pos != G.main_pane.buffer->pos) {
+    static Mode prev_mode;
+    if (prev_pos != G.main_pane.buffer->pos || prev_mode != G.mode) {
       G.marker_background_color.reset();
       G.highlight_background_color.reset();
     }
     prev_pos = G.main_pane.buffer->pos;
+    prev_mode = G.mode;
 
     G.marker_background_color.tick();
     G.highlight_background_color.tick();
@@ -2848,9 +2847,9 @@ int main(int, const char *[])
 
     /* draw dropdown ? */
     G.search_buffer.identifiers = G.main_pane.buffer->identifiers;
-    // if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
-    //   render_dropdown(&G.bottom_pane);
-    // else
+    if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
+      render_dropdown(&G.bottom_pane);
+    else
     render_dropdown(&G.main_pane);
 
     render_quads();
