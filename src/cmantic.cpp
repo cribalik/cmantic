@@ -325,6 +325,7 @@ struct State {
   Color default_number_color;
   Color comment_color;
   Color string_color;
+  Color operator_color;
   Color default_keyword_color;
   Color identifier_color;
   Color default_search_term_text_color;
@@ -2125,6 +2126,7 @@ static void state_init() {
   G.default_gutter_style.background_color = G.default_background_color;
   G.default_number_color = G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
+  G.operator_color =                        COLOR_RED;
   G.comment_color = COLOR_BLUEGREY;
   G.identifier_color = COLOR_GREEN;
   G.default_search_term_text_color = G.search_term_text_color = COLOR_WHITE;
@@ -2291,7 +2293,7 @@ static void render_pane(Pane *p, bool draw_gutter) {
 
         case TOKEN_OPERATOR:
           do_render = true;
-          text_color = COLOR_DEEP_ORANGE;
+          text_color = G.operator_color;
           break;
 
         case TOKEN_IDENTIFIER: {
