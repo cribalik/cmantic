@@ -275,6 +275,7 @@ struct Buffer {
 
 struct Pane {
   int x,y,pw,ph; // in pixels
+  Color background_color;
   Buffer *buffer;
   int numchars_x() const;
   int numchars_y() const;
@@ -484,7 +485,7 @@ struct Canvas {
       styles[yy*this->w + xx].background_color = c;
   }
 
-  void render_strn(int x, int y, Style style, int xclip0, int xclip1, const char *str, int n) {
+  void render_strn(int x, int y, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n) {
     if (!str)
       return;
 
@@ -498,7 +499,10 @@ struct Canvas {
         for (int i = 0; i < G.tab_width; ++i, ++x)
           if (x >= xclip0 && x < xclip1) {
             row[x] = ' ';
-            style_row[x] = style;
+            if (text_color)
+              style_row[x].text_color = *text_color;
+            if (background_color)
+              style_row[x].background_color = *background_color;
           }
         ++str;
       }
@@ -506,26 +510,29 @@ struct Canvas {
         Utf8char c = Utf8char::from_string(str, end);
         if (x >= xclip0 && x < xclip1) {
           row[x] = c;
-          style_row[x] = style;
+          if (text_color)
+            style_row[x].text_color = *text_color;
+          if (background_color)
+            style_row[x].background_color = *background_color;
         }
         ++x;
       }
     }
   }
 
-  void render_str_v(int x, int y, Style style, int x0, int x1, const char *fmt, va_list args) {
+  void render_str_v(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
     int max_chars = w-x+1;
     if (max_chars <= 0)
       return;
     array_resize(G.tmp_render_buffer, max_chars);
     int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
-    render_strn(x, y, style, x0, x1, G.tmp_render_buffer, min(max_chars, n));
+    render_strn(x, y, text_color, background_color, x0, x1, G.tmp_render_buffer, min(max_chars, n));
   }
 
-  void render_strf(int x, int y, Style style, int x0, int x1, const char *fmt, ...) {
+  void render_strf(int x, int y, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    this->render_str_v(x, y, style, x0, x1, fmt, args);
+    this->render_str_v(x, y, text_color, background_color, x0, x1, fmt, args);
     va_end(args);
   }
 
@@ -2175,6 +2182,9 @@ static void state_init() {
   G.main_pane.y = 0;
   G.main_pane.pw = G.win_width;
   G.main_pane.ph = G.win_height;
+  G.main_pane.background_color = G.default_background_color;
+  G.bottom_pane.background_color = {0.2f, 0.2f, 0.2f};
+  G.bottom_pane.buffer = &G.status_message_buffer;
 
   G.selected_pane = &G.main_pane;
 
@@ -2219,20 +2229,22 @@ static void render_pane(Pane *p, bool draw_gutter) {
   Canvas canvas;
   canvas.init(p->numchars_x(), p->numchars_y());
   canvas.fill(Utf8char{' '});
-  canvas.fill(Style{G.default_text_color, G.default_background_color});
+  canvas.fill(Style{G.default_text_color, p->background_color});
 
   // draw each line 
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
     Array<char> line = b->lines[buf_y];
     // gutter 
-    canvas.render_strf(0, y, G.default_gutter_style, 0, gutter_width, " %i", buf_y+1);
+    canvas.render_strf(0, y, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_strn(gutter_width - buf_x0, y, Style{G.default_text_color, G.default_background_color}, gutter_width, -1, line, line.size);
+    canvas.render_strn(gutter_width - buf_x0, y, &G.default_text_color, 0, gutter_width, -1, line, line.size);
   }
 
   // highlight the line you're on
-  Pos pos = to_visual_pos(b, b->pos);
-  canvas.fill_background(0, b->pos.y - buf_y0, -1, 1, G.highlight_background_color.get());
+  if (G.selected_pane == p) {
+    Pos pos = to_visual_pos(b, b->pos);
+    canvas.fill_background(0, b->pos.y - buf_y0, -1, 1, G.highlight_background_color.get());
+  }
   // syntax @highlighting
   {
     Pos p = {0, buf_y0};
@@ -2348,7 +2360,7 @@ static void render_pane(Pane *p, bool draw_gutter) {
   }
 
   // if there is a search term, highlight that as well
-  if (G.search_buffer.lines[0].size > 0) {
+  if (G.selected_pane == p && G.search_buffer.lines[0].size > 0) {
     Pos p = {0, buf_y0};
     while (!buffer_find(b, G.search_buffer.lines[0], G.search_buffer.lines[0].size, false, &p) && p.y < buf_y1) {
       int x0 = to_visual_offset(b->lines[p.y], p.x);
@@ -2361,8 +2373,10 @@ static void render_pane(Pane *p, bool draw_gutter) {
   }
 
   // draw marker
-  canvas.fill_background(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color.get());
-  // canvas.invert_color(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0);
+  if (G.selected_pane == p) {
+    canvas.fill_background(gutter_width + b->pos.x - buf_x0, b->pos.y - buf_y0, 1, 1, G.marker_background_color.get());
+    // canvas.invert_color(gutter_width + pos.x - buf_x0, b->pos.y - buf_y0);
+  }
 
   canvas.render(p);
 
@@ -2775,9 +2789,17 @@ int main(int argc, const char **argv)
 
     // reflow panes
     G.main_pane.pw = G.win_width;
-    G.main_pane.ph = G.win_height;
+    G.main_pane.ph = G.win_height - G.line_height;
+    G.main_pane.x = 0;
+    G.main_pane.y = 0;
+
+    G.bottom_pane.pw = G.win_width;
+    G.bottom_pane.ph = G.line_height;
+    G.bottom_pane.y = G.main_pane.y + G.main_pane.ph;
+    G.bottom_pane.x = 0;
 
     render_pane(&G.main_pane, true);
+    render_pane(&G.bottom_pane, false);
     render_quads();
     render_text();
     // render_textatlas(0, 0, 200, 200);
