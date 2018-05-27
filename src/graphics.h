@@ -244,7 +244,7 @@ static int graphics_init(SDL_Window **window) {
   }
 
   // #ifdef DEBUG
-  graphics_state.window = *window = SDL_CreateWindow("cmantic", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 600, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+  graphics_state.window = *window = SDL_CreateWindow("cmantic", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 600, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS);
   // #else
   // TODO: How de we make this not change the resolution on linux?
   // SDL_Window *window = SDL_CreateWindow("cmantic", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
