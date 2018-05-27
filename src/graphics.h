@@ -25,66 +25,12 @@ struct Color {
   // h [0,360]
   // s [0,1]
   // v [0,1]
-  Color hsv() const {
-    float max,min, d, h,s,v;
-    max = r > g ? r : g;
-    max = max > b ? max : b;
-    min = r < g ? r : g;
-    min = min < b ? min : b;
-
-    d = max - min;
-    if (d < 0.00001f)
-      return {};
-    if (max <= 0.0f)
-      return {};
-
-    s = d/max;
-    if (max == r)
-      h = (g-b)/d;
-    else if (max == g)
-      h = 2.0f + (b-r)/d;
-    else
-      h = 4.0f + (r-g)/d;
-
-    h *= 60.0f;
-
-    while (h > 1.0f)
-      h -= 360.0f;
-    while (h < 0.0f)
-      h += 360.0f;
-
-    v = max;
-    return  {h,s,v};
-  }
+  Color hsv() const;
 
   // h [0,360]
   // s [0,1]
   // v [0,1]
-  static Color from_hsl(float h, float s, float l) {
-    const float c = (1.0f - fabsf(2*l - 1)) * s;
-    const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
-    const float m = l - c/2.0f;
-    Color result;
-
-    if (h > 300.0f)
-      result = {c,0.0f,x};
-    else if (h > 240.0f)
-      result = {x,0.0f,c};
-    else if (h > 180.0f)
-      result = {0.0f,x,c};
-    else if (h > 120.0f)
-      result = {0.0f,c,x};
-    else if (h > 60.0f)
-      result = {x,c,0.0f};
-    else
-      result = {c,x,0.0f};
-
-    result.r += m;
-    result.g += m;
-    result.b += m;
-    return result;
-  }
-
+  static Color from_hsl(float h, float s, float l);
   static Color blend(Color back, Color front, float alpha);
 };
 
@@ -122,13 +68,14 @@ static void render_quads();
 #endif /* OS */
 
 #define GL_GLEXT_LEGACY
-#include <GL/gl.h>
+#include <GL\gl.h>
 
 #define GL_GLEXT_VERSION 20171125
 
 #include <stddef.h>
 
 /* GL defines */
+
   typedef char GLchar;
   typedef ptrdiff_t GLsizeiptr;
   typedef ptrdiff_t GLintptr;
@@ -174,6 +121,7 @@ static void render_quads();
   #define GL_TEXTURE30                      0x84DE
   #define GL_TEXTURE31                      0x84DF
 
+  static void (*glActiveTexture) (GLenum texture);
   static void (*glEnableVertexAttribArray) (GLuint index);
   static void (*glVertexAttribPointer) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
   static void (*glVertexAttribIPointer) (GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
@@ -266,7 +214,7 @@ static struct GraphicsTextState {
 
 // only makes sense for mono fonts
 static int graphics_get_font_advance() {
-  return graphics_text_state.glyphs[0].advance;
+  return (int)graphics_text_state.glyphs[0].advance;
 }
 
 static struct {
@@ -376,6 +324,8 @@ static int graphics_init(SDL_Window **window) {
   if (!glBufferSubData) { fprintf(stderr, "Couldn't load gl function \"glBufferSubData\"\n"); return 1;}
   *(void**) (&glUniform3fv) = (void*)SDL_GL_GetProcAddress("glUniform3fv");
   if (!glUniform3fv) { fprintf(stderr, "Couldn't load gl function \"glUniform3fv\"\n"); return 1;}
+  *(void**) (&glActiveTexture) = (void*)SDL_GL_GetProcAddress("glActiveTexture");
+  if (!glActiveTexture) { fprintf(stderr, "Couldn't load gl function \"glActiveTexture\"\n"); return 1;}
 
   gl_ok_or_die;
 
@@ -408,7 +358,7 @@ static FILE* graphics_fopen(const char *filename, const char *mode) {
 #define STBTT_STATIC
 #include "stb_truetype.h"
 
-static int load_font_from_file(const char* filename, GLuint gl_texture, int tex_w, int tex_h, unsigned char first_char, unsigned char last_char, float height, Glyph *out_glyphs) {
+static int load_font_from_file(const char* filename, GLuint gl_texture, int tex_w, int tex_h, unsigned char first_char, unsigned char last_char, int height, Glyph *out_glyphs) {
   #define BUFFER_SIZE 1024*1024
   unsigned char* ttf_mem;
   unsigned char* bitmap;
@@ -423,7 +373,7 @@ static int load_font_from_file(const char* filename, GLuint gl_texture, int tex_
   if (!f) {fprintf(stderr, "Failed to open ttf file %s: %s\n", filename, graphics_strerror(errno)); return 1;}
   fread(ttf_mem, 1, BUFFER_SIZE, f);
 
-  res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) out_glyphs);
+  res = stbtt_BakeFontBitmap(ttf_mem, 0, (float)height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) out_glyphs);
   if (res <= 0) {fprintf(stderr, "Failed to bake font: %i\n", res); return 1;}
 
   glBindTexture(GL_TEXTURE_2D, gl_texture);
@@ -439,7 +389,6 @@ static GLuint graphics_compile_shader(const char *vertex_shader_src, const char 
   GLuint result = 0;
   const char * shader_src_list;
   char info_log[512];
-  int num_read;
   GLint success;
   GLuint vertex_shader, fragment_shader;
 
@@ -621,19 +570,19 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
     float strw = 0.0f;
     for (int i = 0; i < n; ++i)
       strw += graphics_text_state.glyphs[str[i] - 32].advance;
-    pos_x -= strw / 2;
+    pos_x -= (int)(strw / 2.0f);
     /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
   }
 
   for (int i = 0; i < n; ++i) {
     Glyph g = graphics_text_state.glyphs[str[i] - 32];
 
-    int x = pos_x + g.offset_x;
-    int y = pos_y + g.offset_y;
+    int x = pos_x + (int)g.offset_x;
+    int y = pos_y + (int)g.offset_y;
     int w = (g.x1 - g.x0);
     int h = (g.y1 - g.y0);
 
-    pos_x += g.advance;
+    pos_x += (int)g.advance;
     if (x + w <= 0) continue;
     if (x - w >= graphics_state.window_width) break;
 
@@ -685,7 +634,7 @@ static void render_text() {
 
   // set screen size
   GLint loc = glGetUniformLocation(graphics_text_state.shader, "screensize");
-  glUniform2f(loc, graphics_state.window_width, graphics_state.window_height);
+  glUniform2f(loc, (float)graphics_state.window_width, (float)graphics_state.window_height);
 
   // set alpha blending
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -833,7 +782,7 @@ static void render_quads() {
 
   // set screen size
   GLint loc = glGetUniformLocation(graphics_quad_state.shader, "screensize");
-  glUniform2f(loc, graphics_state.window_width, graphics_state.window_height);
+  glUniform2f(loc, (float)graphics_state.window_width, (float)graphics_state.window_height);
 
   // set alpha blending
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -863,6 +812,63 @@ Color Color::blend(Color back, Color front, float alpha) {
   else {
     result = back;
   }
+  return result;
+}
+
+Color Color::hsv() const {
+  float max,min, d, h,s,v;
+  max = r > g ? r : g;
+  max = max > b ? max : b;
+  min = r < g ? r : g;
+  min = min < b ? min : b;
+
+  d = max - min;
+  if (d < 0.00001f)
+    return {};
+  if (max <= 0.0f)
+    return {};
+
+  s = d/max;
+  if (max == r)
+    h = (g-b)/d;
+  else if (max == g)
+    h = 2.0f + (b-r)/d;
+  else
+    h = 4.0f + (r-g)/d;
+
+  h *= 60.0f;
+
+  while (h > 1.0f)
+    h -= 360.0f;
+  while (h < 0.0f)
+    h += 360.0f;
+
+  v = max;
+  return  {h,s,v};
+}
+
+Color Color::from_hsl(float h, float s, float l) {
+  const float c = (1.0f - fabsf(2*l - 1)) * s;
+  const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
+  const float m = l - c/2.0f;
+  Color result;
+
+  if (h > 300.0f)
+    result = {c,0.0f,x};
+  else if (h > 240.0f)
+    result = {x,0.0f,c};
+  else if (h > 180.0f)
+    result = {0.0f,x,c};
+  else if (h > 120.0f)
+    result = {0.0f,c,x};
+  else if (h > 60.0f)
+    result = {x,c,0.0f};
+  else
+    result = {c,x,0.0f};
+
+  result.r += m;
+  result.g += m;
+  result.b += m;
   return result;
 }
 

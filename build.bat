@@ -7,5 +7,6 @@ IF NOT EXIST .\build mkdir .\build
 IF NOT EXIST .\build\x86 mkdir .\build\x86
 
 pushd .\build\x86
-cl %compiler_flags% -I..\..\include -I..\..\3party ..\..\cmantic.cpp -link %linker_flags% ..\..\SDL2.lib opengl32.lib  -debug
+dir ..\..\
+cl %compiler_flags% -I..\..\3party -I..\..\include ..\..\src\cmantic.cpp -link %linker_flags% ..\..\SDL2.lib opengl32.lib  -debug
 popd
