@@ -1732,22 +1732,10 @@ static void dropdown_autocomplete(Buffer *b) {
 }
 
 static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
-
-  if (!G.dropdown_visible) {
-    if (!IS_IDENTIFIER_HEAD(*input.code)) {
-      G.dropdown_visible = false;
-      return;
-    }
-
+  if (!G.dropdown_visible && IS_IDENTIFIER_HEAD(input.code[0])) {
+    G.dropdown_visible = true;
     G.dropdown_pos = active_pane->buffer->pos;
-    // printf("%i %i\n", G.dropdown_pos.x, G.dropdown_pos.y);
   }
-  else if (!IS_IDENTIFIER_TAIL(*input.code)) {
-    G.dropdown_visible = false;
-    return;
-  }
-
-  G.dropdown_visible = true;
 }
 
 static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
@@ -2135,7 +2123,6 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       }
       status_message_set("Unknown option '%.*s'", G.menu_buffer[0].size, G.menu_buffer[0].data);
       done:
-
 
       mode_normal(false);
     }
