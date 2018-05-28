@@ -140,7 +140,7 @@ void array_free(Array<T> &a) {
 }
 
 #define array_find(a, ptr, expr) {for ((ptr) = (a).data; (ptr) < (a).data+(a).size; ++(ptr)) {if (expr) break;} if ((ptr) == (a).data+(a).size) {(ptr) = 0;}}
-#define array_foreach(a, ptr) for ((ptr) = (a).data; (ptr) && (ptr) < (a).data+(a).size; ++(ptr))
+#define array_foreach(a) for (auto it = (a).data; it < (a).data+(a).size; ++it)
 
 #endif
 
