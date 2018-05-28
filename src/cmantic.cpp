@@ -219,9 +219,13 @@ struct Buffer {
   int modified;
 
   // methods
+
   String& operator[](int i) {return lines[i];}
+
   const String& operator[](int i) const {return lines[i];}
+
   int num_lines() const {return lines.size;}
+
   String getslice(Pos p) {
     return lines[p.y](p.x,-1);
   }
@@ -295,8 +299,6 @@ struct Buffer {
   void goto_beginline();
 
   void empty();
-
-  bool streq(Pos a, Pos b, const char *str);
 
   void truncate_to_n_lines(int n);
 
@@ -854,25 +856,25 @@ static int dropdown_match_cmp(const void *aa, const void *bb) {
 
 static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
   static DropdownMatch best_matches[DROPDOWN_SIZE];
+  Buffer &b = *active_pane->buffer;
 
   if (!G.dropdown_visible)
     return;
 
   int num_best_matches = 0;
 
-  Buffer *active_buffer = active_pane->buffer;
-  Array<const char*> identifiers = active_buffer->identifiers;
+  Array<const char*> identifiers = b.identifiers;
 
   /* this shouldn't happen.. but just to be safe */
-  if (G.dropdown_pos.y != active_pane->buffer->pos.y) {
+  if (G.dropdown_pos.y != b.pos.y) {
     G.dropdown_visible = false;
     return;
   }
 
   /* find matching identifiers */
   // TODO: clean this up
-  String input_str = active_pane->buffer->getslice(G.dropdown_pos);
-  int input_len = active_pane->buffer->pos.x - G.dropdown_pos.x;
+  String input_str = b.getslice(G.dropdown_pos);
+  int input_len = b.pos.x - G.dropdown_pos.x;
   num_best_matches = 0;
 
   for (int i = 0; i < identifiers.size; ++i) {
@@ -1824,7 +1826,6 @@ int Buffer::indentdepth(int y, bool *has_statement) {
   if (y < 0)
     return 0;
 
-
   int depth = 0;
   Pos p = {0,y};
 
@@ -1832,8 +1833,10 @@ int Buffer::indentdepth(int y, bool *has_statement) {
   while (1) {
     Pos a,b;
     int t = token_read(&p, y+1, &a, &b);
+
     if (t == TOKEN_NULL)
       break;
+
     switch (t) {
       case '{': ++depth; break;
       case '}': --depth; break;
@@ -1841,16 +1844,19 @@ int Buffer::indentdepth(int y, bool *has_statement) {
       case ']': --depth; break;
       case '(': ++depth; break;
       case ')': --depth; break;
-      case TOKEN_IDENTIFIER: 
+      case TOKEN_IDENTIFIER: {
+        String s = lines[y](a.x, b.x+1);
+        assert(b.y == a.y);
         if (first && (
-            streq(a, b, "for") ||
-            streq(a, b, "if") ||
-            streq(a, b, "while") ||
-            streq(a, b, "else"))) {
+            s == "for" ||
+            s == "if" ||
+            s == "while" ||
+            s == "else"
+            )) {
           if (has_statement)
             *has_statement = true;
         }
-        break;
+      } break;
       default: break;
     }
     first = false;
@@ -1907,14 +1913,13 @@ int Buffer::autoindent(const int y) {
     diff = tab_size * (target_indent - current_indent);
   }
 
-
   done:
   if (diff < -current_indent*tab_size)
     diff = -current_indent*tab_size;
   if (diff < 0)
     lines[y].remove(0, at_most(current_indent*tab_size, -diff));
   if (diff > 0) {
-    lines[y].insert(0, diff);
+    lines[y].insert(0, tab_char, diff);
     for (int i = 0; i < diff; ++i)
       lines[y][i] = tab_char;
   }
@@ -2047,12 +2052,6 @@ void Buffer::empty() {
   lines.size = 0;
   array_pushz(lines);
   pos.x = pos.y = 0;
-}
-
-bool Buffer::streq(Pos a, Pos b, const char *str) {
-  assert(b.y - a.y <= 1);
-  int identifier_len = b.y > a.y ? lines[a.y].length - a.x : b.x - a.x + 1;
-  return lines[a.y](a.x,-1).equals(str, identifier_len);
 }
 
 void Buffer::truncate_to_n_lines(int n) {
@@ -2466,6 +2465,10 @@ void Pane::render(bool draw_gutter) {
     }
   }
 
+  // highlight the line you're on
+  if (G.selected_pane == this)
+    canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, G.highlight_background_color.get());
+
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
     Pos pos = {0, buf_y0};
@@ -2474,10 +2477,6 @@ void Pane::render(bool draw_gutter) {
       // canvas.fill_textcolor(this->gutter_width + x0, pos.y - buf_y0, x1-x0, 1, G.search_term_text_color);
     }
   }
-
-  // highlight the line you're on
-  if (G.selected_pane == this)
-    canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, G.highlight_background_color.get());
 
   // draw marker
   if (G.selected_pane == this) {

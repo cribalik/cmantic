@@ -137,6 +137,13 @@ struct String {
 		memcpy(chars+i, str, n);
 	}
 
+	void insert(int i, char c, int n) {
+		extend(n);
+		memmove(chars+i+1, chars+i, length-i-1);
+		for (int j = i; j < i+n; ++j)
+			chars[j] = c;
+	}
+
 	void insert(int i, char c) {
 		extend(1);
 		memmove(chars+i+1, chars+i, length-i-1);
