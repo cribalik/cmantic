@@ -39,7 +39,10 @@ void array_push(Array<T> &a, T val) {
 
 template<class T>
 void array_insertz(Array<T> &a, int i) {
-	array_insert(a, i, T());
+	if (i == a.size)
+		array_push(a, T());
+	else
+		array_insert(a, i, T());
 }
 
 template<class T>

@@ -825,6 +825,9 @@ static void buffer_insert_tab(Buffer *b) {
 }
 
 static int buffer_getindent(Buffer *b, int y) {
+  if (y < 0 || y > b->lines.size)
+    return 0;
+
   int n = 0;
   int tab_size = b->tab_type ? b->tab_type : 1;
   char tab_char = b->tab_type ? ' ' : '\t';
@@ -1437,10 +1440,9 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
     while ((c = (char)fgetc(f)) != EOF)
       num_lines += c == '\n';
   }
-  if (ferror(f)) {
-    fclose(f);
-    return -1;
-  }
+  if (ferror(f))
+    goto err;
+
   IF_DEBUG(status_message_set("File has %i rows", num_lines));
 
   if (num_lines > 0) {
@@ -1497,8 +1499,8 @@ static const char* cman_strerror(int e) {
   #endif
 }
 
-#define file_write(file, str, len) fwrite(str, len, 1, file)
-#define file_read(file, buf, n) fread(buf, n, 1, file)
+#define file_write(file, str, len) (fwrite(str, len, 1, file) != 1)
+#define file_read(file, buf, n) (fread(buf, n, 1, file) != 1)
 
 static void save_buffer(Buffer *b) {
   FILE* f;
@@ -1511,26 +1513,34 @@ static void save_buffer(Buffer *b) {
     return;
   }
 
+  printf("Opened file %s\n", b->filename);
+
   /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
   for (i = 0; i < b->num_lines(); ++i) {
     unsigned int num_to_write = b->lines[i].size;
-    if (file_write(f, b->lines[i], num_to_write) != num_to_write) {
+
+    if (num_to_write && file_write(f, b->lines[i], num_to_write)) {
       status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
-      return;
+      goto err;
     }
+
     /* TODO: windows endlines option */
-    fputc('\n', f);
+    if (file_write(f, "\n", 1)) {
+      status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
+      goto err;
+    }
   }
+
+  status_message_set("Wrote %i lines to %s", b->num_lines(), b->filename);
 
   b->modified = 0;
 
+  err:
   fclose(f);
 }
 
 static int menu_option_save() {
   save_buffer(G.main_pane.buffer);
-          /* TODO: write out absolute path, instead of relative */
-  status_message_set("Wrote %i lines to %s", G.main_pane.buffer->num_lines(), G.main_pane.buffer->filename);
   return 0;
 }
 
@@ -1735,6 +1745,10 @@ static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
   if (!G.dropdown_visible && IS_IDENTIFIER_HEAD(input.code[0])) {
     G.dropdown_visible = true;
     G.dropdown_pos = active_pane->buffer->pos;
+  }
+  else if (G.dropdown_visible && !IS_IDENTIFIER_TAIL(input.code[0])) {
+    G.dropdown_visible = false;
+    G.dropdown_pos = {};
   }
 }
 
@@ -1941,7 +1955,7 @@ static void state_init() {
   G.line_height = G.font_height + G.line_margin;
 
   // @colors!
-  G.default_text_color = {0.8f, 0.8f, 0.8f};
+  G.default_text_color = COLOR_WHITE;
   G.default_background_color = {0.13f, 0.13f, 0.13f};
   G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
   G.default_gutter_style.background_color = G.default_background_color;
@@ -2032,6 +2046,9 @@ static Pos char2pixel(Pos p) {
 }
 
 static void render_dropdown(Pane *active_pane) {
+  if (!G.dropdown_visible)
+    return;
+
   G.dropdown_backwards = active_pane == &G.bottom_pane;
   fill_dropdown_buffer(active_pane, G.dropdown_backwards);
 
@@ -2739,9 +2756,9 @@ static void test() {
 #endif
 
 #ifdef OS_WINDOWS
-int wmain(int, const wchar_t *[], wchar_t *[])
+int wmain(int argc, const wchar_t *argv[], wchar_t *[])
 #else
-int main(int, const char *[])
+int main(int argc, const char *argv[])
 #endif
 {
 
@@ -2749,11 +2766,10 @@ int main(int, const char *[])
 
   /* open a buffer */
   {
-    const char *filename = "src/cmantic.cpp";
+    const char *filename = argc >= 2 ? argv[1] : "src/cmantic.cpp";
     G.main_pane.buffer = (Buffer*)malloc(sizeof(*G.main_pane.buffer));
     int err = buffer_from_file(filename, G.main_pane.buffer);
     if (err) {
-      // status_message_set("Could not open file %s: %s\n", filename, cman_strerror(errno));
       fprintf(stderr, "Could not open file %s: %s\n", filename, cman_strerror(errno));
       exit(1);
     }
