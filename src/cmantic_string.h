@@ -54,6 +54,20 @@ struct Utf8char {
   }
 };
 
+static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
+  char *h, *hend;
+  if (!needle_len || haystack_len < needle_len)
+    return 0;
+
+  h = (char*)haystack;
+  hend = h + haystack_len - needle_len + 1;
+
+  for (; h < hend; ++h)
+    if (memcmp(needle, h, needle_len) == 0)
+      return h;
+  return 0;
+}
+
 struct String {
 	char *chars;
 	int length, cap;
@@ -68,11 +82,13 @@ struct String {
 	}
 
 	int visual_offset(int x, int tab_width) const {
-		int result = 0;
-
 		if (!chars)
-			return result;
+			return 0;
 
+		if (x > length)
+			x = length;
+
+		int result = 0;
 		for (int i = 0; i < x; ++i) {
 			if (is_utf8_trail(chars[i]))
 				continue;
@@ -88,15 +104,22 @@ struct String {
 		return length == n && !memcmp(chars, str, n);
 	}
 
-	bool contains(int offset, String s) const {
+	int find(int offset, String s) const {
+		void *p = memmem(s.chars, s.length, chars + offset, length - offset);
+		if (!p)
+			return -1;
+		return (char*)p - chars;
+	}
+
+	bool begins_with(int offset, String s) const {
 		return length - offset >= s.length && !memcmp(s.chars, chars+offset, s.length);
 	}
 
-	bool contains(int offset, const char *str, int n) const {
+	bool begins_with(int offset, const char *str, int n) const {
 		return length - offset >= n && !memcmp(str, chars+offset, n);
 	}
 
-	bool contains(int offset, const char *str) const {
+	bool begins_with(int offset, const char *str) const {
 		int n = strlen(str);
 		return length - offset >= n && !memcmp(str, chars+offset, n);
 	}
