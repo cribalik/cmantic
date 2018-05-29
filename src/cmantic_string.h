@@ -7,32 +7,41 @@
 #define is_utf8_head(c) ((c)&0x80)
 #define is_utf8_symbol(c) ((c)&0x80)
 
+typedef unsigned int u32;
+
 struct Utf8char {
-  char code[4];
+  u32 code;
+
+  void operator=(const char *bytes) {
+  	int l = strlen(bytes);
+  	switch (l) {
+  		case 4:
+  			code |= (bytes[3] & 0xFF000000) >> 24;
+  		case 3:
+  			code |= (bytes[2] & 0xFF0000) >> 16;
+  		case 2:
+  			code |= (bytes[1] & 0xFF00) >> 8;
+  		case 1:
+  			code |= bytes[0] & 0xFF;
+  		case 0:
+	  		break;
+  	}
+  }
 
   void operator=(char c) {
-		code[1] = code[2] = code[3] = 0;
-		code[0] = c;
+  	code = c & 0xFF;
   }
 
-  void write_to_string(char *&str) {
-		for (int i = 0; i < 4 && code[i]; ++i)
-		  *str++ = code[i];
+  bool is_ansi() const {
+		return !is_utf8_head(code & 0xFF);
   }
 
-  // TODO: make this an operator+= on String instead
-  static void to_string(Utf8char *in, int n, Array<char> &out) {
-		array_resize(out, n*4);
-		char * const begin = out.data;
-		char *end = begin;
-		for (int i = 0; i < n; ++i)
-		  in[i].write_to_string(end);
-		array_resize(out, end - begin);
+  // TODO: check calls to this function
+  char ansi() const {
+  	return code & 0xFF;
   }
 
-  bool is_utf8() {
-	return is_utf8_head(code[0]);
-  }
+  static Utf8char create(char c) {return Utf8char{(u32)c};}
 };
 
 static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
@@ -66,22 +75,21 @@ struct Utf8Iter {
 	Utf8char operator*() {
 		Utf8char r = {};
 		char *s = str;
-		char *res = r.code;
 
 		if (str == end)
 		  return r;
 
-		*res++ = *s++;
+		r.code |= *s++ & 0xFF;
 
 		if (s == end || !is_utf8_trail(*s))
 		  return r;
-		*res++ = *s++;
+		r.code |= (*s++ & 0xFF00);
 		if (s == end || !is_utf8_trail(*s))
 		  return r;
-		*res++ = *s++;
+		r.code |= (*s++ & 0xFF0000);
 		if (s == end || !is_utf8_trail(*s))
 		  return r;
-		*res++ = *s++;
+		r.code |= (*s++ & 0xFF000000);
 		return r;
 	}
 };
@@ -152,9 +160,14 @@ struct String {
 
 	void extend(int l) {
 		length += l;
-		while (cap < length)
+		while (cap <= length)
 			cap = cap ? cap*2 : 4;
 		chars = (char*)realloc(chars, cap);
+	}
+
+	void reserve(int n) {
+		if (n > cap)
+			extend(n - cap);
 	}
 
 	void insert(int i, const char *str, int n) {
@@ -174,6 +187,21 @@ struct String {
 		extend(1);
 		memmove(chars+i+1, chars+i, length-i-1);
 		chars[i] = c;
+	}
+
+	void insert(int i, Utf8char c) {
+		char buf[4];
+		int n = 0;
+	  buf[n++] = c.code & 0xFF;
+	  if (!(c.code & 0xFF00)) goto done;
+	  buf[n++] = (c.code & 0xFF00) >> 8;
+	  if (!(c.code & 0xFF0000)) goto done;
+	  buf[n++] = (c.code & 0xFF0000) >> 16;
+	  if (!(c.code & 0xFF000000)) goto done;
+	  buf[n++] = (c.code & 0xFF000000) >> 24;
+
+	  done:
+	  insert(i, buf, n);
 	}
 
 	void insert(int i, String s) {
@@ -197,6 +225,10 @@ struct String {
 		(*this) += s;
 	}
 
+	void append(Utf8char c) {
+		(*this) += c;
+	}
+
 	void append(const char *str, int n) {
 		if (!n)
 			return;
@@ -204,8 +236,19 @@ struct String {
 		memcpy(chars + length - n, str, n);
 	}
 
+	void append(const Utf8char *str, int n) {
+		if (!n)
+			return;
+		// TODO: @utf8
+		for (int i = 0; i < n; ++i) {
+			if (str[i].is_ansi()) 
+				append(str[i].ansi());
+			else
+				append('?');
+		}
+	}
+
 	void append(long i) {
-		printf("%li\n", i);
 		(*this) += i;
 	}
 
@@ -218,7 +261,6 @@ struct String {
 	}
 
 	void append(const char *str) {
-		printf("%s\n", str);
 		(*this) += str;
 	}
 
@@ -249,6 +291,21 @@ struct String {
 		d *= 10.0;
 		append((char)('0' + ((int)(d+0.5))%10));
 	  }
+	}
+
+	void operator+=(Utf8char c) {
+		char buf[4];
+		int n = 0;
+	  buf[n++] = c.code & 0xFF;
+	  if (!(c.code & 0xFF00)) goto done;
+	  buf[n++] = (c.code & 0xFF00) >> 8;
+	  if (!(c.code & 0xFF0000)) goto done;
+	  buf[n++] = (c.code & 0xFF0000) >> 16;
+	  if (!(c.code & 0xFF000000)) goto done;
+	  buf[n++] = (c.code & 0xFF000000) >> 24;
+
+	  done:
+	  append(buf, n);
 	}
 
 	void clear() {

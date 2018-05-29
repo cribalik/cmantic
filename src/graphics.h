@@ -554,7 +554,7 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
   iph = 1.0f / graphics_text_state.text_atlas.h;
 
   // allocate new memory if needed
-  int newsize = graphics_text_state.num_vertices + 6*strlen(str);
+  int newsize = graphics_text_state.num_vertices + 6*n;
   if (newsize > graphics_text_state._vertex_buffer_size) {
     int newcap = graphics_text_state._vertex_buffer_size * 2;
     while (newcap < newsize)
@@ -578,7 +578,11 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
   }
 
   for (int i = 0; i < n; ++i) {
-    Glyph g = graphics_text_state.glyphs[str[i] - 32];
+    // assert(str[i] >= GraphicsTextState::FIRST_CHAR && str[i] <= GraphicsTextState::LAST_CHAR);
+    char c = str[i];
+    if (c < GraphicsTextState::FIRST_CHAR || c > GraphicsTextState::LAST_CHAR)
+      c = '?';
+    Glyph g = graphics_text_state.glyphs[c - 32];
 
     int x = pos_x + (int)g.offset_x;
     int y = pos_y + (int)g.offset_y;
