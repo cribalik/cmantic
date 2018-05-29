@@ -5,48 +5,29 @@
 
 #define is_utf8_trail(c) (((c)&0xC0) == 0x80)
 #define is_utf8_head(c) ((c)&0x80)
+#define is_utf8_symbol(c) ((c)&0x80)
 
 struct Utf8char {
   char code[4];
 
   void operator=(char c) {
-	code[1] = code[2] = code[3] = 0;
-	code[0] = c;
+		code[1] = code[2] = code[3] = 0;
+		code[0] = c;
   }
 
   void write_to_string(char *&str) {
-	for (int i = 0; i < 4 && code[i]; ++i)
-	  *str++ = code[i];
+		for (int i = 0; i < 4 && code[i]; ++i)
+		  *str++ = code[i];
   }
 
-  static Utf8char from_string(const char *&str, const char *end) {
-	Utf8char r = {};
-	char *res = r.code;
-
-	if (str == end)
-	  return r;
-
-	*res++ = *str++;
-
-	if (str == end || !is_utf8_trail(*str))
-	  return r;
-	*res++ = *str++;
-	if (str == end || !is_utf8_trail(*str))
-	  return r;
-	*res++ = *str++;
-	if (str == end || !is_utf8_trail(*str))
-	  return r;
-	*res++ = *str++;
-	return r;
-  }
-
+  // TODO: make this an operator+= on String instead
   static void to_string(Utf8char *in, int n, Array<char> &out) {
-	array_resize(out, n*4);
-	char * const begin = out.data;
-	char *end = begin;
-	for (int i = 0; i < n; ++i)
-	  in[i].write_to_string(end);
-	array_resize(out, end - begin);
+		array_resize(out, n*4);
+		char * const begin = out.data;
+		char *end = begin;
+		for (int i = 0; i < n; ++i)
+		  in[i].write_to_string(end);
+		array_resize(out, end - begin);
   }
 
   bool is_utf8() {
@@ -68,12 +49,57 @@ static void *memmem(void *needle, int needle_len, void *haystack, int haystack_l
   return 0;
 }
 
+struct Utf8Iter {
+	char *str;
+	char *end;
+
+	void operator++() {
+		++str;
+		while (str != end && is_utf8_trail(*str))
+			++str;
+	}
+
+	bool operator!=(Utf8Iter) {
+		return str != end;
+	}
+
+	Utf8char operator*() {
+		Utf8char r = {};
+		char *s = str;
+		char *res = r.code;
+
+		if (str == end)
+		  return r;
+
+		*res++ = *s++;
+
+		if (s == end || !is_utf8_trail(*s))
+		  return r;
+		*res++ = *s++;
+		if (s == end || !is_utf8_trail(*s))
+		  return r;
+		*res++ = *s++;
+		if (s == end || !is_utf8_trail(*s))
+		  return r;
+		*res++ = *s++;
+		return r;
+	}
+};
+
 struct String {
 	char *chars;
 	int length, cap;
 
 	char& operator[](int i) {return chars[i];}
 	char operator[](int i) const {return chars[i];}
+
+	Utf8Iter begin() {
+		return {chars, chars+length};
+	}
+
+	Utf8Iter end() {
+		return {};
+	}
 
 	String operator()(int a, int b) const {
 		if (b < 0)
@@ -179,6 +205,7 @@ struct String {
 	}
 
 	void append(long i) {
+		printf("%li\n", i);
 		(*this) += i;
 	}
 
@@ -191,11 +218,8 @@ struct String {
 	}
 
 	void append(const char *str) {
+		printf("%s\n", str);
 		(*this) += str;
-	}
-
-	void format(const char *fmt, va_list args) {
-
 	}
 
 	void operator+=(long i) {
@@ -227,32 +251,36 @@ struct String {
 	  }
 	}
 
+	void clear() {
+		length = 0;
+	}
+
 	void formatv(const char* fmt, va_list args) {
 	  for (; *fmt; ++fmt) {
-		if (*fmt == '{' && fmt[1] == '}') {
-			append(va_arg(args, String));
-			++fmt;
-		}
-		else if (*fmt != '%') {
-			append(*fmt);
-		} else {
-			++fmt;
-			switch (*fmt) {
+			if (*fmt == '{' && fmt[1] == '}') {
+				append(va_arg(args, String));
+				++fmt;
+			}
+			else if (*fmt != '%') {
+				append(*fmt);
+			} else {
+				++fmt;
+				switch (*fmt) {
 
-				case 'i': append((long)va_arg(args, int)); break;
+					case 'i': append((long)va_arg(args, int)); break;
 
-				case 's': append(va_arg(args, char*)); break;
+					case 's': append(va_arg(args, char*)); break;
 
-				case '%': append('%'); break;
+					case '%': append('%'); break;
 
-				case 'f': append(va_arg(args, double)); break;
+					case 'f': append(va_arg(args, double)); break;
 
+				}
 			}
 		}
 	}
-}
 
-	void text_append(const char* fmt, ...) {
+	void format(const char* fmt, ...) {
 	  va_list args;
 	  va_start(args, fmt);
 	  formatv(fmt, args);

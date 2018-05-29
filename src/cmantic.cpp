@@ -33,7 +33,6 @@
  * actions (Delete, Yank, ...)
  * add folders
  */
-
 // @includes
   #ifdef _MSC_VER
     #define OS_WINDOWS 1
@@ -202,6 +201,10 @@ struct Pos {
   bool operator!=(Pos p) {
     return x != p.x || y != p.y;
   }
+  void operator+=(Pos p) {
+    x += p.x;
+    y += p.y;
+  }
 };
 
 static Pos operator+(Pos a, Pos b) {
@@ -304,11 +307,13 @@ struct Canvas {
   Utf8char *chars;
   Style *styles;
   int w, h;
+  Color background;
+  int margin;
 
   void render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
   void render(Pos offset);
   void render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
-  void render_strn(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n);
+  void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, String s);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
   void fill_textcolor(Range range, Rect bounds, Color c);
@@ -322,16 +327,19 @@ struct Canvas {
 
 struct Pane {
   Rect bounds;
-  Color background_color;
-  Color text_color;
+  const Color *background_color;
+  const Color *highlight_background_color;
+  const Color *text_color;
   bool syntax_highlight;
   Buffer *buffer;
   Pos buffer_offset;
 
   // visual settings
   int gutter_width;
+  int margin;
 
   void render(bool draw_gutter);
+  void render_as_menu(int selected);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
 
@@ -353,9 +361,14 @@ struct PoppedColor {
   float min;
   float max;
   float amount; // 0
+  Color color;
+
   void reset() {amount = max + cooldown*speed*(max-min);}
-  void tick() {assert(speed); amount -= speed*(max-min)*0.04f;}
-  Color get() {return Color::blend(base_color, popped_color, clamp(amount, min, max));}
+  void tick() {
+    assert(speed);
+    amount -= speed*(max-min)*0.04f;
+    color = Color::blend(base_color, popped_color, clamp(amount, min, max));
+  }
 };
 
 struct RotatingColor {
@@ -363,9 +376,15 @@ struct RotatingColor {
   float saturation;
   float light;
   float hue; // 0
-  void tick() {hue = fmodf(hue + speed*0.1f, 360.0f);}
-  void jump() {hue = fmodf(hue + 180.0f, 360.0f);}
-  Color get() {return Color::from_hsl(hue, saturation, light);}
+  Color color;
+
+  void tick() {
+    hue = fmodf(hue + speed*0.1f, 360.0f);
+    color = Color::from_hsl(hue, saturation, light);
+  }
+  void jump() {
+    hue = fmodf(hue + 180.0f, 360.0f);
+  }
 };
 
 struct State {
@@ -460,52 +479,31 @@ static int from_visual_offset(Array<char> line, int x) {
 
 enum SpecialKey {
   KEY_NONE = 0,
-  KEY_UNKNOWN = 1,
-  KEY_ESCAPE = '\x1b',
-  KEY_RETURN = '\r',
-  KEY_TAB = '\t',
-  KEY_BACKSPACE = 127,
+  KEY_UNKNOWN = 257,
+  KEY_ESCAPE      = 258,
+  KEY_RETURN      = 259,
+  KEY_TAB         = 260,
+  KEY_BACKSPACE   = 261,
+  KEY_ARROW_UP    = 262,
+  KEY_ARROW_DOWN  = 263,
+  KEY_ARROW_LEFT  = 264,
+  KEY_ARROW_RIGHT = 265,
+  KEY_END         = 266,
+  KEY_HOME        = 267,
 
-  KEY_SPECIAL = 1000, /* so we can do c >= KEY_SPECIAL to check for special keys */
-  KEY_ARROW_UP,
-  KEY_ARROW_DOWN,
-  KEY_ARROW_LEFT,
-  KEY_ARROW_RIGHT,
-  KEY_END,
-  KEY_HOME
+  KEY_CONTROL = 1 << 10
 };
 
 /* @TOKENIZER */
 
-static void status_message_set(const char *fmt, ...);
-
-
-static int utf8_to_wide(const char *str, const char *end, char res[4]) {
-  res[0] = res[1] = res[2] = res[3] = 0;
-
-  if (str == end)
-    return 0;
-
-  *res++ = *str++;
-
-  if (str == end || !is_utf8_trail(*str))
-    return 1;
-  *res++ = *str++;
-  if (str == end || !is_utf8_trail(*str))
-    return 2;
-  *res++ = *str++;
-  if (str == end || !is_utf8_trail(*str))
-    return 3;
-  *res++ = *str++;
-  return 4;
-}
-
 static void status_message_set(const char *fmt, ...) {
-  int n;
   va_list args;
+  va_start(args, fmt);
 
   G.status_message_buffer.truncate_to_n_lines(1);
-  G.status_message_buffer[0].format(fmt, args);
+  G.status_message_buffer[0].clear();
+  G.status_message_buffer[0].formatv(fmt, args);
+  printf("%.*s\n", G.status_message_buffer[0].length, G.status_message_buffer[0].chars);
 }
 
 /****** @TOKENIZER ******/
@@ -872,7 +870,7 @@ static int fuzzy_match(String string, Array<const char*> strings, FuzzyMatch res
     }
   }
 
-  // qsort(result, num_results, sizeof(*result), fuzzy_cmp);
+  qsort(result, num_results, sizeof(*result), fuzzy_cmp);
   return num_results;
 }
 
@@ -893,11 +891,13 @@ static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
   String input = b.slice(G.dropdown_pos, b.pos.x - G.dropdown_pos.x);
   int num_best_matches = fuzzy_match(input, b.identifiers, best_matches, ARRAY_LEN(best_matches));
 
+  const int y = G.dropdown_buffer.pos.y;
   G.dropdown_buffer.empty();
   for (int i = 0; i < num_best_matches; ++i) {
     int which = grow_upwards ? num_best_matches-1-i : i;
     G.dropdown_buffer.push_line(best_matches[which].str);
   }
+  G.dropdown_buffer.move_to_y(y);
 }
 
 static int dropdown_get_first_line() {
@@ -911,18 +911,14 @@ static void dropdown_autocomplete(Buffer &b) {
   if (!G.dropdown_visible || G.dropdown_buffer.isempty())
     return;
 
-  int y;
-  if (G.dropdown_backwards)
-    y = G.dropdown_buffer.num_lines()-1;
-  else
-    y = 0;
-  b.replace(G.dropdown_pos.x, b.pos.x, b.pos.y, G.dropdown_buffer[y]);
+  b.replace(G.dropdown_pos.x, b.pos.x, b.pos.y, G.dropdown_buffer[G.dropdown_buffer.pos.y]);
   G.dropdown_visible = false;
 }
 
 static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
   if (!G.dropdown_visible && IS_IDENTIFIER_HEAD(input.code[0])) {
     G.dropdown_visible = true;
+    G.dropdown_buffer.pos = {};
     G.dropdown_pos = active_pane->buffer->pos;
   }
   else if (G.dropdown_visible && !IS_IDENTIFIER_TAIL(input.code[0])) {
@@ -931,23 +927,30 @@ static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
   }
 }
 
-static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
+#define CONTROL(c) ((c)|KEY_CONTROL)
+
+// TODO: use a unified key instead of this specialkey hack
+static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool ctrl) {
   Buffer &b = *p->buffer;
 
-  /* TODO: should not set `modifier` if we just enter and exit insert mode */
+  /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (special_key == KEY_ESCAPE) {
     b.pretty_range(G.insert_mode_begin_y, b.pos.y+1);
     mode_normal(true);
     return;
   }
 
-  if (!special_key) {
+  if (!special_key && !ctrl) {
     dropdown_update_on_insert(p, input);
     b.insert_char(input);
     return;
   }
 
-  switch (special_key) {
+  int key = special_key ? special_key : input.code[0];
+  if (ctrl)
+    key |= KEY_CONTROL;
+  printf("################ %i %i\n", key, CONTROL('j'));
+  switch (key) {
     case KEY_RETURN:
       b.insert_newline();
       break;
@@ -961,6 +964,16 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input) {
 
     case KEY_BACKSPACE:
       b.delete_char();
+      break;
+
+    case CONTROL('j'):
+      puts("moving down");
+      ++G.dropdown_buffer.pos.y;
+      break;
+
+    case CONTROL('k'):
+      puts("moving down");
+      --G.dropdown_buffer.pos.y;
       break;
 
     default:
@@ -1185,17 +1198,21 @@ static void state_init() {
 
   // some pane settings
   G.main_pane.syntax_highlight = true;
-  G.main_pane.background_color = G.default_background_color;
-  G.main_pane.text_color = G.default_text_color;
+  G.main_pane.background_color = &G.default_background_color;
+  G.main_pane.text_color = &G.default_text_color;
+  G.main_pane.highlight_background_color = &G.highlight_background_color.color;
 
   G.bottom_pane.syntax_highlight = true;
-  G.bottom_pane.background_color = {0.2f, 0.2f, 0.2f};
+  G.bottom_pane.background_color = &COLOR_GREY;
   G.bottom_pane.buffer = &G.status_message_buffer;
-  G.bottom_pane.text_color = G.default_text_color;
+  G.bottom_pane.text_color = &G.default_text_color;
+  G.bottom_pane.highlight_background_color = &G.default_highlight_background_color;
 
-  G.dropdown_pane.background_color = COLOR_DEEP_ORANGE;
-  G.dropdown_pane.text_color = COLOR_BLACK;
+  G.dropdown_pane.background_color = &COLOR_DEEP_ORANGE;
+  G.dropdown_pane.text_color = &COLOR_BLACK;
   G.dropdown_pane.buffer = &G.dropdown_buffer;
+  G.dropdown_pane.margin = 5;
+  G.dropdown_pane.highlight_background_color = &COLOR_ORANGE;
 
   G.selected_pane = &G.main_pane;
 
@@ -1234,8 +1251,10 @@ static void render_dropdown(Pane *active_pane) {
     max_width = max(max_width, G.dropdown_buffer.lines[i].length);
   G.dropdown_pane.bounds.size = char2pixel(max_width, G.dropdown_buffer.lines.size-1);
   G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
+  // add margin
+  G.dropdown_pane.bounds.size += {G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
 
-  /* position pane */
+  // position pane
   Pos p = G.dropdown_pos;
   if (G.dropdown_backwards) --p.y;
   else ++p.y;
@@ -1245,20 +1264,22 @@ static void render_dropdown(Pane *active_pane) {
   G.dropdown_pane.bounds.p = p;
 
   if (G.dropdown_visible && !G.dropdown_buffer.isempty())
-    G.dropdown_pane.render(false);
+    G.dropdown_pane.render_as_menu(0);
 }
 
-static void handle_input(Utf8char input, SpecialKey special_key) {
-  // TODO: if it is utf8
-  if (!special_key && input.is_utf8())
+static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
+  // TODO: insert utf8 characters
+  if (input.is_utf8() && !special_key)
     return;
 
   Buffer &buffer = *G.main_pane.buffer;
   int key = special_key ? special_key : input.code[0];
+  if (ctrl)
+    key |= KEY_CONTROL;
 
   switch (G.mode) {
   case MODE_GOTO:
-    if (isdigit(input.code[0])) {
+    if (isdigit(key)) {
       G.goto_line_number *= 10;
       G.goto_line_number += input.code[0] - '0';
       buffer.move_to_y(G.goto_line_number-1);
@@ -1294,7 +1315,6 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     G.bottom_pane.buffer = &G.menu_buffer;
     if (special_key == KEY_RETURN) {
       String line;
-      int i;
 
       if (G.menu_buffer.isempty()) {
         mode_normal(true);
@@ -1319,7 +1339,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     else if (special_key == KEY_ESCAPE)
       mode_normal(true);
     else
-      insert_default(&G.bottom_pane, special_key, input);
+      insert_default(&G.bottom_pane, special_key, input, ctrl);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
@@ -1330,7 +1350,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     if (special_key == KEY_ESCAPE)
       dropdown_autocomplete(G.search_buffer);
     else
-      insert_default(&G.bottom_pane, special_key, input);
+      insert_default(&G.bottom_pane, special_key, input, ctrl);
 
     search = G.search_buffer.lines[0];
     G.search_failed = buffer.find_and_move(search, true);
@@ -1365,30 +1385,27 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
     break;
 
   case MODE_INSERT:
-    insert_default(&G.main_pane, special_key, input);
+    insert_default(&G.main_pane, special_key, input, ctrl);
     break;
 
   case MODE_NORMAL:
-    switch (input.code[0]) {
+    switch (key) {
     case '=':
       if (buffer.lines[buffer.pos.y].length == 0)
         break;
       buffer.modified = true;
       buffer.move_x(buffer.autoindent(buffer.pos.y));
       break;
-
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
       if (graphics_set_font_options(ttf_file, G.font_height))
         exit(1);
       break;
-
     case '-':
       G.font_height = at_least(G.font_height-1, 7);
       if (graphics_set_font_options(ttf_file, G.font_height))
         exit(1);
       break;
-
     case 'b': {
       if (buffer.advance_r())
         break;
@@ -1403,8 +1420,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
         if (buffer.advance_r())
           break;
       buffer.advance();
-    } break;
-
+      break;}
     case 'w': {
       char c = buffer.getchar();
       if (IS_IDENTIFIER_TAIL(c) || IS_IDENTIFIER_HEAD(c))
@@ -1414,8 +1430,7 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       while (c = buffer.getchar(), !IS_IDENTIFIER_HEAD(c))
         if (buffer.advance())
           break;
-    } break;
-
+      break;}
     case 'q':
       if (buffer.modified)
         status_message_set("You have unsaved changes. If you really want to exit, use :quit");
@@ -1452,11 +1467,9 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
       }
       buffer.move_to(p);
       /*jumplist_push(prev);*/
-    } break;
-
+      break;}
     case 'N': {
       G.search_term_background_color.reset();
-      Pos prev = buffer.pos;
 
       int err = buffer.find_r(G.search_buffer[0].chars, G.search_buffer[0].length, 0);
       if (err) {
@@ -1464,12 +1477,10 @@ static void handle_input(Utf8char input, SpecialKey special_key) {
         break;
       }
       /*jumplist_push(prev);*/
-    } break;
-
+      break;}
     case ' ':
       mode_search();
       break;
-
     case 'g':
       mode_goto();
       break;
@@ -1898,7 +1909,6 @@ void Buffer::push_line(const char *str) {
 void Buffer::insert_newline() {
   modified = 1;
 
-  int left_of_line = lines[pos.y].length - pos.x;
   array_insertz(lines, pos.y+1);
   lines[pos.y+1] += lines[pos.y] + pos.x;
   lines[pos.y].length = pos.x;
@@ -2279,6 +2289,32 @@ void Canvas::invert_color(Pos p) {
   swap(styles[p.y*w + p.x].text_color, styles[p.y*w + p.x].background_color);
 }
 
+void Pane::render_as_menu(int selected) {
+  Buffer &b = *buffer;
+
+  Canvas canvas;
+  canvas.init(this->numchars_x(), this->numchars_y());
+  canvas.background = *this->background_color;
+  canvas.fill(Utf8char{' '});
+  canvas.fill(Style{*this->text_color, *this->background_color});
+  canvas.margin = this->margin;
+
+  // draw each line 
+  for (int y = 0; y < b.lines.size; ++y) {
+    canvas.render_str({0, y}, this->text_color, 0, 0, -1, b.lines[y]);
+  }
+
+  // highlight the line you're on
+  canvas.fill_background({0, b.pos.y, {-1, 1}}, *highlight_background_color);
+
+  canvas.render(this->bounds.p);
+
+  canvas.free();
+  render_quads();
+  render_text();
+
+}
+
 void Pane::render(bool draw_gutter) {
   Buffer &b = *buffer;
   // calc bounds 
@@ -2295,15 +2331,14 @@ void Pane::render(bool draw_gutter) {
   Canvas canvas;
   canvas.init(this->numchars_x(), this->numchars_y());
   canvas.fill(Utf8char{' '});
-  canvas.fill(Style{this->text_color, this->background_color});
+  canvas.fill(Style{*this->text_color, *this->background_color});
 
   // draw each line 
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
-    String line = b.lines[buf_y];
     // gutter 
     canvas.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_strn(buf2char({buf_x0, buf_y}), &this->text_color, 0, 0, -1, line.chars, line.length);
+    canvas.render_str(buf2char({buf_x0, buf_y}), this->text_color, 0, 0, -1, b.lines[buf_y]);
   }
 
   // syntax @highlighting
@@ -2422,20 +2457,20 @@ void Pane::render(bool draw_gutter) {
 
   // highlight the line you're on
   if (G.selected_pane == this)
-    canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, G.highlight_background_color.get());
+    canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, *this->highlight_background_color);
 
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
     Pos pos = {0, buf_y0};
     while (!b.find(G.search_buffer.lines[0], false, &pos) && pos.y < buf_y1) {
-      canvas.fill_background({this->buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.get());
+      canvas.fill_background({this->buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
       // canvas.fill_textcolor(this->gutter_width + x0, pos.y - buf_y0, x1-x0, 1, G.search_term_text_color);
     }
   }
 
   // draw marker
   if (G.selected_pane == this) {
-    canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_background_color.get());
+    canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_background_color.color);
     // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b.pos.y - buf_y0);
   }
 
@@ -2474,7 +2509,7 @@ int Pane::calc_left_visible_column() const {
   return at_least(x, 0);
 }
 
-// fills a to b with the bounds 
+// fills a to b but only inside the bounds 
 void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
   Pos a = range.a;
   Pos b = range.b;
@@ -2543,39 +2578,36 @@ void Canvas::fill_background(Rect r, Color c) {
     styles[y*this->w + x].background_color = c;
 }
 
-void Canvas::render_strn(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const char *str, int n) {
-  int x = p.x;
-  int y = p.y;
-  if (!str)
+void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, String s) {
+  if (!s)
     return;
 
   if (xclip1 == -1)
     xclip1 = this->w;
 
-  Utf8char *row = &this->chars[y*w];
-  Style *style_row = &this->styles[y*w];
-  for (const char *end = str+n; str != end && x < xclip1;) {
-    if (*str == '\t') {
-      for (int i = 0; i < G.tab_width; ++i, ++x)
-        if (x >= xclip0 && x < xclip1) {
-          row[x] = ' ';
+  Utf8char *row = &this->chars[p.y*w];
+  Style *style_row = &this->styles[p.y*w];
+
+  for (Utf8char c : s) {
+    if (c == '\t') {
+      for (int i = 0; i < G.tab_width; ++i, ++p.x)
+        if (p.x >= xclip0 && p.x < xclip1) {
+          row[p.x] = ' ';
           if (text_color)
-            style_row[x].text_color = *text_color;
+            style_row[p.x].text_color = *text_color;
           if (background_color)
-            style_row[x].background_color = *background_color;
+            style_row[p.x].background_color = *background_color;
         }
-      ++str;
     }
     else {
-      Utf8char c = Utf8char::from_string(str, end);
-      if (x >= xclip0 && x < xclip1) {
-        row[x] = c;
+      if (p.x >= xclip0 && p.x < xclip1) {
+        row[p.x] = c;
         if (text_color)
-          style_row[x].text_color = *text_color;
+          style_row[p.x].text_color = *text_color;
         if (background_color)
-          style_row[x].background_color = *background_color;
+          style_row[p.x].background_color = *background_color;
       }
-      ++x;
+      ++p.x;
     }
   }
 }
@@ -2586,7 +2618,7 @@ void Canvas::render_str_v(Pos p, const Color *text_color, const Color *backgroun
     return;
   array_resize(G.tmp_render_buffer, max_chars);
   int n = vsnprintf(G.tmp_render_buffer, max_chars, fmt, args);
-  render_strn(p, text_color, background_color, x0, x1, G.tmp_render_buffer, min(max_chars, n));
+  render_str(p, text_color, background_color, x0, x1, {G.tmp_render_buffer, min(max_chars, n)});
 }
 
 void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
@@ -2606,6 +2638,12 @@ void Canvas::render(Pos offset) {
   }
   #endif
 
+  Pos size = char2pixel(w,h) + Pos{2*margin, 2*margin};
+  // render base background
+  push_square_quad((float)offset.x, (float)offset.x+size.x, (float)offset.y, (float)offset.y+size.y, background);
+  offset.x += margin;
+  offset.y += margin;
+
   // render background
   for (int y = 0; y < h; ++y) {
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
@@ -2623,7 +2661,7 @@ void Canvas::render(Pos offset) {
   const int text_offset_y = (int)(-G.font_height*4.0f/15.0f); // TODO: get this from truetype?
   array_resize(G.tmp_render_buffer, w*sizeof(Utf8char));
   for (int row = 0; row < h; ++row) {
-    Utf8char::to_string(&this->chars[row*w], w, G.tmp_render_buffer);
+    Utf8char::to_string(&chars[row*w], w, G.tmp_render_buffer);
     int y = char2pixely(row+1) + text_offset_y + offset.y;
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
       if (styles[row*w + x1].text_color == styles[row*w + x0].text_color && x1 < w)
@@ -2648,13 +2686,12 @@ int Pane::slot2pixely(int y) const {
 }
 
 int Pane::numchars_x() const {
-  return this->bounds.w / G.font_width + 1;
+  return (this->bounds.w - 2*this->margin) / G.font_width + 1;
 }
 
 int Pane::numchars_y() const {
-  return this->bounds.h / G.line_height + 1;
+  return (this->bounds.h - 2*this->margin) / G.line_height + 1;
 }
-
 
 #ifdef DEBUG
 static void test() {
@@ -2677,7 +2714,6 @@ int wmain(int argc, const wchar_t *argv[], wchar_t *[])
 int main(int argc, const char *argv[])
 #endif
 {
-
   state_init();
 
   /* open a buffer */
@@ -2689,14 +2725,17 @@ int main(int argc, const char *argv[])
       fprintf(stderr, "Could not open file %s: %s\n", filename, cman_strerror(errno));
       exit(1);
     }
-    if (!err)
-      status_message_set("loaded %s, %i lines", filename, G.main_pane.buffer->num_lines());
+    if (!err) {
+      printf("%s %i\n", filename, G.main_pane.buffer->lines.size);
+      status_message_set("loaded '%s', %i lines", (char*)filename, (int)G.main_pane.buffer->lines.size);
+    }
   }
 
   for (;;) {
 
     Utf8char input = {};
     SpecialKey special_key = KEY_NONE;
+    bool ctrl = false;
     for (SDL_Event event; SDL_PollEvent(&event);) {
 
       switch (event.type) {
@@ -2706,6 +2745,9 @@ int main(int argc, const char *argv[])
         break;
 
       case SDL_KEYDOWN:
+        if (event.key.keysym.mod & KMOD_CTRL)
+          ctrl = true;
+
         switch (event.key.keysym.sym) {
         case SDLK_ESCAPE:
           special_key = KEY_ESCAPE;
@@ -2737,6 +2779,34 @@ int main(int argc, const char *argv[])
         case SDLK_END:
           special_key = KEY_END;
           break;
+        case SDLK_a:
+        case SDLK_b:
+        case SDLK_c:
+        case SDLK_d:
+        case SDLK_e:
+        case SDLK_f:
+        case SDLK_g:
+        case SDLK_h:
+        case SDLK_i:
+        case SDLK_j:
+        case SDLK_k:
+        case SDLK_l:
+        case SDLK_m:
+        case SDLK_n:
+        case SDLK_o:
+        case SDLK_p:
+        case SDLK_q:
+        case SDLK_r:
+        case SDLK_s:
+        case SDLK_t:
+        case SDLK_u:
+        case SDLK_v:
+        case SDLK_w:
+        case SDLK_x:
+        case SDLK_y:
+        case SDLK_z:
+          input = (event.key.keysym.mod & KMOD_SHIFT) ? toupper(event.key.keysym.sym) : event.key.keysym.sym;
+          break;
         }
         break;
 
@@ -2751,7 +2821,7 @@ int main(int argc, const char *argv[])
 
     // handle input
     if (input.code[0] || special_key)
-      handle_input(input, special_key);
+      handle_input(input, special_key, ctrl);
 
     // boost marker when you move or change modes
     static Pos prev_pos;
@@ -2776,7 +2846,7 @@ int main(int argc, const char *argv[])
     else
       G.number_color = G.default_number_color;
     G.default_marker_background_color.tick();
-    G.marker_background_color.popped_color = G.default_marker_background_color.get();
+    G.marker_background_color.popped_color = G.default_marker_background_color.color;
 
     // render
     G.font_width = graphics_get_font_advance();
