@@ -89,6 +89,15 @@
   #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
   #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
   #define foreach(a) for (auto it = a; it < (a)+ARRAY_LEN(a); ++it)
+  #define findn_min_by(array, n, ptr, field) do { \
+        ptr = array; \
+        for (auto _it = array; _it < array + n; ++_it) { \
+          if (ptr->field < _it->field) { \
+            ptr = _it; \
+          } \
+        } \
+    } while (0)
+  #define find_min_by(array, ptr, field) findn_min_by(array, ARRAY_LEN(array), ptr, field)
   typedef unsigned int u32;
   STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
   static void array_push_str(Array<char> *a, const char *str) {
@@ -194,7 +203,8 @@ struct Pos {
     return x != p.x || y != p.y;
   }
 };
-Pos operator+(Pos a, Pos b) {
+
+static Pos operator+(Pos a, Pos b) {
   return {a.x+b.x, a.y+b.y};
 }
 
@@ -226,94 +236,49 @@ struct Buffer {
 
   int num_lines() const {return lines.size;}
 
-  String getslice(Pos p) {
-    return lines[p.y](p.x,-1);
-  }
-
+  String slice(Pos p, int len) {return lines[p.y](p.x,p.x+len); }
   Pos to_visual_pos(Pos p);
-
   void move_to_y(int y);
-
   void move_to_x(int x);
-
   void move_to(int x, int y);
-
   void move_to(Pos p);
-
-  void move_y(int dy);
-
+ void move_y(int dy);
   void move_x(int dx);
-
   void move(int dx, int dy);
-
-  void update();
-
+ void update();
   int find_r(char *str, int n, int stay);
-
   int find(String s, bool stay, Pos *pos);
-
-  int find_and_move(String s, bool stay);
-
+ int find_and_move(String s, bool stay);
   void insert_str(int x, int y, String s);
-
   void replace(int x0, int x1, int y, String s);
-
-  void remove_trailing_whitespace(int y);
-
+ void remove_trailing_whitespace(int y);
   void pretty_range(int y0, int y1);
-
   void pretty(int y);
-
-  void insert_char(Utf8char ch);
-
+ void insert_char(Utf8char ch);
   void delete_line_at(int y);
-
   void delete_line();
-
-  void remove_range(Pos a, Pos b);
-
+ void remove_range(Pos a, Pos b);
   void delete_char();
-
   void insert_tab();
-
-  int getindent(int y);
-
+ int getindent(int y);
   int indentdepth(int y, bool *has_statement);
-
   int autoindent(const int y);
-
-  int isempty();
-
+ int isempty();
   void push_line(const char *str);
-
   void insert_newline();
-
-  void insert_newline_below();
-
+ void insert_newline_below();
   void guess_tab_type();
-
   void goto_endline();
-
-  int begin_of_line(int y);
-
+ int begin_of_line(int y);
   void goto_beginline();
-
   void empty();
-
-  void truncate_to_n_lines(int n);
-
+ void truncate_to_n_lines(int n);
   int advance(int *x, int *y);
-
   int advance();
-
   int advance_r(int *x, int *y);
-
   int advance_r();
-
   char getchar(int x, int y);
-
   char getchar();
-
   int token_read(Pos *p, int y_end, Pos *start, Pos *end);
 
 };
@@ -841,61 +806,37 @@ static void mode_menu() {
   G.menu_buffer.empty();
 }
 
-struct DropdownMatch {
+struct FuzzyMatch {
   const char *str;
   float points;
 };
 
-static int dropdown_match_cmp(const void *aa, const void *bb) {
-  const DropdownMatch *a = (DropdownMatch*)aa, *b = (DropdownMatch*)bb;
+static int fuzzy_cmp(const void *aa, const void *bb) {
+  const FuzzyMatch *a = (FuzzyMatch*)aa, *b = (FuzzyMatch*)bb;
 
   if (a->points != b->points)
     return (int)(b->points - a->points + 0.5f);
   return strlen(a->str) - strlen(b->str);
 }
 
-static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
-  static DropdownMatch best_matches[DROPDOWN_SIZE];
-  Buffer &b = *active_pane->buffer;
+// returns number of found matches
+static int fuzzy_match(String string, Array<const char*> strings, FuzzyMatch result[], int max_results) {
+  int num_results = 0;
 
-  if (!G.dropdown_visible)
-    return;
+  for (int i = 0; i < strings.size; ++i) {
+    const char *identifier = strings[i];
 
-  int num_best_matches = 0;
-
-  Array<const char*> identifiers = b.identifiers;
-
-  /* this shouldn't happen.. but just to be safe */
-  if (G.dropdown_pos.y != b.pos.y) {
-    G.dropdown_visible = false;
-    return;
-  }
-
-  /* find matching identifiers */
-  // TODO: clean this up
-  String input_str = b.getslice(G.dropdown_pos);
-  int input_len = b.pos.x - G.dropdown_pos.x;
-  num_best_matches = 0;
-
-  for (int i = 0; i < identifiers.size; ++i) {
-    float points, gain;
-    const char *in, *in_end, *test, *test_end;
-    int test_len;
-    const char *identifier;
-
-    identifier = identifiers[i];
-
-    points = 0;
-    gain = 10;
-
-    test_len = strlen(identifier);
-    if (test_len < input_len)
+    const int test_len = strlen(identifier);
+    if (string.length > test_len)
       continue;
 
-    in = input_str.chars;
-    in_end = in + input_len;
-    test = identifier;
-    test_end = test + test_len;
+    const char *in = string.chars;
+    const char *in_end = in + string.length;
+    const char *test = identifier;
+    const char *test_end = test + test_len;
+
+    float points = 0;
+    float gain = 10;
 
     for (; in < in_end && test < test_end; ++test) {
       if (*in == *test) {
@@ -918,25 +859,39 @@ static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
 
     /* push match */
 
-    if (num_best_matches < DROPDOWN_SIZE) {
-      best_matches[num_best_matches].str = identifier;
-      best_matches[num_best_matches].points = points;
-      ++num_best_matches;
+    if (num_results < max_results) {
+      result[num_results].str = identifier;
+      result[num_results].points = points;
+      ++num_results;
     } else {
-      DropdownMatch *match;
-
       /* find worst match and replace */
-      match = best_matches;
-      for (int j = 1; j < DROPDOWN_SIZE; ++j)
-        if (best_matches[j].points < match->points)
-          match = best_matches+j;
-      match->str = identifier;
-      match->points = points;
+      FuzzyMatch *worst;
+      findn_min_by(result, num_results, worst, points);
+      worst->str = identifier;
+      worst->points = points;
     }
-
   }
 
-  qsort(best_matches, num_best_matches, sizeof(*best_matches), dropdown_match_cmp);
+  // qsort(result, num_results, sizeof(*result), fuzzy_cmp);
+  return num_results;
+}
+
+static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
+  static FuzzyMatch best_matches[DROPDOWN_SIZE];
+  Buffer &b = *active_pane->buffer;
+
+  if (!G.dropdown_visible)
+    return;
+
+  /* this shouldn't happen.. but just to be safe */
+  if (G.dropdown_pos.y != b.pos.y) {
+    G.dropdown_visible = false;
+    return;
+  }
+
+  /* find matching identifiers */
+  String input = b.slice(G.dropdown_pos, b.pos.x - G.dropdown_pos.x);
+  int num_best_matches = fuzzy_match(input, b.identifiers, best_matches, ARRAY_LEN(best_matches));
 
   G.dropdown_buffer.empty();
   for (int i = 0; i < num_best_matches; ++i) {
