@@ -1655,15 +1655,18 @@ int Buffer::find(String s, bool stay, Pos *pos) {
   y = pos->y;
 
   // first line
-  if (x < lines[y].length && lines[y].begins_with(x, s)) {
-    pos->x = x;
-    pos->y = y;
-    return 0;
+  if (x < lines[y].length) {
+    x = lines[y].find(x, s);
+    if (x != -1) {
+      pos->x = x;
+      pos->y = y;
+      return 0;
+    }
   }
 
   // following lines
-  for (; y < lines.size; ++y) {
-    x = lines[y].find(x, s);
+  for (++y; y < lines.size; ++y) {
+    x = lines[y].find(0, s);
     if (x != -1) {
       pos->x = x;
       pos->y = y;
