@@ -303,11 +303,13 @@ struct Buffer {
 };
 
 struct v2 {
-  int x,y;
+  int x;
+  int y;
 };
 
 struct Range {
-  Pos a,b;
+  Pos a;
+  Pos b;
 };
 union Rect {
   struct {
@@ -315,7 +317,10 @@ union Rect {
     Pos size;
   };
   struct {
-    int x,y,w,h;
+    int x;
+    int y;
+    int w;
+    int h;
   };
 };
 
@@ -1285,10 +1290,10 @@ static void render_dropdown(Pane *active_pane) {
   G.dropdown_pane.bounds.size += {G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
 
   // position pane
-  Pos p = active_pane->buffer->pos;
-  if (G.dropdown_backwards) --p.y;
-  else ++p.y;
+  Pos p = find_start_of_identifier(*active_pane->buffer);
   p = active_pane->buf2pixel(p);
+  if (G.dropdown_backwards) p.y -= G.line_height;
+  else p.y += G.line_height;
   if (G.dropdown_backwards)
     p.y -= G.dropdown_pane.bounds.h;
   G.dropdown_pane.bounds.p = p;
