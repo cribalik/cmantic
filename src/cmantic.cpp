@@ -68,17 +68,22 @@
   #if 0
     #define DEBUG
     #define IF_DEBUG(stmt) stmt
+    // replace malloc
+    #if 0
     static void* debug_malloc(unsigned long size, int line, const char *file) {
       struct Header {
         int line;
         const char *file;
       };
-      struct Header *p = malloc(sizeof(struct Header) + size);
+
+      struct Header *p = (Header*)malloc(sizeof(struct Header) + size);
       p->line = line;
       p->file = file;
+      printf("%s:%i malloc %lu\n", file, line, size);
       return (char*)p + sizeof(struct Header);
     }
     #define malloc(size) debug_malloc(size, __LINE__, __FILE__)
+    #endif
   #else
     #define IF_DEBUG(stmt)
   #endif
@@ -507,11 +512,6 @@ static void status_message_set(const char *fmt, ...) {
 
 /****** @TOKENIZER ******/
 
-static void tokenizer_push_token(Array<Array<TokenInfo>> &tokens, int x, int y, int token) {
-  tokens.reserve(y+1);
-  tokens[y].push({token, x});
-}
-
 static void tokenize(Buffer &b) {
   static Array<char> identifier_buffer;
   int x = 0, y = 0;
@@ -535,15 +535,16 @@ static void tokenize(Buffer &b) {
     /* identifier */
     char *row = b.lines[y].chars;
     int rowsize = b.lines[y].length;
-    if (isalpha(row[x]) || row[x] == '_') {
+    if (is_identifier_head(row[x])) {
       char *str;
 
       identifier_buffer.resize(0);
       /* TODO: predefined keywords */
-      tokenizer_push_token(b.tokens, x, y, TOKEN_IDENTIFIER);
+      b.tokens[y].push({TOKEN_IDENTIFIER, x});
 
-      for (; x < rowsize; ++x) {
-        if (!isalnum(row[x]) && row[x] != '_')
+      identifier_buffer.push(row[x]);
+      for (++x; x < rowsize; ++x) {
+        if (!is_identifier_tail(row[x]))
           break;
         identifier_buffer.push(row[x]);
       }
@@ -562,7 +563,7 @@ static void tokenize(Buffer &b) {
 
     /* number */
     else if (isdigit(row[x])) {
-      tokenizer_push_token(b.tokens, x, y, TOKEN_NUMBER);
+      b.tokens[y].push({x, TOKEN_NUMBER});
       for (; x < rowsize && isdigit(row[x]); ++x);
       if (b.getchar(x, y) == '.')
         for (; x < rowsize && isdigit(row[x]); ++x);
@@ -570,7 +571,7 @@ static void tokenize(Buffer &b) {
 
     /* single char token */
     else {
-      tokenizer_push_token(b.tokens, x, y, row[x]);
+      b.tokens[y].push({x, row[x]});
       if (b.advance(&x, &y))
         return;
     }
@@ -617,35 +618,32 @@ static int file_open(FILE **f, const char *filename, const char *mode) {
 /* grabs ownership of filename */
 static int buffer_from_file(const char *filename, Buffer *buffer_out) {
   Buffer buffer = {};
-  FILE* f;
 
   buffer.filename = filename;
+  FILE* f;
   if (file_open(&f, buffer.filename, "r"))
     return -1;
 
   /* get line count */
   int num_lines = 0;
-  {
-    char c;
-    while ((c = (char)fgetc(f)) != EOF)
-      num_lines += c == '\n';
-  }
+  for (char c; (c = fgetc(f)), !feof(f);)
+    num_lines += c == '\n';
   if (ferror(f))
     goto err;
 
+  printf("Number of lines: %i\n", num_lines)
   IF_DEBUG(status_message_set("File has %i rows", num_lines));
 
   if (num_lines > 0) {
-    buffer.lines.resize(num_lines);
-    for(int i = 0; i < num_lines; ++i)
-      buffer.lines[i] = {};
+    buffer.lines.resize(num_lines+1);
+    buffer.lines.zero();
 
     char c = 0;
     fseek(f, 0, SEEK_SET);
-    for (int i = 0; i < num_lines; ++i) {
+    for (int i = 0; i <= num_lines; ++i) {
       while (1) {
-        c = (char)fgetc(f);
-        if (c == EOF) {
+        c = fgetc(f);
+        if (feof(f)) {
           if (ferror(f))
             goto err;
           goto last_line;
@@ -656,7 +654,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
       }
     }
     last_line:;
-    assert(fgetc(f) == EOF);
+    assert(feof(f));
   } else {
     buffer.lines.push();
   }
@@ -877,10 +875,11 @@ static int fuzzy_match(String string, Array<const char*> strings, FuzzyMatch res
 static Pos find_start_of_identifier(Buffer &b) {
   Pos p = b.pos;
   b.advance_r(p);
-  while (is_identifier_head(b.getchar(p)))
+  while (is_identifier_tail(b.getchar(p)))
     if (b.advance_r(p))
       return p;
-  b.advance(p);
+  if (!is_identifier_head(b.getchar(p)))
+    b.advance(p);
   if (p.y != b.pos.y)
     p.y = b.pos.y,
     p.x = 0;

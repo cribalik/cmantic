@@ -60,6 +60,10 @@ struct Array {
     return data+size-1;
   }
 
+  void zero() {
+    memset(data, 0, sizeof(T) * size);
+  }
+
   void push(T val) {
     pushn(1);
     data[size-1] = val;
@@ -564,6 +568,8 @@ struct String {
 
           case 'i': append((long)va_arg(args, int)); break;
 
+          case 'u': append((long)va_arg(args, unsigned int)); break;
+
           case 's': append(va_arg(args, char*)); break;
 
           case '%': append('%'); break;
@@ -627,3 +633,4 @@ bool operator==(String a, String b) {
 }
 
 #endif /* UTIL_STRING */
+
