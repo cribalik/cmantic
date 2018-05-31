@@ -477,27 +477,6 @@ struct State {
 
 State G;
 
-/* returns the logical index located visually at x */
-static int from_visual_offset(Array<char> line, int x) {
-  int visual = 0;
-  int i;
-
-  if (!line) return 0;
-
-  for (i = 0; i < line.size; ++i) {
-    if (is_utf8_trail(line[i]))
-      continue;
-    ++visual;
-    if (line[i] == '\t')
-      visual += G.tab_width-1;
-
-    if (visual > x)
-      return i;
-  }
-
-  return i;
-}
-
 enum SpecialKey {
   KEY_NONE = 0,
   KEY_UNKNOWN = 257,
@@ -547,7 +526,7 @@ static void tokenize(Buffer &b) {
   for (;;) {
     /* whitespace */
     // TODO: @utf8
-    while (isspace(b.getchar(x, y).ansi()))
+    while (b.getchar(x, y).isspace())
       if (b.advance(&x, &y))
         return;
 
@@ -1540,7 +1519,7 @@ void Buffer::move_to_y(int y) {
 void Buffer::move_to_x(int x) {
   x = clamp(x, 0, lines[pos.y].length);
   pos.x = x;
-  ghost_x = x;
+  ghost_x = lines[pos.y].visual_offset(x, G.tab_width);
 }
 
 void Buffer::move_to(int x, int y) {
@@ -1561,27 +1540,17 @@ void Buffer::move_y(int dy) {
   else if (ghost_x == GHOST_BOL)
     pos.x = begin_of_line(pos.y);
   else
-    pos.x = lines[pos.y].visual_offset(ghost_x, G.tab_width);
+    pos.x = lines[pos.y].from_visual_offset(ghost_x, G.tab_width);
 }
 
 void Buffer::move_x(int dx) {
-  int w = lines[pos.y].length;
-
-  if (dx > 0) {
-    for (; dx > 0 && pos.x < w; --dx) {
-      ++pos.x;
-      while (pos.x < w && is_utf8_trail(lines[pos.y][pos.x]))
-        ++pos.x;
-    }
-  }
-  if (dx < 0) {
-    for (; dx < 0 && pos.x > 0; ++dx) {
-      --pos.x;
-      while (pos.x > 0 && is_utf8_trail(lines[pos.y][pos.x]))
-        --pos.x;
-    }
-  }
-  pos.x = clamp(pos.x, 0, w);
+  if (dx > 0)
+    for (; dx > 0; --dx)
+      pos.x = lines[pos.y].next(pos.x);
+  if (dx < 0)
+    for (; dx < 0; ++dx)
+      pos.x = lines[pos.y].prev(pos.x);
+  pos.x = clamp(pos.x, 0, lines[pos.y].length);
   ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
 }
 
@@ -2055,8 +2024,9 @@ void Buffer::truncate_to_n_lines(int n) {
 }
 
 int Buffer::advance(int *x, int *y) {
-  *x += 1;
-  if (*x > lines[*y].length) {
+  if (*x < lines[*y].length)
+    *x = lines[*y].next(*x);
+  else {
     *x = 0;
     *y += 1;
     if (*y >= lines.size) {
@@ -2076,13 +2046,14 @@ int Buffer::advance() {
   int err = advance(&pos.x, &pos.y);
   if (err)
     return err;
-  ghost_x = pos.x;
+  ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
 int Buffer::advance_r(Pos &p) {
-  p.x -= 1;
-  if (p.x < 0) {
+  if (p.x > 0)
+    p.x = lines[p.y].prev(p.x);
+  else {
     p.y -= 1;
     if (p.y < 0) {
       p.y = 0;
@@ -2098,7 +2069,7 @@ int Buffer::advance_r() {
   int err = advance_r(pos);
   if (err)
     return err;
-  ghost_x = pos.x;
+  ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
