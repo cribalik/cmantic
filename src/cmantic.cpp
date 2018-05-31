@@ -1,9 +1,5 @@
 /*
  * TODO:
- * HIGH:
- *   - refactor token_read to return a TokenResult struct
- *
- * TODO:
  *
  * Multiple cursors
  *
@@ -301,8 +297,13 @@ struct Buffer {
   Utf8char getchar(Pos p);
   Utf8char getchar(int x, int y);
   Utf8char getchar();
-  int token_read(Pos *p, int y_end, Pos *start, Pos *end);
 
+  struct TokenResult {
+    int tok;
+    Pos a;
+    Pos b;
+  };
+  TokenResult token_read(Pos *p, int y_end);
 };
 
 struct v2 {
@@ -1782,13 +1783,12 @@ int Buffer::indentdepth(int y, bool *has_statement) {
 
   bool first = true;
   while (1) {
-    Pos a,b;
-    int t = token_read(&p, y+1, &a, &b);
+    auto t = token_read(&p, y+1);
 
-    if (t == TOKEN_NULL)
+    if (t.tok == TOKEN_NULL)
       break;
 
-    switch (t) {
+    switch (t.tok) {
       case '{': ++depth; break;
       case '}': --depth; break;
       case '[': ++depth; break;
@@ -1796,8 +1796,8 @@ int Buffer::indentdepth(int y, bool *has_statement) {
       case '(': ++depth; break;
       case ')': --depth; break;
       case TOKEN_IDENTIFIER: {
-        String s = lines[y](a.x, b.x+1);
-        assert(b.y == a.y);
+        String s = lines[y](t.a.x, t.b.x+1);
+        assert(t.b.y == t.a.y);
         if (first && (
             s == "for" ||
             s == "if" ||
@@ -2082,24 +2082,22 @@ Utf8char Buffer::getchar() {
   return Utf8char::create(pos.x >= lines[pos.y].length ? '\n' : lines[pos.y][pos.x]);
 }
 
-int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
-  int token;
+Buffer::TokenResult Buffer::token_read(Pos *p, int y_end) {
+  TokenResult result = {};
   int x,y;
   x = p->x, y = p->y;
 
   for (;;) {
     if (y >= y_end || y >= lines.size) {
-      token = TOKEN_NULL;
+      result.tok = TOKEN_NULL;
       goto done;
     }
 
     // endline
     if (x >= lines[y].length) {
-      token = TOKEN_EOL;
-      if (start)
-        *start = {x,y};
-      if (end)
-        *end = {x,y};
+      result.tok = TOKEN_EOL;
+      result.a = {x,y};
+      result.b = {x,y};
       x = 0;
       ++y;
       goto done;
@@ -2114,12 +2112,10 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
 
     /* identifier */
     if (is_identifier_head(c)) {
-      token = TOKEN_IDENTIFIER;
-      if (start)
-        *start = {x, y};
+      result.tok = TOKEN_IDENTIFIER;
+      result.a = {x, y};
       while (x < lines[y].length) {
-        if (end)
-          *end = {x, y};
+        result.b = {x, y};
         c = lines[y][++x];
         if (!is_identifier_tail(c))
           break;
@@ -2129,16 +2125,14 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
 
     /* block comment */
     if (c == '/' && x+1 < lines[y].length && lines[y][x+1] == '*') {
-      token = TOKEN_BLOCK_COMMENT;
-      if (start)
-        *start = {x, y};
+      result.tok = TOKEN_BLOCK_COMMENT;
+      result.a = {x, y};
       x += 2;
       /* goto matching end block */
       for (;;) {
         if (y >= y_end || y >= lines.size) {
-          if (end)
-            *end = {x, y};
-          token = TOKEN_BLOCK_COMMENT_BEGIN;
+          result.b = {x, y};
+          result.tok = TOKEN_BLOCK_COMMENT_BEGIN;
           break;
         }
         if (x >= lines[y].length) {
@@ -2148,8 +2142,7 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
         }
         c = lines[y][x];
         if (c == '*' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-          if (end)
-            *end = {x+1, y};
+          result.b = {x+1, y};
           x += 2;
           break;
         }
@@ -2160,34 +2153,28 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
 
     /* end of block comment */
     if (c == '*' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-      token = TOKEN_BLOCK_COMMENT_END;
-      if (start)
-        *start = {x, y};
-      if (end)
-        *end = {x+1, y};
+      result.tok = TOKEN_BLOCK_COMMENT_END;
+      result.a = {x, y};
+      result.b = {x+1, y};
       x += 2;
       goto done;
     }
 
     /* line comment */
     if (c == '/' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-      token = TOKEN_LINE_COMMENT_BEGIN;
-      if (start)
-        *start = {x, y};
-      if (end)
-        *end = {x+1, y};
+      result.tok = TOKEN_LINE_COMMENT_BEGIN;
+      result.a = {x, y};
+      result.b = {x+1, y};
       x += 2;
       goto done;
     }
 
     /* number */
     if (IS_NUMBER_HEAD(c)) {
-      token = TOKEN_NUMBER;
-      if (start)
-        *start = {x, y};
+      result.tok = TOKEN_NUMBER;
+      result.a = {x, y};
       while (x < lines[y].length) {
-        if (end)
-          *end = {x, y};
+        result.b = {x, y};
         c = lines[y][++x];
         if (!IS_NUMBER_TAIL(c))
           break;
@@ -2197,16 +2184,14 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
       if (c == '.' && x+1 < lines[y].length && isdigit(lines[y][x+1])) {
         c = lines[y][++x];
         while (isdigit(c) && x < lines[y].length) {
-          if (end)
-            *end = {x, y};
+          result.b = {x, y};
           c = lines[y][++x];
         }
         if (x == lines[y].length)
           goto done;
       }
       while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < lines[y].length) {
-        if (end)
-          *end = {x, y};
+        result.b = {x, y};
         c = lines[y][++x];
       }
       goto done;
@@ -2215,15 +2200,13 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
     /* string */
     if (c == '"' || c == '\'') {
       char str_char = c;
-      token = TOKEN_STRING;
-      if (start)
-        *start = {x, y};
+      result.tok = TOKEN_STRING;
+      result.a = {x, y};
       ++x;
       for (;;) {
         if (x >= lines[y].length) {
-          token = TOKEN_STRING_BEGIN;
-          if (end)
-            *end = {x, y};
+          result.tok = TOKEN_STRING_BEGIN;
+          result.b = {x, y};
           ++y;
           x = 0;
           break;
@@ -2231,8 +2214,7 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
 
         c = lines[y][x];
         if (c == str_char) {
-          if (end)
-            *end = {x, y};
+          result.b = {x, y};
           ++x;
           break;
         }
@@ -2244,22 +2226,18 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
     /* operators */
     for (int i = 0; i < (int)ARRAY_LEN(operators); ++i) {
       if (lines[y].begins_with(x, operators[i])) {
-        token = TOKEN_OPERATOR;
-        if (start)
-          *start = {x,y};
-        if (end)
-          *end = {x+operators[i].length-1, y};
+        result.tok = TOKEN_OPERATOR;
+        result.a = {x,y};
+        result.b = {x+operators[i].length-1, y};
         x += operators[i].length;
         goto done;
       }
     }
 
     /* single char token */
-    token = c;
-    if (start)
-      *start = {x, y};
-    if (end)
-      *end = {x, y};
+    result.tok = c;
+    result.a = {x, y};
+    result.b = {x, y};
     ++x;
     goto done;
   }
@@ -2267,7 +2245,7 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
   done:
   p->x = x;
   p->y = y;
-  return token;
+  return result;
 }
 
 
@@ -2360,9 +2338,10 @@ void Pane::render(bool draw_gutter) {
   if (this->syntax_highlight) {
     Pos pos = {0, buf_y0};
     for (;;) {
-      Pos prev, next;
-
-      int token = b.token_read(&pos, buf_y1, &prev, &next);
+      Pos prev,next;
+      auto t = b.token_read(&pos, buf_y1);
+      prev = t.a;
+      next = t.b;
 
       check_token:
 
@@ -2370,9 +2349,9 @@ void Pane::render(bool draw_gutter) {
 
       Color highlighted_text_color = {};
 
-      if (token == TOKEN_NULL)
+      if (t.tok == TOKEN_NULL)
         break;
-      switch (token) {
+      switch (t.tok) {
 
         case TOKEN_NUMBER:
           do_render = true;
@@ -2396,14 +2375,13 @@ void Pane::render(bool draw_gutter) {
           prev = {buf_x0, buf_y0};
           break;
 
-        case TOKEN_LINE_COMMENT_BEGIN: {
+        case TOKEN_LINE_COMMENT_BEGIN:
           do_render = true;
           // just fast forward to the end of the line, no need to parse it
           pos = {0, prev.y+1};
           next = {b.lines[prev.y].length-1, prev.y};
           highlighted_text_color = G.comment_color;
           break;
-        }
 
         case TOKEN_STRING:
           do_render = true;
@@ -2434,11 +2412,10 @@ void Pane::render(bool draw_gutter) {
           // TODO: @utf8
           if (isspace(b.getchar(0, prev.y).ansi()))
             break;
-          Pos prev_tmp, next_tmp;
-          token = b.token_read(&pos, buf_y1, &prev_tmp, &next_tmp);
-          if (token != '(') {
-            prev = prev_tmp;
-            next = next_tmp;
+          t = b.token_read(&pos, buf_y1);
+          if (t.tok != '(') {
+            prev = t.a;
+            next = t.b;
             goto check_token;
           }
           highlighted_text_color = G.identifier_color;
