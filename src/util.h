@@ -1,5 +1,195 @@
-#ifndef CMANTIC_STRING
-#define CMANTIC_STRING
+
+/***************************************************************
+ ***************************************************************
+ *                                                            **
+ *                                                            **
+ *                           ARRAY                            **
+ *                                                            **
+ *                                                            **
+ ***************************************************************
+ ***************************************************************/
+
+
+
+
+
+#ifndef UTIL_ARRAY
+#define UTIL_ARRAY
+
+#ifndef ARRAY_INITIAL_SIZE
+  #define ARRAY_INITIAL_SIZE 4
+#endif
+
+#ifndef ARRAY_REALLOC
+  #include <stdlib.h>
+  #define ARRAY_REALLOC realloc
+#endif
+
+#ifndef ARRAY_FREE
+  #include <stdlib.h>
+  #define ARRAY_FREE free
+#endif
+
+template<class T>
+struct Array {
+	T *data;
+	int size,cap;
+
+	T* begin() {
+		return data;
+	}
+
+	T* end() {
+		return data + size;
+	}
+
+	const T* begin() const {
+		return data;
+	}
+
+	const T* end() const {
+		return data + size;
+	}
+
+	T& operator[](int i) {return data[i];}
+	const T& operator[](int i) const {return data[i];}
+	operator T*() {return data;}
+	operator const T*() const {return data;}
+
+	T* last() {
+		return data+size-1;
+	}
+
+	void push(T val) {
+		pushn(1);
+		data[size-1] = val;
+	}
+
+	void insertz(int i) {
+		if (i == size)
+			push(T());
+		else
+			insert(i, T());
+	}
+
+	void insert(int i, T value) {
+		pushn(1);
+		memmove(data+i+1, data+i, (size-i)*sizeof(T));
+		data[i] = value;
+	}
+
+	void resize(int newsize) {
+		if (newsize > size)
+			pushn(newsize-size);
+		size = newsize;
+	}
+
+	void reserve(int size) {
+		int oldsize = size;
+		if (size > size)
+			pushn(size-size);
+		size = oldsize;
+	}
+
+	void push(T *data, int n) {
+		pushn(n);
+		memmove(data+size-n, data, n*sizeof(T));
+	}
+
+	void remove(int i) {
+		data[i] = data[size-1];
+		--size;
+	}
+
+	void remove_slown(int i, int n) {
+		memmove(data+i, data+i+n, (size-i-n)*sizeof(T));
+		size -= n;
+	}
+
+	void remove_slow(int i) {
+		memmove(data+i, data+i+1, (size-i-1)*sizeof(T));
+		--size;
+	}
+
+	void insertn(int i, int n) {
+		pushn(n);
+		memmove(data+i+n, data+i, (size-i-n)*sizeof(T));
+	}
+
+	void push() {
+		pushn(1);
+		data[size-1] = T();
+	}
+
+	void inserta(int i, const T *data, int n) {
+		pushn(n);
+		memmove(data+i+n, data+i, (size-i-n)*sizeof(T));
+		memcpy(data+i, data, n*sizeof(T));
+	}
+
+	void copy_to(T *dest) {
+		memcpy(dest, data, size*sizeof(T));
+	}
+
+	T* pushn(int n) {
+		if (size+n >= cap) {
+			int newcap = cap ? cap*2 : 1;
+			while (newcap < size+n)
+				newcap *= 2;
+			data = (T*)ARRAY_REALLOC(data, newcap * sizeof(T));
+			cap = newcap;
+		}
+		size += n;
+		return data + size - n;
+	}
+
+	void pusha(T *data, int n) {
+		pushn(n);
+		memcpy(data+size-n, data, n*sizeof(T));
+	}
+
+	void free() {
+		if (data)
+			::ARRAY_FREE(data);
+		data = 0;
+		size = cap = 0;
+	}
+};
+
+#define array_find(a, ptr, expr) {for ((ptr) = (a).data; (ptr) < (a).data+(a).size; ++(ptr)) {if (expr) break;} if ((ptr) == (a).data+(a).size) {(ptr) = 0;}}
+#define array_foreach(a) for (auto it = (a).data; it < (a).data+(a).size; ++it)
+
+#endif
+
+
+
+
+
+
+
+
+
+
+
+
+/***************************************************************
+ ***************************************************************
+ *                                                            **
+ *                                                            **
+ *                           STRING                           **
+ *                                                            **
+ *                                                            **
+ ***************************************************************
+ ***************************************************************/
+
+
+
+
+
+
+
+#ifndef UTIL_STRING
+#define UTIL_STRING
 
 // A POD string, with overridable global allocator
 
@@ -389,4 +579,4 @@ bool operator==(String a, String b) {
 	return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
 }
 
-#endif
+#endif /* UTIL_STRING */

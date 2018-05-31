@@ -60,10 +60,9 @@
   #include <stdlib.h>
   #include <stdarg.h>
   #include <assert.h>
-  #include "array.hpp"
 
 #include "graphics.h"
-#include "cmantic_string.h"
+#include "util.h"
 
 // @debug
   #if 0
@@ -99,10 +98,12 @@
   #define find_min_by(array, ptr, field) findn_min_by(array, ARRAY_LEN(array), ptr, field)
   typedef unsigned int u32;
   STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
-  static void array_push_str(Array<char> *a, const char *str) {
+  #if 0
+  static void Array<char> array_push_str(const char *str) {
     for (; *str; ++str)
       array_push(*a, *str);
   }
+  #endif
 
   static void panic(const char *fmt = "", ...) {
     // term_reset_to_default_settings();
@@ -459,7 +460,6 @@ struct State {
 
   /* dropdown state */
   Pos dropdown_pos;
-  bool dropdown_backwards;
   bool dropdown_visible;
 
   /* goto state */
@@ -528,9 +528,9 @@ static void status_message_set(const char *fmt, ...) {
 
 /****** @TOKENIZER ******/
 
-static void tokenizer_push_token(Array<Array<TokenInfo>> *tokens, int x, int y, int token) {
-  array_reserve(*tokens, y+1);
-  array_push((*tokens)[y], {token, x});
+static void tokenizer_push_token(Array<Array<TokenInfo>> &tokens, int x, int y, int token) {
+  tokens.reserve(y+1);
+  tokens[y].push({token, x});
 }
 
 static void tokenize(Buffer &b) {
@@ -539,8 +539,8 @@ static void tokenize(Buffer &b) {
 
   /* reset old tokens */
   for (int i = 0; i < b.tokens.size; ++i)
-    array_free(b.tokens[i]);
-  array_resize(b.tokens, b.lines.size);
+    b.tokens[i].free();
+  b.tokens.resize(b.lines.size);
   for (int i = 0; i < b.tokens.size; ++i)
     b.tokens[i] = {};
 
@@ -559,31 +559,31 @@ static void tokenize(Buffer &b) {
     if (isalpha(row[x]) || row[x] == '_') {
       char *str;
 
-      array_resize(identifier_buffer, 0);
+      identifier_buffer.resize(0);
       /* TODO: predefined keywords */
-      tokenizer_push_token(&b.tokens, x, y, TOKEN_IDENTIFIER);
+      tokenizer_push_token(b.tokens, x, y, TOKEN_IDENTIFIER);
 
       for (; x < rowsize; ++x) {
         if (!isalnum(row[x]) && row[x] != '_')
           break;
-        array_push(identifier_buffer, row[x]);
+        identifier_buffer.push(row[x]);
       }
-      array_push(identifier_buffer, '\0');
+      identifier_buffer.push('\0');
       /* check if identifier already exists */
       for (int i = 0; i < b.identifiers.size; ++i)
         if (strcmp(identifier_buffer, b.identifiers[i]) == 0)
           goto identifier_done;
 
       str = (char*)malloc(identifier_buffer.size);
-      array_copy(identifier_buffer, str);
-      array_push(b.identifiers, (const char*)str);
+      identifier_buffer.copy_to(str);
+      b.identifiers.push((const char*)str);
 
       identifier_done:;
     }
 
     /* number */
     else if (isdigit(row[x])) {
-      tokenizer_push_token(&b.tokens, x, y, TOKEN_NUMBER);
+      tokenizer_push_token(b.tokens, x, y, TOKEN_NUMBER);
       for (; x < rowsize && isdigit(row[x]); ++x);
       if (b.getchar(x, y) == '.')
         for (; x < rowsize && isdigit(row[x]); ++x);
@@ -591,7 +591,7 @@ static void tokenize(Buffer &b) {
 
     /* single char token */
     else {
-      tokenizer_push_token(&b.tokens, x, y, row[x]);
+      tokenizer_push_token(b.tokens, x, y, row[x]);
       if (b.advance(&x, &y))
         return;
     }
@@ -657,7 +657,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
   IF_DEBUG(status_message_set("File has %i rows", num_lines));
 
   if (num_lines > 0) {
-    array_resize(buffer.lines, num_lines);
+    buffer.lines.resize(num_lines);
     for(int i = 0; i < num_lines; ++i)
       buffer.lines[i] = {};
 
@@ -679,7 +679,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
     last_line:;
     assert(fgetc(f) == EOF);
   } else {
-    array_pushz(buffer.lines);
+    buffer.lines.push();
   }
 
   tokenize(buffer);
@@ -693,7 +693,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
   err:
   for (int i = 0; i < buffer.lines.size; ++i)
     buffer[i].free();
-  array_free(buffer.lines);
+  buffer.lines.free();
   fclose(f);
 
   return -1;
@@ -703,7 +703,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
 static const char* cman_strerror(int e) {
   #ifdef OS_WINDOWS
     static char buf[128];
-    strerror_s(buf, sizeof(buf), e);
+    strerror_s(buf.push(sizeof(buf), e);
     return buf;
   #else
     return strerror(e);
@@ -901,18 +901,14 @@ static Pos find_start_of_identifier(Buffer &b) {
   while (is_identifier_head(b.getchar(p)))
     if (b.advance_r(p))
       return p;
-  // printf("%i %i - ", p.x, p.y);
   b.advance(p);
   if (p.y != b.pos.y)
     p.y = b.pos.y,
     p.x = 0;
-  // printf("%i %i - ", p.x, p.y);
-  // b.advance(p);
-  // printf("%i %i\n", p.x, p.y);
   return p;
 }
 
-static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
+static void fill_dropdown_buffer(Pane *active_pane) {
   static FuzzyMatch best_matches[DROPDOWN_SIZE];
   Buffer &b = *active_pane->buffer;
 
@@ -925,23 +921,13 @@ static void fill_dropdown_buffer(Pane *active_pane, bool grow_upwards) {
   G.dropdown_pos = p;
 
   String input = b.slice({p.x, b.pos.y}, b.pos.x - p.x);
-  printf("%i: %.*s\n", input.length, input.length, input.chars);
   int num_best_matches = fuzzy_match(input, b.identifiers, best_matches, ARRAY_LEN(best_matches));
 
   const int y = G.dropdown_buffer.pos.y;
   G.dropdown_buffer.empty();
-  for (int i = 0; i < num_best_matches; ++i) {
-    int which = grow_upwards ? num_best_matches-1-i : i;
-    G.dropdown_buffer.push_line(best_matches[which].str);
-  }
+  for (int i = 0; i < num_best_matches; ++i)
+    G.dropdown_buffer.push_line(best_matches[i].str);
   G.dropdown_buffer.move_to_y(y);
-}
-
-static int dropdown_get_first_line() {
-  if (G.dropdown_backwards)
-    return G.dropdown_buffer.num_lines()-1;
-  else
-    return 0;
 }
 
 static void dropdown_autocomplete(Buffer &b) {
@@ -1252,7 +1238,7 @@ static void state_init() {
   G.selected_pane = &G.main_pane;
 
   G.menu_buffer.identifiers = {};
-  array_pushn(G.menu_buffer.identifiers, (int)ARRAY_LEN(menu_options));
+  G.menu_buffer.identifiers.pushn((int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
     G.menu_buffer.identifiers[i] = menu_options[i].name;
 }
@@ -1277,26 +1263,27 @@ static void render_dropdown(Pane *active_pane) {
   if (!G.dropdown_visible)
     return;
 
-  G.dropdown_backwards = active_pane == &G.bottom_pane;
-  fill_dropdown_buffer(active_pane, G.dropdown_backwards);
+  fill_dropdown_buffer(active_pane);
 
   // resize dropdown pane
   int max_width = 0;
-  for (int i = 0; i < G.dropdown_buffer.lines.size; ++i)
-    max_width = max(max_width, G.dropdown_buffer.lines[i].length);
-  G.dropdown_pane.bounds.size = char2pixel(max_width, G.dropdown_buffer.lines.size-1);
-  G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
-  // add margin
-  G.dropdown_pane.bounds.size += {G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
+  for (String s : G.dropdown_buffer.lines)
+    max_width = max(max_width, s.length);
+
+  G.dropdown_pane.bounds.size =
+    char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
 
   // position pane
   Pos p = find_start_of_identifier(*active_pane->buffer);
   p = active_pane->buf2pixel(p);
-  if (G.dropdown_backwards) p.y -= G.line_height;
-  else p.y += G.line_height;
-  if (G.dropdown_backwards)
-    p.y -= G.dropdown_pane.bounds.h;
+  p.y += G.line_height;
   G.dropdown_pane.bounds.p = p;
+
+  // move it up if it would go outside the screen
+  if (G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h > G.win_height)
+    G.dropdown_pane.bounds.y -= G.dropdown_pane.bounds.h + 2*G.line_height;
+
+  G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
 
   if (G.dropdown_visible && !G.dropdown_buffer.isempty())
     G.dropdown_pane.render_as_menu(0);
@@ -1391,10 +1378,8 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     G.search_failed = buffer.find_and_move(search, true);
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
-      if (G.dropdown_visible) {
-        dropdown_get_first_line();
+      if (G.dropdown_visible)
         G.search_failed = buffer.find_and_move(search, true);
-      }
       if (G.search_failed) {
         buffer.pos = G.search_begin_pos;
         status_message_set("'{}' not found", G.search_buffer[0]);
@@ -1738,7 +1723,7 @@ void Buffer::delete_line_at(int y) {
   lines[y].free();
   if (lines.size == 1)
     return;
-  array_remove_slow(lines, y);
+  lines.remove_slow(y);
 }
 
 void Buffer::delete_line() {
@@ -1935,7 +1920,7 @@ void Buffer::push_line(const char *str) {
   modified = 1;
   int y = lines.size;
   if (!isempty())
-    array_pushz(lines);
+    lines.push();
   else
     y = 0;
   lines[y] += str;
@@ -1944,7 +1929,7 @@ void Buffer::push_line(const char *str) {
 void Buffer::insert_newline() {
   modified = 1;
 
-  array_insertz(lines, pos.y+1);
+  lines.insertz(pos.y+1);
   lines[pos.y+1] += lines[pos.y] + pos.x;
   lines[pos.y].length = pos.x;
 
@@ -1956,7 +1941,7 @@ void Buffer::insert_newline() {
 
 void Buffer::insert_newline_below() {
   modified = 1;
-  array_insertz(lines, pos.y+1);
+  lines.insertz(pos.y+1);
   move_y(1);
   move_x(autoindent(pos.y));
 }
@@ -2050,7 +2035,7 @@ void Buffer::empty() {
     lines[i].free();
 
   lines.size = 0;
-  array_pushz(lines);
+  lines.push();
   pos.x = pos.y = 0;
 }
 
