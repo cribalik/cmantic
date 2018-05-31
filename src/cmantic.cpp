@@ -1,15 +1,11 @@
 /*
  * TODO:
  * HIGH:
- *   - refactor buffer_getchar to return Utf8char
- *   - refactor buffer_advance to be utf8 awar
- *   - Revert back to the old way of tokenizing comments
  *   - refactor token_read to return a TokenResult struct
  *
  * TODO:
  *
  * Multiple cursors
- * Crash on empty file
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -17,19 +13,19 @@
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
- * Move the terminal cursor to where our cursor is, to get tmux to behave better
- * Registers
- * Use 256 color
- * utf-8 support
- * Jumplist
- * Do DFS on autocompletion.
- * Colorize search results in view
+ * File system
  * Undo
  * Folding
+ * Multiuser editing
+ * Pane stack
+ * TODO stack
+ * copy-paste
+ * Jumplist
+ * Do DFS on autocompletion.
  *
  * load files
  * Fuzzy file finding
- * movement (word, parentheses, block)
+ * movement (parentheses, block, etc.)
  * actions (Delete, Yank, ...)
  * add folders
  */
@@ -176,16 +172,17 @@ bool operator==(char c, Utf8char uc) {
 }
 
 enum Token {
-  TOKEN_NULL = 0,
-  TOKEN_IDENTIFIER = -2,
-  TOKEN_NUMBER = -3,
-  TOKEN_STRING = -4,
-  TOKEN_EOL = -5,
-  TOKEN_STRING_BEGIN = -6,
-  TOKEN_BLOCK_COMMENT_BEGIN = -7,
-  TOKEN_BLOCK_COMMENT_END = -8,
-  TOKEN_LINE_COMMENT_BEGIN = -9,
-  TOKEN_OPERATOR = -10,
+  TOKEN_NULL                =  0,
+  TOKEN_IDENTIFIER          = -2,
+  TOKEN_NUMBER              = -3,
+  TOKEN_STRING              = -4,
+  TOKEN_EOL                 = -5,
+  TOKEN_STRING_BEGIN        = -6,
+  TOKEN_BLOCK_COMMENT       = -7,
+  TOKEN_BLOCK_COMMENT_BEGIN = -8,
+  TOKEN_BLOCK_COMMENT_END   = -9,
+  TOKEN_LINE_COMMENT_BEGIN  = -10,
+  TOKEN_OPERATOR            = -11,
 };
 
 struct TokenInfo {
@@ -2130,15 +2127,35 @@ int Buffer::token_read(Pos *p, int y_end, Pos *start, Pos *end) {
       goto done;
     }
 
-    /* start of block comment */
+    /* block comment */
     if (c == '/' && x+1 < lines[y].length && lines[y][x+1] == '*') {
-      token = TOKEN_BLOCK_COMMENT_BEGIN;
+      token = TOKEN_BLOCK_COMMENT;
       if (start)
         *start = {x, y};
-      if (end)
-        *end = {x+1, y};
       x += 2;
-      goto done;
+      /* goto matching end block */
+      for (;;) {
+        if (y >= y_end || y >= lines.size) {
+          if (end)
+            *end = {x, y};
+          token = TOKEN_BLOCK_COMMENT_BEGIN;
+          break;
+        }
+        if (x >= lines[y].length) {
+          ++y;
+          x = 0;
+          continue;
+        }
+        c = lines[y][x];
+        if (c == '*' && x+1 < lines[y].length && lines[y][x+1] == '/') {
+          if (end)
+            *end = {x+1, y};
+          x += 2;
+          break;
+        }
+        ++x;
+      }
+      break;
     }
 
     /* end of block comment */
@@ -2311,7 +2328,6 @@ void Pane::render_as_menu(int selected) {
   canvas.free();
   render_quads();
   render_text();
-
 }
 
 void Pane::render(bool draw_gutter) {
@@ -2363,8 +2379,19 @@ void Pane::render(bool draw_gutter) {
           highlighted_text_color = G.number_color;
           break;
 
+        case TOKEN_BLOCK_COMMENT_BEGIN:
+          do_render = 1;
+          highlighted_text_color = G.comment_color;
+          next = {b.lines[buf_y1-1].length, buf_y1-1};
+          break;
+
+        case TOKEN_BLOCK_COMMENT:
+          do_render = 1;
+          highlighted_text_color = G.comment_color;
+          break;
+
         case TOKEN_BLOCK_COMMENT_END:
-          do_render = true;
+          do_render = 1;
           highlighted_text_color = G.comment_color;
           prev = {buf_x0, buf_y0};
           break;
@@ -2374,16 +2401,6 @@ void Pane::render(bool draw_gutter) {
           // just fast forward to the end of the line, no need to parse it
           pos = {0, prev.y+1};
           next = {b.lines[prev.y].length-1, prev.y};
-          highlighted_text_color = G.comment_color;
-          break;
-        }
-
-        case TOKEN_BLOCK_COMMENT_BEGIN: {
-          do_render = true;
-          Pos start = prev;
-          while (token != TOKEN_BLOCK_COMMENT_END && token != TOKEN_NULL)
-            token = b.token_read(&pos, buf_y1, &prev, &next);
-          prev = start;
           highlighted_text_color = G.comment_color;
           break;
         }
