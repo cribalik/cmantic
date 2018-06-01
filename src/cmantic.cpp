@@ -356,6 +356,12 @@ struct Canvas {
 };
 
 struct Pane {
+  enum Type {
+    PANETYPE_NULL,
+    PANETYPE_EDIT,
+    PANETYPE_MENU,
+  };
+
   Rect bounds;
   const Color *background_color;
   const Color *highlight_background_color;
@@ -451,14 +457,19 @@ struct State {
   bool highlight_number;
 
   /* some editor state */
-  Pane main_pane,
-       menu_pane,
-       dropdown_pane,
-       bottom_pane;
-  Buffer menu_buffer,
-         search_buffer,
-         status_message_buffer,
-         dropdown_buffer;
+  Pane *center_pane;
+  Pane *bottom_pane;
+
+  Pane main_pane;
+  Pane search_pane;
+  Buffer search_buffer;
+  Pane menu_pane;
+  Buffer menu_buffer;
+  Pane status_message_pane;
+  Buffer status_message_buffer;
+  Pane dropdown_pane;
+  Buffer dropdown_buffer;
+
   Mode mode;
 
   Pane *selected_pane;
@@ -755,7 +766,8 @@ static void mode_search() {
   G.mode = MODE_SEARCH;
   G.search_begin_pos = G.main_pane.buffer->pos;
   G.search_failed = 0;
-  G.bottom_pane.buffer = &G.search_buffer;
+  G.bottom_pane = &G.search_pane;
+  puts("Using searc pane");
   G.search_buffer.empty();
 }
 
@@ -766,13 +778,13 @@ static void mode_highlight() {
 static void mode_goto() {
   G.mode = MODE_GOTO;
   G.goto_line_number = 0;
-  G.bottom_pane.buffer = &G.status_message_buffer;
+  G.bottom_pane = &G.status_message_pane;
   status_message_set("goto");
 }
 
 static void mode_delete() {
   G.mode = MODE_DELETE;
-  G.bottom_pane.buffer = &G.status_message_buffer;
+  G.bottom_pane = &G.status_message_pane;
   status_message_set("delete");
 }
 
@@ -781,7 +793,7 @@ static void mode_normal(bool set_message) {
     G.default_marker_background_color.jump();
 
   G.mode = MODE_NORMAL;
-  G.bottom_pane.buffer = &G.status_message_buffer;
+  G.bottom_pane = &G.status_message_pane;
 
   G.dropdown_visible = false;
 
@@ -793,7 +805,7 @@ static void mode_insert() {
   G.default_marker_background_color.jump();
 
   G.mode = MODE_INSERT;
-  G.bottom_pane.buffer = &G.status_message_buffer;
+  G.bottom_pane = &G.status_message_pane;
   G.dropdown_visible = false;
   G.insert_mode_begin_y = G.main_pane.buffer->pos.y;
   status_message_set("insert");
@@ -801,7 +813,7 @@ static void mode_insert() {
 
 static void mode_menu() {
   G.mode = MODE_MENU;
-  G.bottom_pane.buffer = &G.menu_buffer;
+  G.bottom_pane = &G.menu_pane;
   G.menu_buffer.empty();
 }
 
@@ -969,12 +981,10 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
       break;
 
     case CONTROL('j'):
-      puts("moving down");
       ++G.dropdown_buffer.pos.y;
       break;
 
     case CONTROL('k'):
-      puts("moving down");
       --G.dropdown_buffer.pos.y;
       break;
 
@@ -1101,6 +1111,7 @@ static Keyword keywords[] = {
   {"enum", KEYWORD_DECLARATION},
   {"typedef", KEYWORD_DECLARATION},
   {"template", KEYWORD_DECLARATION},
+  {"operator", KEYWORD_DECLARATION},
 
   // macro
 
@@ -1193,31 +1204,47 @@ static void state_init() {
   G.search_term_background_color.min = 0.4f;
   G.search_term_background_color.max = 1.0f;
 
-  /* init predefined buffers */
-  G.menu_buffer.empty();
-  G.search_buffer.empty();
-  G.status_message_buffer.empty();
-  G.dropdown_buffer.empty();
-
   // some pane settings
   G.main_pane.syntax_highlight = true;
   G.main_pane.background_color = &G.default_background_color;
   G.main_pane.text_color = &G.default_text_color;
   G.main_pane.highlight_background_color = &G.highlight_background_color.color;
 
-  G.bottom_pane.syntax_highlight = true;
-  G.bottom_pane.background_color = &COLOR_GREY;
-  G.bottom_pane.buffer = &G.status_message_buffer;
-  G.bottom_pane.text_color = &G.default_text_color;
-  G.bottom_pane.highlight_background_color = &G.default_highlight_background_color;
+  // search pane
+  G.search_buffer.empty();
+  G.search_pane.buffer = &G.search_buffer;
+  G.search_pane.syntax_highlight = true;
+  G.search_pane.background_color = &COLOR_LIGHT_GREY;
+  G.search_pane.text_color = &G.default_text_color;
+  G.search_pane.highlight_background_color = &G.default_highlight_background_color;
 
+  // menu pane
+  G.menu_buffer.empty();
+  G.menu_pane.buffer = &G.menu_buffer;
+  G.menu_pane.syntax_highlight = true;
+  G.menu_pane.background_color = &COLOR_GREY;
+  G.menu_pane.text_color = &G.default_text_color;
+  G.menu_pane.highlight_background_color = &G.default_highlight_background_color;
+
+  // dropdown pane
+  G.dropdown_buffer.empty();
+  G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.background_color = &COLOR_GREY;
   G.dropdown_pane.text_color = &COLOR_WHITE;
-  G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.margin = 5;
   G.dropdown_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
 
+  // status message pane
+  G.status_message_buffer.empty();
+  G.status_message_pane.buffer = &G.status_message_buffer;
+  G.status_message_pane.syntax_highlight = true;
+  G.status_message_pane.background_color = &COLOR_GREY;
+  G.status_message_pane.text_color = &G.default_text_color;
+  G.status_message_pane.highlight_background_color = &G.default_highlight_background_color;
+
   G.selected_pane = &G.main_pane;
+  G.center_pane = &G.main_pane;
+  G.bottom_pane = &G.status_message_pane;
 
   G.menu_buffer.identifiers = {};
   G.menu_buffer.identifiers.pushn((int)ARRAY_LEN(menu_options));
@@ -1316,7 +1343,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_MENU:
-    G.bottom_pane.buffer = &G.menu_buffer;
     if (special_key == KEY_RETURN) {
       String line;
 
@@ -1343,18 +1369,17 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     else if (special_key == KEY_ESCAPE)
       mode_normal(true);
     else
-      insert_default(&G.bottom_pane, special_key, input, ctrl);
+      insert_default(&G.menu_pane, special_key, input, ctrl);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
   case MODE_SEARCH: {
     String search;
 
-    G.bottom_pane.buffer = &G.search_buffer;
     if (special_key == KEY_ESCAPE)
       dropdown_autocomplete(G.search_buffer);
     else
-      insert_default(&G.bottom_pane, special_key, input, ctrl);
+      insert_default(&G.search_pane, special_key, input, ctrl);
 
     search = G.search_buffer.lines[0];
     G.search_failed = !buffer.find_and_move(search, true);
@@ -2928,15 +2953,15 @@ int main(int argc, const char *argv[])
 
     // reflow panes
     G.main_pane.bounds = {0, 0, G.win_width, G.win_height - G.line_height};
-    G.bottom_pane.bounds = {0, G.main_pane.bounds.y + G.main_pane.bounds.h, G.win_width, G.line_height};
+    G.bottom_pane->bounds = {0, G.main_pane.bounds.y + G.main_pane.bounds.h, G.win_width, G.line_height};
 
     G.main_pane.render(true);
-    G.bottom_pane.render(false);
+    G.bottom_pane->render(false);
 
     /* draw dropdown ? */
     G.search_buffer.identifiers = G.main_pane.buffer->identifiers;
     if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
-      render_dropdown(&G.bottom_pane);
+      render_dropdown(G.bottom_pane);
     else
       render_dropdown(&G.main_pane);
 
