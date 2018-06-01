@@ -56,8 +56,8 @@ struct Array {
   operator T*() {return data;}
   operator const T*() const {return data;}
 
-  T* last() {
-    return data+size-1;
+  T& last() {
+    return data[size-1];
   }
 
   void zero() {
@@ -380,11 +380,53 @@ struct String {
     return length == n && !memcmp(chars, str, n);
   }
 
-  int find(int offset, String s) const {
+  bool find(int offset, String s, int *result) const {
     void *p = memmem(s.chars, s.length, chars + offset, length - offset);
     if (!p)
-      return -1;
-    return (char*)p - chars;
+      return false;
+    *result = (char*)p - chars;
+    return true;
+  }
+
+  bool find(int offset, char c, int *result) const {
+    for (int i = offset; i < length; ++i)
+      if (chars[i] == c) {
+        *result = i;
+        return true;
+      }
+    return false;
+  }
+
+  bool find(char c, int *result) const {
+    return find(0, c, result);
+  }
+
+  bool find_r(String s, int *result) const {
+    // TODO: implement properly
+    char *p = (char*)memmem(s.chars, s.length, chars, length);
+    if (!p)
+      return false;
+
+    char *next;
+    while (1) {
+      if (p+1 >= chars+length)
+        break;
+      next = (char*)memmem(s.chars, s.length, p+1, chars + length - p - 1);
+      if (!next)
+        break;
+      p = next;
+    }
+    *result = (char*)p - chars;
+    return true;
+  }
+
+  bool find_r(char c, int *result) const {
+    for (int i = length-1; i >= 0; --i)
+      if (chars[i] == c) {
+        *result = i;
+        return true;
+      }
+    return false;
   }
 
   bool begins_with(int offset, String s) const {
@@ -554,7 +596,7 @@ struct String {
     length = 0;
   }
 
-  void formatv(const char* fmt, va_list args) {
+  void appendv(const char* fmt, va_list args) {
     for (; *fmt; ++fmt) {
       if (*fmt == '{' && fmt[1] == '}') {
         append(va_arg(args, String));
@@ -581,10 +623,10 @@ struct String {
     }
   }
 
-  void format(const char* fmt, ...) {
+  void appendf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    formatv(fmt, args);
+    appendv(fmt, args);
     va_end(args);
   }
 

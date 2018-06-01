@@ -87,7 +87,7 @@
   #define findn_min_by(array, n, ptr, field) do { \
         ptr = array; \
         for (auto _it = array; _it < array + n; ++_it) { \
-          if (ptr->field < _it->field) { \
+          if (_it->field < ptr->field) { \
             ptr = _it; \
           } \
         } \
@@ -262,9 +262,14 @@ struct Buffer {
   void move_x(int dx);
   void move(int dx, int dy);
   void update();
-  int find_r(char *str, int n, int stay);
-  int find(String s, bool stay, Pos *pos);
-  int find_and_move(String s, bool stay);
+  bool find_r(String s, int stay, Pos *pos);
+  bool find_r(char c, int stay, Pos *pos);
+  bool find(String s, bool stay, Pos *pos);
+  bool find(char c, bool stay, Pos *pos);
+  bool find_and_move(String s, bool stay);
+  bool find_and_move(char c, bool stay);
+  bool find_and_move_r(String s, bool stay);
+  bool find_and_move_r(char c, bool stay);
   void insert_str(int x, int y, String s);
   void replace(int x0, int x1, int y, String s);
   void remove_trailing_whitespace(int y);
@@ -505,7 +510,7 @@ static void status_message_set(const char *fmt, ...) {
 
   G.status_message_buffer.truncate_to_n_lines(1);
   G.status_message_buffer[0].clear();
-  G.status_message_buffer[0].formatv(fmt, args);
+  G.status_message_buffer[0].appendv(fmt, args);
 }
 
 /****** @TOKENIZER ******/
@@ -996,6 +1001,7 @@ static const Color COLOR_LIGHT_BLUE = rgb(79,195,247);
 static const Color COLOR_PURPLE = rgb(186,104,200);
 static const Color COLOR_BLUEGREY = {0.329411764706f, 0.43137254902f, 0.478431372549f};
 static const Color COLOR_GREY = {0.2f, 0.2f, 0.2f};
+static const Color COLOR_LIGHT_GREY = {0.3f, 0.3f, 0.3f};
 static const Color COLOR_BLACK = {0.1f, 0.1f, 0.1f};
 static const Color COLOR_WHITE = {0.9f, 0.9f, 0.9f};
 static const Color COLOR_BLUE = rgb(79,195,247);
@@ -1205,11 +1211,11 @@ static void state_init() {
   G.bottom_pane.text_color = &G.default_text_color;
   G.bottom_pane.highlight_background_color = &G.default_highlight_background_color;
 
-  G.dropdown_pane.background_color = &COLOR_DEEP_ORANGE;
-  G.dropdown_pane.text_color = &COLOR_BLACK;
+  G.dropdown_pane.background_color = &COLOR_GREY;
+  G.dropdown_pane.text_color = &COLOR_WHITE;
   G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.margin = 5;
-  G.dropdown_pane.highlight_background_color = &COLOR_ORANGE;
+  G.dropdown_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
 
   G.selected_pane = &G.main_pane;
 
@@ -1351,11 +1357,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       insert_default(&G.bottom_pane, special_key, input, ctrl);
 
     search = G.search_buffer.lines[0];
-    G.search_failed = buffer.find_and_move(search, true);
+    G.search_failed = !buffer.find_and_move(search, true);
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
       if (G.dropdown_visible)
-        G.search_failed = buffer.find_and_move(search, true);
+        G.search_failed = !buffer.find_and_move(search, true);
       if (G.search_failed) {
         buffer.pos = G.search_begin_pos;
         status_message_set("'{}' not found", G.search_buffer[0]);
@@ -1428,9 +1434,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
           break;
       break;}
     case 'q':
-      if (buffer.modified)
-        status_message_set("You have unsaved changes. If you really want to exit, use :quit");
-      else
+      // TODO: uncomment
+      // if (buffer.modified)
+        // status_message_set("You have unsaved changes. If you really want to exit, use :quit");
+      // else
         exit(0);
       break;
     case 'i':
@@ -1454,26 +1461,18 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case 'H':
       buffer.goto_beginline();
       break;
-    case 'n': {
+    case 'n':
       G.search_term_background_color.reset();
-      Pos p = buffer.pos;
-      if (buffer.find(G.search_buffer[0], false, &p)) {
+      if (!buffer.find_and_move(G.search_buffer[0], false))
         status_message_set("'{}' not found", G.search_buffer[0]);
-        break;
-      }
-      buffer.move_to(p);
       /*jumplist_push(prev);*/
-      break;}
-    case 'N': {
+      break;
+    case 'N':
       G.search_term_background_color.reset();
-
-      int err = buffer.find_r(G.search_buffer[0].chars, G.search_buffer[0].length, 0);
-      if (err) {
+      if (!buffer.find_and_move_r(G.search_buffer[0], false))
         status_message_set("'{}' not found", G.search_buffer[0]);
-        break;
-      }
       /*jumplist_push(prev);*/
-      break;}
+      break;
     case ' ':
       mode_search();
       break;
@@ -1486,6 +1485,12 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case 'o':
       buffer.insert_newline_below();
       mode_insert();
+      break;
+    case '{':
+      buffer.find_and_move_r('{', false);
+      break;
+    case '}':
+      buffer.find_and_move('}', false);
       break;
     case ':':
       mode_menu();
@@ -1562,77 +1567,151 @@ void Buffer::update() {
   move(0, 0);
 }
 
-int Buffer::find_r(char *str, int n, int stay) {
+bool Buffer::find_r(String s, int stay, Pos *p) {
   int x, y;
 
-  if (!n)
-    return 1;
+  if (!s)
+    return false;
 
-  x = pos.x;
+  x = p->x;
+  y = p->y;
   if (!stay)
     --x;
-  y = pos.y;
+  y = p->y;
 
-  for (;; --x) {
-    char *p;
-    if (y < 0)
-      return 1;
-    if (x < 0) {
-      --y;
-      if (y < 0)
-        return 1;
-      x = lines[y].length;
-      continue;
-    }
-
-    p = (char*)memmem(str, n, lines[y].chars, x);
-    if (!p)
-      continue;
-
-    x = p - lines[y].chars;
-    move_to(x, y);
-    return 0;
+  // first line
+  if (lines[y](0,x+1).find_r(s, &x)) {
+    p->x = x;
+    p->y = y;
+    return true;
   }
+
+  // following lines
+  for (--y; y >= 0; --y) {
+    if (lines[y].find_r(s, &x)) {
+      p->x = x;
+      p->y = y;
+      return true;
+    }
+  }
+  return false;
 }
 
-int Buffer::find(String s, bool stay, Pos *pos) {
+bool Buffer::find_r(char s, int stay, Pos *p) {
   int x, y;
-  if (!s)
-    return 1;
 
-  x = pos->x;
+  x = p->x;
+  y = p->y;
+  if (!stay)
+    --x;
+  y = p->y;
+
+  // first line
+  if (lines[y](0,x+1).find_r(s, &x)) {
+    p->x = x;
+    p->y = y;
+    return true;
+  }
+
+  // following lines
+  for (--y; y >= 0; --y) {
+    if (lines[y].find_r(s, &x)) {
+      p->x = x;
+      p->y = y;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Buffer::find(char s, bool stay, Pos *p) {
+  int x, y;
+
+  x = p->x;
   if (!stay)
     ++x;
-  y = pos->y;
+  y = p->y;
 
   // first line
   if (x < lines[y].length) {
-    x = lines[y].find(x, s);
-    if (x != -1) {
-      pos->x = x;
-      pos->y = y;
-      return 0;
+    if (lines[y].find(x, s, &x)) {
+      p->x = x;
+      p->y = y;
+      return true;
     }
   }
 
   // following lines
   for (++y; y < lines.size; ++y) {
-    x = lines[y].find(0, s);
-    if (x != -1) {
-      pos->x = x;
-      pos->y = y;
-      return 0;
+    if (lines[y].find(0, s, &x)) {
+      p->x = x;
+      p->y = y;
+      return true;
     }
   }
-  return 1;
+  return false;
 }
 
-int Buffer::find_and_move(String s, bool stay) {
+bool Buffer::find(String s, bool stay, Pos *p) {
+  int x, y;
+  if (!s)
+    return false;
+
+  x = p->x;
+  if (!stay)
+    ++x;
+  y = p->y;
+
+  // first line
+  if (x < lines[y].length) {
+    if (lines[y].find(x, s, &x)) {
+      p->x = x;
+      p->y = y;
+      return true;
+    }
+  }
+
+  // following lines
+  for (++y; y < lines.size; ++y) {
+    if (lines[y].find(0, s, &x)) {
+      p->x = x;
+      p->y = y;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Buffer::find_and_move_r(char c, bool stay) {
   Pos p = pos;
-  if (find(s, stay, &p))
-    return 1;
+  if (!find_r(c, stay, &p))
+    return false;
   move_to(p);
-  return 0;
+  return true;
+}
+
+bool Buffer::find_and_move_r(String s, bool stay) {
+  Pos p = pos;
+  if (!find_r(s, stay, &p))
+    return false;
+  move_to(p);
+  return true;
+}
+
+bool Buffer::find_and_move(char c, bool stay) {
+  Pos p = pos;
+  if (!find(c, stay, &p))
+    return false;
+  move_to(p);
+  return true;
+}
+
+bool Buffer::find_and_move(String s, bool stay) {
+  Pos p = pos;
+  if (!find(s, stay, &p))
+    return false;
+  move_to(p);
+  return true;
 }
 
 void Buffer::insert_str(int x, int y, String s) {
@@ -2456,7 +2535,7 @@ void Pane::render(bool draw_gutter) {
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
     Pos pos = {0, buf_y0};
-    while (!b.find(G.search_buffer.lines[0], false, &pos) && pos.y < buf_y1) {
+    while (b.find(G.search_buffer.lines[0], false, &pos) && pos.y < buf_y1) {
       canvas.fill_background({this->buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
       // canvas.fill_textcolor(this->gutter_width + x0, pos.y - buf_y0, x1-x0, 1, G.search_term_text_color);
     }
@@ -2610,7 +2689,7 @@ void Canvas::render_str_v(Pos p, const Color *text_color, const Color *backgroun
   if (p.x >= w)
     return;
   G.tmp_render_buffer.clear();
-  G.tmp_render_buffer.formatv(fmt, args);
+  G.tmp_render_buffer.appendv(fmt, args);
   render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer);
 }
 
