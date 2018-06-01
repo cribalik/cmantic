@@ -1187,14 +1187,13 @@ static void _filetree_fill(FileNode *base) {
   files.clear();
   if (!File::list_files(base->path, &files))
     goto err;
-  for (Path p : files) {
+  for (Path p : files)
     base->children += FileNode{FILETYPE_FILE, p};
-    _filetree_fill(&base->children.last());
-  }
 
   util_free(files);
   return;
   err:
+  printf("error on %s\n", base->path.string.chars);
   files.free_recursive();
 }
 
@@ -1208,9 +1207,30 @@ static void filetree_init() {
     _filetree_fill(&G.filetree);
   util_free(cwd);
 
-  for (FileNode n : G.filetree.children)
-    if (n.type == FILETYPE_FILE)
-      G.filetree_buffer.push_line(n.path.string);
+  for (FileNode n : G.filetree.children) {
+    if (n.type == FILETYPE_FILE) {
+      G.filetree_buffer.push_line(" * ");
+      G.filetree_buffer.lines.last() += n.path.string;
+    }
+    else if (n.type == FILETYPE_DIR) {
+      G.filetree_buffer.push_line(" - ");
+      G.filetree_buffer.lines.last() += n.path.string;
+      for (FileNode nn : n.children) {
+        if (nn.type == FILETYPE_FILE) {
+          G.filetree_buffer.push_line("   * ");
+          G.filetree_buffer.lines.last() += nn.path.string;
+          puts("its a deep file!");
+        }
+        else {
+          puts("its a deep dir!");
+          G.filetree_buffer.push_line("   - ");
+          G.filetree_buffer.lines.last() += nn.path.string;
+          G.filetree_buffer.lines.last() += " ...";
+          G.filetree_buffer.lines.last() += " ...";
+        }
+      }
+    }
+  }
 }
 
 static void state_init() {
