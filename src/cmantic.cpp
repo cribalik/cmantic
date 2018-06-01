@@ -457,10 +457,12 @@ struct State {
   Color identifier_color;
   Color default_search_term_text_color;
   Color search_term_text_color;
+  Color marker_inactive_color;
   PoppedColor marker_background_color;
   PoppedColor search_term_background_color;
   PoppedColor highlight_background_color;
   RotatingColor default_marker_background_color;
+  PoppedColor bottom_pane_highlight;
 
   /* highlighting flags */
   bool highlight_number;
@@ -776,6 +778,8 @@ static struct {const char *name; void(*fun)();} menu_options[] = {
 
 static void mode_search() {
   G.mode = MODE_SEARCH;
+  G.bottom_pane_highlight.reset();
+  G.selected_pane = &G.search_pane;
   G.search_begin_pos = G.center_pane->buffer->pos;
   G.search_failed = 0;
   G.bottom_pane = &G.search_pane;
@@ -806,6 +810,7 @@ static void mode_normal(bool set_message) {
 
   G.mode = MODE_NORMAL;
   G.bottom_pane = &G.status_message_pane;
+  G.selected_pane = &G.main_pane;
 
   G.dropdown_visible = false;
 
@@ -825,6 +830,8 @@ static void mode_insert() {
 
 static void mode_menu() {
   G.mode = MODE_MENU;
+  G.selected_pane = &G.menu_pane;
+  G.bottom_pane_highlight.reset();
   G.bottom_pane = &G.menu_pane;
   G.menu_buffer.empty();
 }
@@ -1157,19 +1164,33 @@ static Keyword keywords[] = {
 static void filetree_init() {
   G.filetree_buffer.empty();
 
-  Path cwd = File::cwd();
-  Array<Path> directories = File::list_files(cwd);
+  Path cwd = {};
+  Array<Path> directories = {};
+  if (!File::cwd(&cwd))
+    goto err;
+  if (!File::list_files(cwd, &directories))
+    goto err;
+
   for (Path p : directories) {
-    G.filetree_buffer.push_line(p.string);
-    Array<Path> directories = File::list_files(p);
+    G.filetree_buffer.push_line(" * ");
+    G.filetree_buffer.lines.last() += p.string;
+
+    Array<Path> directories;
+    if (!File::list_files(p, &directories))
+      goto erri;
+
     for (Path p : directories) {
-      G.filetree_buffer.push_line(" - ");
+      G.filetree_buffer.push_line("    - ");
       G.filetree_buffer.lines.last() += p.string;
     }
+
+    erri:
     directories.free_recursive();
   }
-  directories.free_recursive();
+
+  err:
   util_free(cwd);
+  util_free(directories);
 }
 
 static void state_init() {
@@ -1194,8 +1215,8 @@ static void state_init() {
 
   // @colors!
   G.default_text_color = COLOR_WHITE;
-  G.default_background_color = {0.16f, 0.16f, 0.16f};
-  G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f};
+  G.default_background_color = {0.16f, 0.16f, 0.16f, 1.0f};
+  G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f, 1.0f};
   G.default_gutter_style.background_color = G.default_background_color;
   G.default_number_color = G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
@@ -1203,6 +1224,7 @@ static void state_init() {
   G.comment_color = COLOR_BLUEGREY;
   G.identifier_color = COLOR_GREEN;
   G.default_search_term_text_color = G.search_term_text_color = COLOR_WHITE;
+  G.marker_inactive_color = COLOR_LIGHT_GREY;
 
   keyword_colors[KEYWORD_NONE]        = {};
   keyword_colors[KEYWORD_CONTROL]     = COLOR_DARK_BLUE;
@@ -1213,11 +1235,18 @@ static void state_init() {
   keyword_colors[KEYWORD_MACRO]       = COLOR_DEEP_ORANGE;
 
   G.highlight_background_color.base_color = G.default_background_color;
-  G.highlight_background_color.popped_color = COLOR_GREY;
+  G.highlight_background_color.popped_color = COLOR_WHITE;
   G.highlight_background_color.speed = 1.0f;
   G.highlight_background_color.cooldown = 1.0f;
-  G.highlight_background_color.min = 0.5f;
-  G.highlight_background_color.max = 1.0f;
+  G.highlight_background_color.min = 0.1f;
+  G.highlight_background_color.max = 0.18f;
+
+  G.bottom_pane_highlight.base_color = G.default_background_color;
+  G.bottom_pane_highlight.popped_color = COLOR_WHITE;
+  G.bottom_pane_highlight.speed = 1.3f;
+  G.bottom_pane_highlight.cooldown = 0.0f;
+  G.bottom_pane_highlight.min = 0.0f;
+  G.bottom_pane_highlight.max = 0.1f;
 
   G.default_marker_background_color.speed = 0.2f;
   G.default_marker_background_color.saturation = 0.8f;
@@ -1251,25 +1280,28 @@ static void state_init() {
   G.search_buffer.empty();
   G.search_pane.buffer = &G.search_buffer;
   G.search_pane.syntax_highlight = true;
-  G.search_pane.background_color = &COLOR_LIGHT_GREY;
+  G.search_pane.background_color = &G.bottom_pane_highlight.color;
   G.search_pane.text_color = &G.default_text_color;
-  G.search_pane.highlight_background_color = &G.default_highlight_background_color;
+  // G.search_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.search_pane.margin = 5;
 
   // menu pane
   G.menu_buffer.empty();
   G.menu_pane.buffer = &G.menu_buffer;
   G.menu_pane.syntax_highlight = true;
-  G.menu_pane.background_color = &COLOR_GREY;
+  G.menu_pane.background_color = &G.bottom_pane_highlight.color;
   G.menu_pane.text_color = &G.default_text_color;
-  G.menu_pane.highlight_background_color = &G.default_highlight_background_color;
+  // G.menu_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.menu_pane.margin = 5;
 
   // file tree pane
   G.filetree_buffer.empty();
   G.filetree_pane.buffer = &G.filetree_buffer;
   G.filetree_pane.syntax_highlight = false;
-  G.filetree_pane.background_color = &COLOR_LIGHT_GREY;
+  G.filetree_pane.background_color = &COLOR_GREY;
   G.filetree_pane.text_color = &G.default_text_color;
-  G.filetree_pane.highlight_background_color = &G.default_highlight_background_color;
+  G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.filetree_pane.margin = 10;
 
   // dropdown pane
   G.dropdown_buffer.empty();
@@ -1284,9 +1316,10 @@ static void state_init() {
   G.status_message_buffer.empty();
   G.status_message_pane.buffer = &G.status_message_buffer;
   G.status_message_pane.syntax_highlight = true;
-  G.status_message_pane.background_color = &COLOR_GREY;
+  G.status_message_pane.background_color = &G.bottom_pane_highlight.color;
   G.status_message_pane.text_color = &G.default_text_color;
-  G.status_message_pane.highlight_background_color = &G.default_highlight_background_color;
+  // G.status_message_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.status_message_pane.margin = 5;
 
   G.side_pane = &G.filetree_pane;
   G.center_pane = &G.main_pane;
@@ -2481,13 +2514,16 @@ void Pane::render() {
   canvas.init(this->numchars_x(), this->numchars_y());
   canvas.fill(Utf8char{' '});
   canvas.fill(Style{*this->text_color, *this->background_color});
+  canvas.background = *this->background_color;
+  canvas.draw_shadow = this->draw_shadow;
+  canvas.margin = this->margin;
 
   // draw each line 
   for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
     // gutter 
     canvas.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
     // text 
-    canvas.render_str(buf2char({buf_x0, buf_y}), this->text_color, 0, 0, -1, b.lines[buf_y]);
+    canvas.render_str(buf2char({buf_x0, buf_y}), this->text_color, NULL, this->gutter_width, -1, b.lines[buf_y]);
   }
 
   // syntax @highlighting
@@ -2557,7 +2593,7 @@ void Pane::render() {
         case TOKEN_IDENTIFIER: {
           // check for keywords
           for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-            if (b[prev.y].begins_with(prev.x, keywords[i].name)) {
+            if (b[prev.y](prev.x, next.x+1) == keywords[i].name) {
               highlighted_text_color = keyword_colors[keywords[i].type];
               goto done;
             }
@@ -2606,7 +2642,7 @@ void Pane::render() {
   }
 
   // highlight the line you're on
-  if (G.selected_pane == this)
+  if (G.selected_pane == this && this->highlight_background_color)
     canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, *this->highlight_background_color);
 
   // if there is a search term, highlight that as well
@@ -2621,6 +2657,9 @@ void Pane::render() {
   // draw marker
   if (G.selected_pane == this) {
     canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_background_color.color);
+    // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b.pos.y - buf_y0);
+  } else if (G.bottom_pane != this) {
+    canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_inactive_color);
     // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b.pos.y - buf_y0);
   }
 
@@ -3009,6 +3048,7 @@ int main(int argc, const char *argv[])
 
     G.marker_background_color.tick();
     G.highlight_background_color.tick();
+    G.bottom_pane_highlight.tick();
     G.search_term_background_color.tick();
 
     // highlight some colors
@@ -3030,12 +3070,13 @@ int main(int argc, const char *argv[])
     glClear(GL_COLOR_BUFFER_BIT);
 
     // reflow panes
-    int side_pane_width = 100;
-    G.side_pane->bounds = {0, 0, side_pane_width, G.win_height - G.line_height};
-    G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.line_height};
-    G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.line_height};
+    G.bottom_pane->margin = 3;
+    G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
+    G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
+    G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.bottom_pane->bounds.h};
+    G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
-    G.side_pane->render();
+    G.side_pane->render_as_menu(0);
     G.center_pane->render();
     G.bottom_pane->render();
 

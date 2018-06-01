@@ -1,11 +1,17 @@
 
+#ifdef OS_LINUX
+#include <errno.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <dirent.h>
+#endif
+
+
 struct Path;
 void util_free(Path &p);
 struct String;
 void util_free(String &s);
 
-// template<class T>
-// void free(T &t) {}
 
 /***************************************************************
 ***************************************************************
@@ -70,6 +76,10 @@ struct Array {
 
   void zero() {
     memset(data, 0, sizeof(T) * size);
+  }
+
+  void operator+=(T val) {
+    this->push(val);
   }
 
   void push(T val) {
@@ -689,7 +699,6 @@ void util_free(String &s) {
   s.length = s.cap = 0;
 }
 
-
 bool operator==(String a, const char *str) {
   int l = strlen(str);
   return a.length == l && !memcmp(a.chars, str, l);
@@ -731,17 +740,44 @@ struct PathList {
 };
 
 namespace File {
-  Path cwd() {
-    return {String::create("hello")};
+  #ifdef OS_LINUX
+
+  bool cwd(Path *p) {
+    String s = {};
+    s.extend(64);
+    while (1) {
+      char *ptr = getcwd(s.chars, s.length);
+      if (ptr == s.chars)
+        break;
+      else if (errno == ERANGE)
+        s.extend(64);
+      else
+        return false;
+    }
+    s.length = strlen(s.chars);
+    p->string = s;
+    return true;
   }
 
-  Array<Path> list_files(Path p) {
-    Array<Path> paths = {};
-    paths.push({String::create("dummyfile_a")});
-    paths.push({String::create("dummyfile_b")});
-    paths.push({String::create("dummyfile_c")});
-    return paths;
+  bool list_files(Path p, Array<Path> *result) {
+    *result = {};
+    DIR *dp = opendir(p.string.chars);
+    if (!dp)
+      return false;
+
+    for (struct dirent *ep; ep = readdir(dp), ep;) {
+      if (ep->d_name[0] == '.')
+        continue;
+      Path p = {};
+      p.string += ep->d_name;
+      result->push(p);
+    }
+
+    closedir(dp);
+    return true;
   }
+
+  #endif
 }
 
 #endif /* UTIL_FILE */
