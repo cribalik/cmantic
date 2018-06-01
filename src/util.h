@@ -1,4 +1,12 @@
 
+struct Path;
+void util_free(Path &p);
+struct String;
+void util_free(String &s);
+
+// template<class T>
+// void free(T &t) {}
+
 /***************************************************************
 ***************************************************************
 *                                                            **
@@ -152,13 +160,20 @@ struct Array {
     memcpy(data+size-n, data, n*sizeof(T));
   }
 
-  void free() {
-    if (data)
-      ::ARRAY_FREE(data);
-    data = 0;
-    size = cap = 0;
+  void free_recursive() {
+    for (int i = 0; i < size; ++i)
+      util_free(data[i]);
+    util_free(*this);
   }
 };
+
+template<class T>
+void util_free(Array<T> &a) {
+  if (a.data)
+    ::free(a.data);
+  a.data = 0;
+  a.size = a.cap = 0;
+}
 
 #define ARRAY_FIND(a, ptr, expr) {for ((ptr) = (a).data; (ptr) < (a).data+(a).size; ++(ptr)) {if (expr) break;} if ((ptr) == (a).data+(a).size) {(ptr) = 0;}}
 
@@ -301,6 +316,12 @@ struct String {
 
   char& operator[](int i) {return chars[i];}
   char operator[](int i) const {return chars[i];}
+
+  String copy() const {
+    String s = {(char*)malloc(length), length, cap};
+    memcpy(s.chars, chars, length);
+    return s;
+  }
 
   Utf8Iter begin() {
     return {chars, chars+length};
@@ -499,12 +520,6 @@ struct String {
     length -= n;
   }
 
-  void free() {
-    if (chars)
-      ::free(chars);
-    length = cap = 0;
-  }
-
   void append(String s) {
     (*this) += s;
   }
@@ -659,7 +674,21 @@ struct String {
   String operator+(int i) {
     return {chars+i, length-i};
   }
+
+  static String create(const char *str) {
+    String s = {};
+    s += str;
+    return s;
+  }
 };
+
+void util_free(String &s) {
+  if (s.chars)
+    ::free(s.chars);
+  s.chars = 0;
+  s.length = s.cap = 0;
+}
+
 
 bool operator==(String a, const char *str) {
   int l = strlen(str);
@@ -676,3 +705,43 @@ bool operator==(String a, String b) {
 
 #endif /* UTIL_STRING */
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                            FILE                            **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
+#ifndef UTIL_FILE
+#define UTIL_FILE
+
+struct Path {
+  String string;
+};
+
+void util_free(Path &p) {
+  util_free(p.string);
+}
+
+struct PathList {
+  Array<Path> paths;
+};
+
+namespace File {
+  Path cwd() {
+    return {String::create("hello")};
+  }
+
+  Array<Path> list_files(Path p) {
+    Array<Path> paths = {};
+    paths.push({String::create("dummyfile_a")});
+    paths.push({String::create("dummyfile_b")});
+    paths.push({String::create("dummyfile_c")});
+    return paths;
+  }
+}
+
+#endif /* UTIL_FILE */

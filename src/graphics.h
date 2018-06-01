@@ -19,7 +19,7 @@
 
 static int graphics_init(SDL_Window **window);
 struct Color {
-  float r,g,b;
+  float r,g,b,a;
 
   // returns
   // h [0,360]
@@ -31,6 +31,7 @@ struct Color {
   // s [0,1]
   // v [0,1]
   static Color from_hsl(float h, float s, float l);
+  static Color blend(Color back, Color front);
   static Color blend(Color back, Color front, float alpha);
 };
 
@@ -718,14 +719,14 @@ static int graphics_quad_init() {
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) 0);
-  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
+  glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
   gl_ok_or_die;
 
   // @shader
   const char *vertex_src = "#version 330 core\n" \
   "layout(location = 0) in vec2 pos;\n" \
-  "layout(location = 1) in vec3 color;\n" \
-  "out vec3 fcolor;\n" \
+  "layout(location = 1) in vec4 color;\n" \
+  "out vec4 fcolor;\n" \
   "uniform vec2 screensize;\n" \
   "void main() { \n" \
   "vec2 p = vec2(pos.x*2.0f/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);\n" \
@@ -735,9 +736,9 @@ static int graphics_quad_init() {
 
   const char *fragment_src =
   "#version 330 core\n" \
-  "in vec3 fcolor;\n" \
+  "in vec4 fcolor;\n" \
   "out vec4 color;\n" \
-  "void main () { color = vec4(fcolor, 1.0); }\n";
+  "void main () { color = fcolor; }\n";
 
   graphics_quad_state.shader = graphics_compile_shader(vertex_src, fragment_src);
   if (!graphics_quad_state.shader)
@@ -777,6 +778,10 @@ static void push_quad(Quad a, Quad b, Quad c, Quad d) {
   graphics_quad_state.num_vertices += 6;
 }
 
+static void push_square_quad(float x0, float x1, float y0, float y1, Color topleft, Color topright, Color bottomleft, Color bottomright) {
+  push_quad({x0,y0,topleft}, {x1,y0,topright}, {x1,y1,bottomright}, {x0,y1,bottomleft});
+}
+
 static void push_square_quad(float x0, float x1, float y0, float y1, Color c) {
   push_quad({x0,y0,c}, {x1,y0,c}, {x1,y1,c}, {x0,y1,c});
 }
@@ -812,14 +817,19 @@ Color Color::blend(Color back, Color front, float alpha) {
   Color result;
 
   if (alpha > 0.0001f) {
-    result.r = back.r*(1.0f-alpha) + front.r*alpha;
-    result.g = back.g*(1.0f-alpha) + front.g*alpha;
-    result.b = back.b*(1.0f-alpha) + front.b*alpha;
+    result.a = alpha + back.a*(1.0f-alpha);
+    result.r = (back.r*back.a*(1.0f-alpha) + front.r*alpha) / result.a;
+    result.g = (back.g*back.a*(1.0f-alpha) + front.g*alpha) / result.a;
+    result.b = (back.b*back.a*(1.0f-alpha) + front.b*alpha) / result.a;
   }
   else {
     result = back;
   }
   return result;
+}
+
+Color Color::blend(Color back, Color front) {
+  return blend(back, front, front.a);
 }
 
 Color Color::hsv() const {
@@ -851,7 +861,7 @@ Color Color::hsv() const {
     h += 360.0f;
 
   v = max;
-  return  {h,s,v};
+  return  {h,s,v,1.0f};
 }
 
 Color Color::from_hsl(float h, float s, float l) {
@@ -876,6 +886,7 @@ Color Color::from_hsl(float h, float s, float l) {
   result.r += m;
   result.g += m;
   result.b += m;
+  result.a = 1;
   return result;
 }
 
