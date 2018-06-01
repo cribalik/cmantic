@@ -383,6 +383,7 @@ struct Pane {
   int margin;
   bool draw_shadow;
 
+  // methods
   void render();
   void render_as_menu(int selected);
   int calc_top_visible_row() const;
@@ -430,6 +431,16 @@ struct RotatingColor {
   void jump() {
     hue = fmodf(hue + 180.0f, 360.0f);
   }
+};
+
+enum FileType {
+  FILETYPE_FILE,
+  FILETYPE_DIR
+};
+struct FileNode {
+  FileType type;
+  Path path;
+  Array<FileNode> children;
 };
 
 struct State {
@@ -503,6 +514,9 @@ struct State {
   /* search state */
   int search_failed;
   Pos search_begin_pos;
+
+  /* file tree state */
+  FileNode filetree;
 
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
@@ -1161,36 +1175,42 @@ static Keyword keywords[] = {
   {"goto", KEYWORD_CONTROL},
 };
 
+static void _filetree_fill(FileNode *base) {
+  Array<Path> files = {};
+  if (!File::list_directories(base->path, &files))
+    goto err;
+  for (Path p : files) {
+    base->children += FileNode{FILETYPE_DIR, p};
+    _filetree_fill(&base->children.last());
+  }
+
+  files.clear();
+  if (!File::list_files(base->path, &files))
+    goto err;
+  for (Path p : files) {
+    base->children += FileNode{FILETYPE_FILE, p};
+    _filetree_fill(&base->children.last());
+  }
+
+  util_free(files);
+  return;
+  err:
+  files.free_recursive();
+}
+
 static void filetree_init() {
   G.filetree_buffer.empty();
 
   Path cwd = {};
-  Array<Path> directories = {};
-  if (!File::cwd(&cwd))
-    goto err;
-  if (!File::list_files(cwd, &directories))
-    goto err;
+  G.filetree = FileNode{FILETYPE_DIR, (char*)"./"};
 
-  for (Path p : directories) {
-    G.filetree_buffer.push_line(" * ");
-    G.filetree_buffer.lines.last() += p.string;
-
-    Array<Path> directories;
-    if (!File::list_files(p, &directories))
-      goto erri;
-
-    for (Path p : directories) {
-      G.filetree_buffer.push_line("    - ");
-      G.filetree_buffer.lines.last() += p.string;
-    }
-
-    erri:
-    directories.free_recursive();
-  }
-
-  err:
+  if (File::cwd(&cwd))
+    _filetree_fill(&G.filetree);
   util_free(cwd);
-  util_free(directories);
+
+  for (FileNode n : G.filetree.children)
+    if (n.type == FILETYPE_FILE)
+      G.filetree_buffer.push_line(n.path.string);
 }
 
 static void state_init() {
@@ -2642,7 +2662,7 @@ void Pane::render() {
   }
 
   // highlight the line you're on
-  if (G.selected_pane == this && this->highlight_background_color)
+  if (this->highlight_background_color)
     canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, *this->highlight_background_color);
 
   // if there is a search term, highlight that as well
@@ -3039,7 +3059,7 @@ int main(int argc, const char *argv[])
     // boost marker when you move or change modes
     static Pos prev_pos;
     static Mode prev_mode;
-    if (prev_pos != G.center_pane->buffer->pos || prev_mode != G.mode) {
+    if (prev_pos != G.center_pane->buffer->pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
       G.marker_background_color.reset();
       G.highlight_background_color.reset();
     }
