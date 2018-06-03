@@ -10,11 +10,19 @@
   #include <sys/stat.h>
 #endif /* OS */
 
+#define CAST(type, val) (*(type*)(&(val)))
 
 struct Path;
-void util_free(Path &p);
+struct Slice;
 struct String;
+struct Slice;
+struct StringBuffer;
+void util_free(Path &p);
+void util_free(StringBuffer &s);
 void util_free(String &s);
+void util_free(Slice &s);
+template<class T> struct Array;
+template<class T> void util_free(Array<T> &);
 
 
 /***************************************************************
@@ -275,7 +283,7 @@ struct Utf8char {
   static Utf8char create(char c) {return Utf8char{(u32)c};}
 };
 
-static void *memmem(void *needle, int needle_len, void *haystack, int haystack_len) {
+static const void *memmem(const void *needle, int needle_len, const void *haystack, int haystack_len) {
   char *h, *hend;
   if (!needle_len || haystack_len < needle_len)
     return 0;
@@ -325,39 +333,73 @@ struct Utf8Iter {
   }
 };
 
-struct String;
+#define TO_STR(s) (*(Slice*)(&(s)))
+
+#define STRING_METHODS_DECLARATION \
+  operator bool() const {return length;} \
+  char& operator[](int i); \
+  const char& operator[](int i) const; \
+  Slice operator()(int a, int b) const; \
+  Utf8Iter begin() const; \
+  Utf8Iter end() const; \
+  Slice slice() const; \
+  int prev(int i) const; \
+  int next(int i) const; \
+  int from_visual_offset(int x, int tab_width) const; \
+  int visual_offset(int x, int tab_width) const; \
+  bool equals(const char *str, int n) const; \
+  bool find(int offset, Slice s, int *result) const; \
+  bool find(int offset, char c, int *result) const; \
+  bool find(char c, int *result) const; \
+  bool find_r(String s, int *result) const; \
+  bool find_r(Slice s, int *result) const; \
+  bool find_r(StringBuffer s, int *result) const; \
+  bool find_r(char c, int *result) const; \
+  bool begins_with(int offset, String s) const; \
+  bool begins_with(int offset, Slice s) const; \
+  bool begins_with(int offset, StringBuffer s) const; \
+  bool begins_with(int offset, const char *str, int n) const; \
+  bool begins_with(int offset, const char *str) const; \
+  String copy() const; \
+  Slice& str() const {return *(Slice*)this;}
+
+#define STRING_METHODS_IMPL(classname) \
+  char& classname::operator[](int i) {return chars[i];} \
+  const char& classname::operator[](int i) const {return chars[i];} \
+  Slice classname::operator()(int a, int b) const {return Slice::slice(chars,length,a,b);} \
+  Utf8Iter classname::begin() const {return {chars, chars+length};} \
+  Utf8Iter classname::end() const {return {};} \
+  Slice classname::slice() const {return Slice{chars, length};} \
+  int classname::prev(int i) const {return Slice::prev(chars, i);} \
+  int classname::next(int i) const {return Slice::next(chars, length, i);} \
+  int classname::from_visual_offset(int x, int tab_width) const {return Slice::from_visual_offset(chars, length, x, tab_width);} \
+  int classname::visual_offset(int x, int tab_width) const {return Slice::visual_offset(chars, length, x, tab_width);} \
+  bool classname::equals(const char *str, int n) const {return Slice::equals(chars, length, str, n);} \
+  bool classname::find(int offset, Slice s, int *result) const {return Slice::find(chars, length, offset, s, result);} \
+  bool classname::find(int offset, char c, int *result) const {return Slice::find(chars, length, offset, c, result);} \
+  bool classname::find(char c, int *result) const {return Slice::find(chars, length, c, result);} \
+  bool classname::find_r(String s, int *result) const {return Slice::find_r(s.chars, s.length, TO_STR(s), result);} \
+  bool classname::find_r(Slice s, int *result) const {return Slice::find_r(s.chars, s.length, TO_STR(s), result);} \
+  bool classname::find_r(StringBuffer s, int *result) const {return Slice::find_r(s.chars, s.length, TO_STR(s), result);} \
+  bool classname::find_r(char c, int *result) const {return Slice::find_r(chars, length, c, result);} \
+  bool classname::begins_with(int offset, String s) const {return Slice::begins_with(s.chars, s.length, offset, TO_STR(s));} \
+  bool classname::begins_with(int offset, Slice s) const {return Slice::begins_with(s.chars, s.length, offset, TO_STR(s));} \
+  bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(s.chars, s.length, offset, TO_STR(s));} \
+  bool classname::begins_with(int offset, const char *str, int n) const {return Slice::begins_with(chars, length, offset, str, n);} \
+  bool classname::begins_with(int offset, const char *str) const {return Slice::begins_with(chars, length, offset, str);} \
+  String classname::copy() const {return Slice::copy(chars, length);};
+
+// A non-owning string
+
 struct Slice {
   char *chars;
   int length;
 
-  char& operator[](int i) {return chars[i];}
-  char operator[](int i) const {return chars[i];}
+  static Slice slice(const char *str, int len, int a, int b);
 
-  operator bool() const {return length;}
+  static String copy(const char *str, int len);
 
-  Utf8Iter begin() const {
-    return {chars, chars+length};
-  }
-
-  Utf8Iter end() const {
-    return {};
-  }
-
-  // String copy() const {
-  //   Slice s = {};
-  //   s.chars = (char*)malloc(length);
-  //   s.length = length;
-  //   memcpy(s.chars, chars, length);
-  //   return s;
-  // }
-
-  Slice operator()(int a, int b) const {
-    if (b < 0)
-      b = length+b+1;
-    return {chars+a, b-a};
-  }
-  
-  int prev(int i) const {
+  static int prev(const char *chars, int i) {
     for (--i;; --i) {
       if (i < 0)
         return 0;
@@ -367,7 +409,7 @@ struct Slice {
     };
   }
 
-  int next(int i) const {
+  static int next(const char *chars, int length, int i) {
     for (++i;; ++i) {
       if (i >= length)
         return length;
@@ -378,7 +420,7 @@ struct Slice {
   }
 
   /* returns the logical index located visually at x */
-  int from_visual_offset(int x, int tab_width) {
+  static int from_visual_offset(const char *chars, int length, int x, int tab_width) {
     int visual = 0;
     int i;
 
@@ -398,7 +440,7 @@ struct Slice {
     return i;
   }
 
-  int visual_offset(int x, int tab_width) const {
+  static int visual_offset(const char *chars, int length, int x, int tab_width) {
     if (!chars)
       return 0;
 
@@ -417,19 +459,19 @@ struct Slice {
     return result;
   }
 
-  bool equals(const char *str, int n) const {
+  static bool equals(const char *chars, int length, const char *str, int n) {
     return length == n && !memcmp(chars, str, n);
   }
 
-  bool find(int offset, const Slice &s, int *result) const {
-    void *p = memmem(s.chars, s.length, chars + offset, length - offset);
+  static bool find(const char *chars, int length, int offset, Slice &s, int *result) {
+    const void *p = memmem(s.chars, s.length, chars + offset, length - offset);
     if (!p)
       return false;
     *result = (char*)p - chars;
     return true;
   }
 
-  bool find(int offset, char c, int *result) const {
+  static bool find(const char *chars, int length, int offset, char c, int *result) {
     for (int i = offset; i < length; ++i)
       if (chars[i] == c) {
         *result = i;
@@ -438,11 +480,11 @@ struct Slice {
     return false;
   }
 
-  bool find(char c, int *result) const {
-    return find(0, c, result);
+  static bool find(const char *chars, int length, char c, int *result) {
+    return find(chars, length, 0, c, result);
   }
 
-  bool find_r(const Slice& s, int *result) const {
+  static bool find_r(const char *chars, int length, Slice &s, int *result) {
     // TODO: implement properly
     char *p = (char*)memmem(s.chars, s.length, chars, length);
     if (!p)
@@ -461,7 +503,7 @@ struct Slice {
     return true;
   }
 
-  bool find_r(char c, int *result) const {
+  static bool find_r(const char *chars, int length, char c, int *result) {
     for (int i = length-1; i >= 0; --i)
       if (chars[i] == c) {
         *result = i;
@@ -470,40 +512,84 @@ struct Slice {
     return false;
   }
 
-  bool begins_with(int offset, const Slice& s) const {
+  static bool begins_with(const char *chars, int length, int offset, Slice &s) {
     return length - offset >= s.length && !memcmp(s.chars, chars+offset, s.length);
   }
 
-  bool begins_with(int offset, const char *str, int n) const {
+  static bool begins_with(const char *chars, int length, int offset, const char *str, int n) {
     return length - offset >= n && !memcmp(str, chars+offset, n);
   }
 
-  bool begins_with(int offset, const char *str) const {
+  static bool begins_with(const char *chars, int length, int offset, const char *str) {
     int n = strlen(str);
     return length - offset >= n && !memcmp(str, chars+offset, n);
   }
 
-  static Slice create(const char *str) {
-    return Slice{(char*)str, (int)strlen(str)};
+  static Slice create(char *s, int len) {
+    Slice sl;
+    sl.chars = s;
+    sl.length = len;
+    return sl;
   }
+
+  static Slice create(char *s) {
+    return Slice::create(s, strlen(s));
+  }
+
+  STRING_METHODS_DECLARATION
 };
 
-void util_free(Slice &s) {
+void util_free(Slice &) {}
+
+
+static bool operator==(Slice a, Slice b) {
+  return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
+}
+static bool operator==(Slice a, const char *str) {
+  int l = strlen(str);
+  return a.length == l && !memcmp(a.chars, str, l);
+}
+
+// A string that owns its data
+struct String {
+  char *chars;
+  int length;
+
+  static String create(const char *str, int len) {
+    String s;
+    s.length = len;
+    s.chars = (char*)malloc(s.length+1);
+    memcpy(s.chars, str, s.length);
+    s.chars[s.length] = '\0';
+    return s;
+  }
+
+  static String create(const char *str) {
+    return String::create(str, strlen(str));
+  }
+
+  static String create(Slice s);
+
+  STRING_METHODS_DECLARATION;
+};
+
+void util_free(String &s) {
+  if (s.chars)
+    free(s.chars);
   s.chars = 0;
   s.length = 0;
   return;
 }
 
-struct String : public Slice {
+struct StringBuffer {
+  char *chars;
+  int length;
   int cap;
 
-  String copy() const {
-    String s;
-    s.chars = (char*)malloc(length);
-    s.length = length;
-    s.cap = cap;
-    memcpy(s.chars, chars, length);
-    return s;
+  void resize(int l) {
+    if (l > length)
+      extend(l - length);
+    length = l;
   }
 
   void extend(int l) {
@@ -553,7 +639,7 @@ struct String : public Slice {
     insert(i, buf, n);
   }
 
-  void insert(int i, String s) {
+  void insert(int i, StringBuffer s) {
     insert(i, s.chars, s.length);
   }
 
@@ -562,12 +648,24 @@ struct String : public Slice {
     length -= n;
   }
 
+  void clear() {
+    length = 0;
+  }
+
   void append(String s) {
     (*this) += s;
   }
 
   void append(Utf8char c) {
     (*this) += c;
+  }
+
+  void append(Slice s) {
+    (*this) += s;
+  }
+
+  void append(StringBuffer s) {
+    this->append(TO_STR(s));
   }
 
   void append(const char *str, int n) {
@@ -649,14 +747,43 @@ struct String : public Slice {
     append(buf, n);
   }
 
-  void clear() {
-    length = 0;
+  void operator+=(char c) {
+    extend(1);
+    chars[length-1] = c;
   }
 
+  void operator+=(const char *str) {
+    if (!str)
+      return;
+
+    #if 0
+    for (; *str; ++str)
+      s += *str;
+    #else
+    int l = strlen(str);
+    extend(l);
+    memcpy(chars + length - l, str, l);
+    #endif
+  }
+
+  void operator+=(String s) {
+    (*this) += *(Slice*)&s;
+  }
+
+  void operator+=(StringBuffer b) {
+    (*this) += CAST(Slice, b);
+  }
+
+  void operator+=(Slice b) {
+    if (!b.length)
+      return;
+    extend(b.length);
+    memcpy(chars + length - b.length, b.chars, b.length);
+  }
   void appendv(const char* fmt, va_list args) {
     for (; *fmt; ++fmt) {
       if (*fmt == '{' && fmt[1] == '}') {
-        append(va_arg(args, String));
+        append(*va_arg(args, Slice*));
         ++fmt;
       }
       else if (*fmt != '%') {
@@ -687,68 +814,55 @@ struct String : public Slice {
     va_end(args);
   }
 
-  void operator+=(char c) {
-    extend(1);
-    chars[length-1] = c;
-  }
-
-  void operator+=(const char *str) {
-    if (!str)
-      return;
-
-    #if 0
-    for (; *str; ++str)
-      s += *str;
-    #else
-    int l = strlen(str);
-    extend(l);
-    memcpy(chars + length - l, str, l);
-    #endif
-  }
-
-  void operator+=(const Slice& b) {
-    if (!b.length)
-      return;
-    extend(b.length);
-    memcpy(chars + length - b.length, b.chars, b.length);
-  }
-
-  static String create(const char *str) {
-    String s = {};
+  static StringBuffer create(const char *str) {
+    StringBuffer s = {};
     s += str;
     return s;
   }
 
-  static String create(Slice sl) {
-    String s = {};
+  static StringBuffer create(Slice sl) {
+    StringBuffer s = {};
     s += sl;
     return s;
   }
+
+  STRING_METHODS_DECLARATION;
 };
 
-void util_free(String &s) {
+void util_free(StringBuffer &s) {
   if (s.chars)
-    ::free(s.chars);
+    free(s.chars);
   s.chars = 0;
   s.length = s.cap = 0;
 }
 
-bool operator==(const Slice& a, const Slice& b) {
-  return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
+String String::create(Slice s) {
+  return String::create(s.chars, s.length);
 }
 
-bool operator==(const Slice& a, const char *str) {
-  int l = strlen(str);
-  return a.length == l && !memcmp(a.chars, str, l);
+Slice Slice::slice(const char *str, int len, int a, int b) {
+  if (b < 0)
+    b = len + b + 1;
+  Slice s;
+  s.chars = (char*)(str+a);
+  s.length = b-a;
+  return s;
 }
 
-bool operator==(const char *str, const Slice& a) {
-  return a == str;
+String Slice::copy(const char *chars, int length) {
+  String s;
+  s.chars = (char*)malloc(length+1);
+  s.length = length;
+  memcpy(s.chars, chars, length);
+  s.chars[length] = '\0';
+  return s;
 }
 
-// bool operator==(String a, String b) {
-//   return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
-// }
+STRING_METHODS_IMPL(Slice)
+STRING_METHODS_IMPL(String)
+STRING_METHODS_IMPL(StringBuffer)
+
+
 
 #endif /* UTIL_STRING */
 
@@ -766,6 +880,8 @@ bool operator==(const char *str, const Slice& a) {
 #define UTIL_FILE
 
 struct Path {
+  StringBuffer string;
+
   #ifdef OS_LINUX
   static const char separator = '/';
   #else
@@ -778,33 +894,31 @@ struct Path {
     return p;
   };
 
-  String string;
-
   void push(const char *str) {
     string += Path::separator;
     string += str;
   }
 
-  void push(String file) {
+  void push(StringBuffer file) {
     string += Path::separator;
-    string += file;
+    string.append(file);
   }
 
   void pop() {
     int l;
     if (string.find_r(separator, &l))
-      string.length = l;
+      string.resize(l);
   }
 
   Path copy() const {
-    return Path{string.copy()};
+    return {StringBuffer::create(string.str())};
   }
 
   Slice name() const {
     int x;
     if (string.find_r(separator, &x))
       return string(x+1, -1);
-    return string;
+    return string.slice();
   }
 };
 
@@ -823,7 +937,7 @@ namespace File {
   #ifdef OS_LINUX
 
   bool cwd(Path *p) {
-    String s = {};
+    StringBuffer s = {};
     s.extend(64);
     while (1) {
       char *ptr = getcwd(s.chars, s.length);
@@ -856,7 +970,7 @@ namespace File {
     return FILETYPE_UNKNOWN;
   }
 
-  bool list_files(Path p, Array<String> *result) {
+  bool list_files(Path p, Array<StringBuffer> *result) {
     *result = {};
     DIR *dp = opendir(p.string.chars);
     if (!dp)
@@ -878,7 +992,7 @@ namespace File {
   #else
 
   bool cwd(Path *p) {
-    String s = {};
+    StringBuffer s = {};
     s.extend(64);
     int n;
     while (1) {
@@ -910,7 +1024,7 @@ namespace File {
     return FILETYPE_UNKNOWN;
   }
 
-  bool list_files(Path &directory, Array<String> *result) {
+  bool list_files(Path &directory, Array<StringBuffer> *result) {
     WIN32_FIND_DATA find_data;
     directory.push("*");
     HANDLE handle = FindFirstFile(directory.string.chars, &find_data);
@@ -922,7 +1036,7 @@ namespace File {
     do {
       if (find_data.cFileName[0] == '.')
         continue;
-      result->push(String::create(find_data.cFileName));
+      result->push(StringBuffer::create(find_data.cFileName));
     } while (FindNextFile(handle, &find_data) != 0);
 
     FindClose(handle);

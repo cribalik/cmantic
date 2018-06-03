@@ -237,12 +237,12 @@ static bool is_identifier_tail(Utf8char c) {
 struct Buffer {
   String filename;
 
-  Array<String> lines;
+  Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
   /* parser stuff */
   Array<Array<TokenInfo>> tokens;
-  Array<Slice> identifiers;
+  Array<String> identifiers;
 
   #define GHOST_EOL -1
   #define GHOST_BOL -2
@@ -252,9 +252,9 @@ struct Buffer {
 
   // methods
 
-  String& operator[](int i) {return lines[i];}
+  StringBuffer& operator[](int i) {return lines[i];}
 
-  const String& operator[](int i) const {return lines[i];}
+  const StringBuffer& operator[](int i) const {return lines[i];}
 
   int num_lines() const {return lines.size;}
 
@@ -268,16 +268,16 @@ struct Buffer {
   void move_x(int dx);
   void move(int dx, int dy);
   void update();
-  bool find_r(String s, int stay, Pos *pos);
+  bool find_r(StringBuffer s, int stay, Pos *pos);
   bool find_r(char c, int stay, Pos *pos);
-  bool find(String s, bool stay, Pos *pos);
+  bool find(StringBuffer s, bool stay, Pos *pos);
   bool find(char c, bool stay, Pos *pos);
-  bool find_and_move(String s, bool stay);
+  bool find_and_move(StringBuffer s, bool stay);
   bool find_and_move(char c, bool stay);
-  bool find_and_move_r(String s, bool stay);
+  bool find_and_move_r(StringBuffer s, bool stay);
   bool find_and_move_r(char c, bool stay);
-  void insert_str(int x, int y, String s);
-  void replace(int x0, int x1, int y, String s);
+  void insert_str(int x, int y, StringBuffer s);
+  void replace(int x0, int x1, int y, StringBuffer s);
   void remove_trailing_whitespace(int y);
   void pretty_range(int y0, int y1);
   void pretty(int y);
@@ -360,7 +360,7 @@ struct Canvas {
   void render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
   void render(Pos offset);
   void render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
-  void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const Slice& s);
+  void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
   void fill_textcolor(Range range, Rect bounds, Color c);
@@ -403,7 +403,7 @@ struct Pane {
 
     // PANETYPE_SINGLE_LINE
     struct {
-      Slice prefix;
+      String prefix;
     } single_line;
 
     // PANETYPE_MENU
@@ -479,7 +479,7 @@ struct State {
   int font_height;
   int line_margin;
   int line_height;
-  String tmp_render_buffer;
+  StringBuffer tmp_render_buffer;
   int win_height, win_width;
 
   /* settings */
@@ -583,7 +583,7 @@ static void status_message_set(const char *fmt, ...) {
 /****** @TOKENIZER ******/
 
 static void tokenize(Buffer &b) {
-  static String identifier_buffer;
+  static StringBuffer identifier_buffer;
   int x = 0, y = 0;
 
   /* reset old tokens */
@@ -618,7 +618,7 @@ static void tokenize(Buffer &b) {
       }
       /* check if identifier already exists */
       for (int i = 0; i < b.identifiers.size; ++i)
-        if (identifier_buffer == b.identifiers[i])
+        if (identifier_buffer.str() == b.identifiers[i].str())
           goto identifier_done;
 
       b.identifiers.push(identifier_buffer.copy());
@@ -915,7 +915,7 @@ static void fill_dropdown_buffer(Pane *active_pane) {
   G.dropdown_pos = p;
 
   Slice input = b.slice({p.x, b.pos.y}, b.pos.x - p.x);
-  int num_best_matches = fuzzy_match(input, b.identifiers, best_matches, ARRAY_LEN(best_matches));
+  int num_best_matches = fuzzy_match(input, CAST(Array<Slice>, b.identifiers), best_matches, ARRAY_LEN(best_matches));
 
   const int y = G.dropdown_buffer.pos.y;
   G.dropdown_buffer.empty();
@@ -930,7 +930,7 @@ static void dropdown_autocomplete(Buffer &b) {
   if (!G.dropdown_visible || G.dropdown_buffer.isempty())
     return;
 
-  String s = G.dropdown_buffer[G.dropdown_buffer.pos.y];
+  StringBuffer s = G.dropdown_buffer[G.dropdown_buffer.pos.y];
   b.replace(G.dropdown_pos.x, b.pos.x, b.pos.y, s);
   G.dropdown_visible = false;
 }
@@ -1142,18 +1142,18 @@ static Keyword keywords[] = {
 };
 
 static void _filetree_fill(Path &path) {
-  Array<String> files = {};
+  Array<StringBuffer> files = {};
   if (!File::list_files(path, &files))
     goto err;
 
   #if 1
-  for (String f : files) {
+  for (StringBuffer f : files) {
     path.push(f);
     if (File::filetype(path) == FILETYPE_DIR)
       _filetree_fill(path);
     else {
       G.filetree_buffer.push_line(path.name());
-      String name = String::create(path.name());
+      String name = path.name().copy();
       G.filetree_buffer.identifiers += name;
     }
     path.pop();
@@ -1266,7 +1266,7 @@ static void state_init() {
   G.search_pane.text_color = &G.default_text_color;
   // G.search_pane.highlight_background_color = &G.highlight_background_color.color;
   G.search_pane.margin = 5;
-  G.search_pane.single_line.prefix = Slice::create("search: ");
+  G.search_pane.single_line.prefix = String::create("search: ");
 
   // menu pane
   G.menu_buffer.empty();
@@ -1277,7 +1277,7 @@ static void state_init() {
   G.menu_pane.text_color = &G.default_text_color;
   // G.menu_pane.highlight_background_color = &G.highlight_background_color.color;
   G.menu_pane.margin = 5;
-  G.menu_pane.single_line.prefix = Slice::create("menu: ");
+  G.menu_pane.single_line.prefix = String::create("menu: ");
 
   // file tree pane
   G.filetree_buffer.empty();
@@ -1288,7 +1288,7 @@ static void state_init() {
   G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.text_color = &G.default_text_color;
   G.filetree_pane.margin = 5;
-  G.filetree_pane.single_line.prefix = Slice::create("open: ");
+  G.filetree_pane.single_line.prefix = String::create("open: ");
 
   // dropdown pane
   G.dropdown_buffer.empty();
@@ -1317,7 +1317,7 @@ static void state_init() {
   G.menu_buffer.identifiers = {};
   G.menu_buffer.identifiers.pushn((int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
-    G.menu_buffer.identifiers[i] = Slice::create(menu_options[i].name);
+    G.menu_buffer.identifiers[i] = String::create(menu_options[i].name);
 
   filetree_init();
   status_message_set("Welcome!");
@@ -1347,7 +1347,7 @@ static void render_dropdown(Pane *active_pane) {
 
   // resize dropdown pane
   int max_width = 0;
-  for (String s : G.dropdown_buffer.lines)
+  for (StringBuffer s : G.dropdown_buffer.lines)
     max_width = max(max_width, s.length);
 
   G.dropdown_pane.bounds.size =
@@ -1415,7 +1415,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
   case MODE_MENU:
     if (special_key == KEY_RETURN) {
-      String line;
+      StringBuffer line;
 
       if (G.menu_buffer.isempty()) {
         mode_normal(true);
@@ -1427,7 +1427,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
       line = G.menu_buffer[0];
       foreach(menu_options) {
-        if (G.menu_buffer[0] == it->name) {
+        if (G.menu_buffer[0].str() == it->name) {
           it->fun();
           goto done;
         }
@@ -1461,7 +1461,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_SEARCH: {
-    String search;
+    StringBuffer search;
 
     if (special_key == KEY_ESCAPE)
       dropdown_autocomplete(G.search_buffer);
@@ -1718,15 +1718,15 @@ void Buffer::move_x(int dx) {
   ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
 }
 
-static Buffer* open_file(Slice filename) {
+Buffer* Buffer::from_file(Slice filename) {
+  FILE* f = 0;
   Buffer *buffer = (Buffer*)malloc(sizeof(Buffer));
   if (!buffer)
     goto err;
   Buffer &b = *buffer;
   b = {};
 
-  b.filename = String::create(filename);
-  FILE* f = 0;
+  b.filename = filename.copy();
   if (file_open(&f, b.filename.chars, "r"))
     goto err;
 
@@ -1793,7 +1793,7 @@ void Buffer::update() {
   move(0, 0);
 }
 
-bool Buffer::find_r(String s, int stay, Pos *p) {
+bool Buffer::find_r(StringBuffer s, int stay, Pos *p) {
   int x, y;
 
   if (!s)
@@ -1878,7 +1878,7 @@ bool Buffer::find(char s, bool stay, Pos *p) {
   return false;
 }
 
-bool Buffer::find(String s, bool stay, Pos *p) {
+bool Buffer::find(StringBuffer s, bool stay, Pos *p) {
   int x, y;
   if (!s)
     return false;
@@ -1916,7 +1916,7 @@ bool Buffer::find_and_move_r(char c, bool stay) {
   return true;
 }
 
-bool Buffer::find_and_move_r(String s, bool stay) {
+bool Buffer::find_and_move_r(StringBuffer s, bool stay) {
   Pos p = pos;
   if (!find_r(s, stay, &p))
     return false;
@@ -1932,7 +1932,7 @@ bool Buffer::find_and_move(char c, bool stay) {
   return true;
 }
 
-bool Buffer::find_and_move(String s, bool stay) {
+bool Buffer::find_and_move(StringBuffer s, bool stay) {
   Pos p = pos;
   if (!find(s, stay, &p))
     return false;
@@ -1940,13 +1940,13 @@ bool Buffer::find_and_move(String s, bool stay) {
   return true;
 }
 
-void Buffer::insert_str(int x, int y, String s) {
+void Buffer::insert_str(int x, int y, StringBuffer s) {
   modified = 1;
   lines[y].insert(x, s);
   move_x(s.length);
 }
 
-void Buffer::replace(int x0, int x1, int y, String s) {
+void Buffer::replace(int x0, int x1, int y, StringBuffer s) {
   modified = 1;
   lines[y].remove(x0, x1-x0);
   move_to(x0, y);
@@ -2604,7 +2604,7 @@ void Pane::render_as_menu() {
 
   // draw each line 
   for (int y = 0; y < at_most(b.lines.size, y_max); ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y]);
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y].str());
 
   // highlight the line you're on
   if (highlight_background_color)
@@ -2759,10 +2759,10 @@ void Pane::render_as_single_line() {
   canvas.margin = this->margin;
 
   // draw prefix
-  canvas.render_str({0, 0}, &G.default_gutter_style.text_color, NULL, 0, -1, this->single_line.prefix);
+  canvas.render_str({0, 0}, &G.default_gutter_style.text_color, NULL, 0, -1, this->single_line.prefix.str());
 
   // draw buffer
-  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0]);
+  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].str());
 
   // highlight
   if (this->highlight_background_color)
@@ -2810,7 +2810,7 @@ void Pane::render_as_edit() {
 
   // draw each line 
   for (int y = 0, buf_y = buf_offset.y; buf_y < buf_y1; ++buf_y, ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y]);
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y].str());
 
   if (this->syntax_highlight)
     this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
@@ -2934,7 +2934,7 @@ void Canvas::fill_background(Rect r, Color c) {
     styles[y*this->w + x].background_color = c;
 }
 
-void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const Slice& s) {
+void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
   if (!s)
     return;
 
@@ -2973,7 +2973,7 @@ void Canvas::render_str_v(Pos p, const Color *text_color, const Color *backgroun
     return;
   G.tmp_render_buffer.clear();
   G.tmp_render_buffer.appendv(fmt, args);
-  render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer);
+  render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer.str());
 }
 
 void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
@@ -3086,6 +3086,12 @@ static void test() {
 }
 #endif
 
+#if 0
+// TODO: Find a way 
+#include <type_traits>
+STATIC_ASSERT(std::is_pod<StringBuffer>::value, state_must_be_pod);
+#endif
+
 #ifdef OS_WINDOWS
 int wmain(int, const wchar_t *[], wchar_t *[])
 #else
@@ -3095,21 +3101,7 @@ int main(int, const char *[])
   state_init();
 
   /* open a buffer */
-  #if 0
-  {
-    const char *filename = argc >= 2 ? argv[1] : "src/cmantic.cpp";
-    Buffer *b = (Buffer*)malloc(sizeof(Buffer));
-    int err = buffer_from_file(filename, b);
-    G.main_pane.buffer = b;
-    if (err) {
-      fprintf(stderr, "Could not open file %s: %s\n", filename, cman_strerror(errno));
-      exit(1);
-    }
-    if (!err) {
-      status_message_set("loaded '%s', %i lines", (char*)filename, (int)G.center_pane->buffer->lines.size);
-    }
-  }
-  #endif
+  G.main_pane.buffer = Buffer::from_file(Slice::create("src/cmantic.cpp"));
 
   for (;;) {
     Utf8char input = {};
