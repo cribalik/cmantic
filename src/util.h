@@ -1,7 +1,6 @@
 
 #ifdef OS_LINUX
 #include <errno.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -480,9 +479,10 @@ struct String {
 
   void extend(int l) {
     length += l;
-    while (cap <= length)
+    while (cap <= length+1)
       cap = cap ? cap*2 : 4;
     chars = (char*)realloc(chars, cap);
+    chars[length] = '\0';
   }
 
   void reserve(int n) {
@@ -733,15 +733,38 @@ bool operator==(String a, String b) {
 #define UTIL_FILE
 
 struct Path {
+  static const char separator = '/';
+
+  static Path base() {
+    Path p = {};
+    p.string += '.';
+    return p;
+  };
+
   String string;
+
+  void push(String file) {
+    string += Path::separator;
+    string += file;
+  }
+
+  void pop() {
+    string.find_r(separator, &string.length);
+  }
+
+  Path copy() const {
+    return {string.copy()};
+  }
 };
 
 void util_free(Path &p) {
   util_free(p.string);
 }
 
-struct PathList {
-  Array<Path> paths;
+enum FileType {
+  FILETYPE_UNKNOWN,
+  FILETYPE_FILE,
+  FILETYPE_DIR
 };
 
 namespace File {
@@ -764,23 +787,19 @@ namespace File {
     return true;
   }
 
-  bool is_file(const char *path) {
+  FileType filetype(Path path) {
     struct stat buf;
-    int err = stat(path, &buf);
+    int err = stat(path.string.chars, &buf);
     if (err)
-      return false;
-    return S_ISREG(buf.st_mode);
+      return FILETYPE_UNKNOWN;
+    if (S_ISREG(buf.st_mode))
+      return FILETYPE_FILE;
+    if (S_ISDIR(buf.st_mode))
+      return FILETYPE_DIR;
+    return FILETYPE_UNKNOWN;
   }
 
-  bool is_directory(const char *path) {
-    struct stat buf;
-    int err = stat(path, &buf);
-    if (err)
-      return false;
-    return S_ISDIR(buf.st_mode);
-  }
-
-  bool list_directories(Path p, Array<Path> *result) {
+  bool list_files(Path p, Array<String> *result) {
     *result = {};
     DIR *dp = opendir(p.string.chars);
     if (!dp)
@@ -789,33 +808,10 @@ namespace File {
     for (struct dirent *ep; ep = readdir(dp), ep;) {
       if (ep->d_name[0] == '.')
         continue;
-      if (!is_directory(ep->d_name))
-        continue;
 
       Path p = {};
       p.string += ep->d_name;
-      result->push(p);
-    }
-
-    closedir(dp);
-    return true;
-  }
-
-  bool list_files(Path p, Array<Path> *result) {
-    *result = {};
-    DIR *dp = opendir(p.string.chars);
-    if (!dp)
-      return false;
-
-    for (struct dirent *ep; ep = readdir(dp), ep;) {
-      if (ep->d_name[0] == '.')
-        continue;
-      if (!is_file(ep->d_name))
-        continue;
-
-      Path p = {};
-      p.string += ep->d_name;
-      result->push(p);
+      result->push(p.string);
     }
 
     closedir(dp);

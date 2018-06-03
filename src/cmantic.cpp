@@ -1,5 +1,7 @@
 /*
  * TODO:
+ *   Clean up dropdown api, and make it stateless (immediate mode)
+ *   File tree
  *
  * Multiple cursors
  *
@@ -147,6 +149,7 @@ enum Mode {
   MODE_GOTO,
   MODE_SEARCH,
   MODE_HIGHLIGHT,
+  MODE_FILESEARCH,
   MODE_COUNT
 };
 
@@ -361,13 +364,12 @@ void util_free(Canvas &c) {
   delete [] c.styles;
 }
 
-
 struct Pane {
   enum Type {
     PANETYPE_NULL,
     PANETYPE_EDIT,
-    PANETYPE_MENU,
-  };
+    PANETYPE_SINGLE_LINE,
+  } type;
 
   Rect bounds;
   const Color *background_color;
@@ -375,7 +377,6 @@ struct Pane {
   const Color *text_color;
   bool syntax_highlight;
   Buffer *buffer;
-  Pos buffer_offset;
 
   // visual settings
   bool draw_gutter;
@@ -433,10 +434,6 @@ struct RotatingColor {
   }
 };
 
-enum FileType {
-  FILETYPE_FILE,
-  FILETYPE_DIR
-};
 struct FileNode {
   FileType type;
   Path path;
@@ -516,7 +513,7 @@ struct State {
   Pos search_begin_pos;
 
   /* file tree state */
-  FileNode filetree;
+  Array<Path> files;
 
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
@@ -803,6 +800,10 @@ static void mode_search() {
 
 static void mode_highlight() {
   G.mode = MODE_HIGHLIGHT;
+}
+
+static void mode_filesearch() {
+  G.mode = MODE_FILESEARCH;
 }
 
 static void mode_goto() {
@@ -1175,25 +1176,21 @@ static Keyword keywords[] = {
   {"goto", KEYWORD_CONTROL},
 };
 
-static void _filetree_fill(FileNode *base) {
-  Array<Path> files = {};
-  if (!File::list_directories(base->path, &files))
+static void _filetree_fill(Path &path) {
+  Array<String> files = {};
+  if (!File::list_files(path, &files))
     goto err;
-  for (Path p : files) {
-    base->children += FileNode{FILETYPE_DIR, p};
-    _filetree_fill(&base->children.last());
+
+  for (String f : files) {
+    path.push(f);
+    if (File::filetype(path) == FILETYPE_DIR)
+      _filetree_fill(path);
+    else
+      G.filetree_buffer.identifiers += path.copy().string.chars;
+    path.pop();
   }
 
-  files.clear();
-  if (!File::list_files(base->path, &files))
-    goto err;
-  for (Path p : files)
-    base->children += FileNode{FILETYPE_FILE, p};
-
-  util_free(files);
-  return;
   err:
-  printf("error on %s\n", base->path.string.chars);
   files.free_recursive();
 }
 
@@ -1201,36 +1198,11 @@ static void filetree_init() {
   G.filetree_buffer.empty();
 
   Path cwd = {};
-  G.filetree = FileNode{FILETYPE_DIR, (char*)"./"};
 
+  Path path = Path::base();
   if (File::cwd(&cwd))
-    _filetree_fill(&G.filetree);
+    _filetree_fill(path);
   util_free(cwd);
-
-  for (FileNode n : G.filetree.children) {
-    if (n.type == FILETYPE_FILE) {
-      G.filetree_buffer.push_line(" * ");
-      G.filetree_buffer.lines.last() += n.path.string;
-    }
-    else if (n.type == FILETYPE_DIR) {
-      G.filetree_buffer.push_line(" - ");
-      G.filetree_buffer.lines.last() += n.path.string;
-      for (FileNode nn : n.children) {
-        if (nn.type == FILETYPE_FILE) {
-          G.filetree_buffer.push_line("   * ");
-          G.filetree_buffer.lines.last() += nn.path.string;
-          puts("its a deep file!");
-        }
-        else {
-          puts("its a deep dir!");
-          G.filetree_buffer.push_line("   - ");
-          G.filetree_buffer.lines.last() += nn.path.string;
-          G.filetree_buffer.lines.last() += " ...";
-          G.filetree_buffer.lines.last() += " ...";
-        }
-      }
-    }
-  }
 }
 
 static void state_init() {
@@ -1340,8 +1312,7 @@ static void state_init() {
   G.filetree_pane.syntax_highlight = false;
   G.filetree_pane.background_color = &COLOR_GREY;
   G.filetree_pane.text_color = &G.default_text_color;
-  G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
-  G.filetree_pane.margin = 10;
+  G.filetree_pane.margin = 5;
 
   // dropdown pane
   G.dropdown_buffer.empty();
@@ -1495,6 +1466,22 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
+  case MODE_FILESEARCH:
+    switch (key) {
+      case KEY_ARROW_DOWN:
+      case 'j':
+        G.filetree_buffer.move_y(1);
+        break;
+      case KEY_ARROW_UP:
+      case 'k':
+        G.filetree_buffer.move_y(-1);
+        break;
+      case KEY_RETURN:
+        mode_normal(false);
+        break;
+    }
+    break;
+
   case MODE_SEARCH: {
     String search;
 
@@ -1622,6 +1609,9 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     case ' ':
       mode_search();
+      break;
+    case CONTROL('p'):
+      mode_filesearch();
       break;
     case 'g':
       mode_goto();
@@ -2117,7 +2107,6 @@ void Buffer::push_line(const char *str) {
   lines[y] += str;
 }
 
-// consumes s
 void Buffer::push_line(String s) {
   modified = 1;
   int y = lines.size;
@@ -2480,7 +2469,6 @@ Buffer::TokenResult Buffer::token_read(Pos *p, int y_end) {
   return result;
 }
 
-
 void Canvas::init(int width, int height) {
   (*this) = {};
   this->w = width;
@@ -2515,6 +2503,7 @@ void Pane::render_as_menu(int selected) {
   Buffer &b = *buffer;
 
   Canvas canvas;
+  int y_max = this->numchars_y();
   canvas.init(this->numchars_x(), this->numchars_y());
   canvas.background = *this->background_color;
   canvas.fill(Utf8char{' '});
@@ -2523,9 +2512,8 @@ void Pane::render_as_menu(int selected) {
   canvas.margin = this->margin;
 
   // draw each line 
-  for (int y = 0; y < b.lines.size; ++y) {
-    canvas.render_str({0, y}, this->text_color, 0, 0, -1, b.lines[y]);
-  }
+  for (int y = 0; y < at_most(b.lines.size, y_max); ++y)
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y]);
 
   // highlight the line you're on
   canvas.fill_background({0, b.pos.y, {-1, 1}}, *highlight_background_color);
@@ -3112,11 +3100,11 @@ int main(int argc, const char *argv[])
     // reflow panes
     G.bottom_pane->margin = 3;
     G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
-    G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
+    // G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
     G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.bottom_pane->bounds.h};
     G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
-    G.side_pane->render_as_menu(0);
+    // G.side_pane->render_as_menu(0);
     G.center_pane->render();
     G.bottom_pane->render();
 
