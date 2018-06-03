@@ -336,11 +336,13 @@ struct Slice {
   char& operator[](int i) {return chars[i];}
   char operator[](int i) const {return chars[i];}
 
-  Utf8Iter begin() {
+  operator bool() const {return length;}
+
+  Utf8Iter begin() const {
     return {chars, chars+length};
   }
 
-  Utf8Iter end() {
+  Utf8Iter end() const {
     return {};
   }
 
@@ -552,8 +554,6 @@ struct String : public Slice {
   void insert(int i, String s) {
     insert(i, s.chars, s.length);
   }
-
-  operator bool() {return length;}
 
   void remove(int i, int n) {
     memmove(chars+i, chars+i+n, length-i-n);

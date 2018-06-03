@@ -1,7 +1,7 @@
 @echo off
 
 rem set compiler_flags=-Od -MT -nologo -fp:fast -fp:except- -Gm- -GR- -Zo -WX -W4 -wd4201 -wd4100 -wd4189 -wd4505 -wd4127 -FC -Z7
-set compiler_flags=-Od -nologo -fp:fast -fp:except- -W4 -wd4505 -wd4201 -Z7
+set compiler_flags=-Od -nologo -fp:fast -fp:except- -W4 -wd4505 -wd4201 -wd4408 -Z7
 set linker_flags=-incremental:no -opt:ref -debug:full
 
 IF NOT EXIST .\build mkdir .\build

@@ -348,7 +348,7 @@ struct Canvas {
   void render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
   void render(Pos offset);
   void render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
-  void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, String s);
+  void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const Slice& s);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
   void fill_textcolor(Range range, Rect bounds, Color c);
@@ -364,12 +364,14 @@ void util_free(Canvas &c) {
   delete [] c.styles;
 }
 
+enum PaneType {
+  PANETYPE_NULL,
+  PANETYPE_EDIT,
+  PANETYPE_MENU,
+  PANETYPE_SINGLE_LINE,
+};
 struct Pane {
-  enum Type {
-    PANETYPE_NULL,
-    PANETYPE_EDIT,
-    PANETYPE_SINGLE_LINE,
-  } type;
+  PaneType type;
 
   Rect bounds;
   const Color *background_color;
@@ -379,14 +381,32 @@ struct Pane {
   Buffer *buffer;
 
   // visual settings
-  bool draw_gutter;
-  int gutter_width;
   int margin;
-  bool draw_shadow;
+
+  // type-specific data
+  union {
+    // PANETYPE_EDIT
+    struct {
+    };
+
+    // PANETYPE_SINGLE_LINE
+    struct {
+      Slice prefix;
+    } single_line;
+
+    // PANETYPE_MENU
+    struct {
+    };
+  };
 
   // methods
   void render();
+
+  // internal methods
+  void render_as_edit();
   void render_as_menu();
+  void render_as_single_line();
+  void render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
 
@@ -457,7 +477,6 @@ struct State {
   Style default_gutter_style;
   Color default_highlight_background_color;
   Color number_color;
-  Color default_number_color;
   Color comment_color;
   Color string_color;
   Color operator_color;
@@ -799,6 +818,7 @@ static void mode_highlight() {
 
 static void mode_filesearch() {
   G.mode = MODE_FILESEARCH;
+  G.bottom_pane = &G.filetree_pane;
 }
 
 static void mode_goto() {
@@ -1228,7 +1248,7 @@ static void state_init() {
   G.default_background_color = {0.16f, 0.16f, 0.16f, 1.0f};
   G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f, 1.0f};
   G.default_gutter_style.background_color = G.default_background_color;
-  G.default_number_color = G.number_color = COLOR_RED;
+  G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
   G.operator_color =                        COLOR_RED;
   G.comment_color = COLOR_BLUEGREY;
@@ -1254,7 +1274,7 @@ static void state_init() {
   G.bottom_pane_highlight.base_color = G.default_background_color;
   G.bottom_pane_highlight.popped_color = COLOR_WHITE;
   G.bottom_pane_highlight.speed = 1.3f;
-  G.bottom_pane_highlight.cooldown = 0.0f;
+  G.bottom_pane_highlight.cooldown = 0.4f;
   G.bottom_pane_highlight.min = 0.0f;
   G.bottom_pane_highlight.max = 0.1f;
 
@@ -1277,53 +1297,61 @@ static void state_init() {
   G.search_term_background_color.min = 0.4f;
   G.search_term_background_color.max = 1.0f;
 
-  // some pane settings
+  // @panes
+
   G.null_buffer.empty();
+  G.main_pane.type = PANETYPE_EDIT;
   G.main_pane.buffer = &G.null_buffer;
   G.main_pane.syntax_highlight = true;
   G.main_pane.background_color = &G.default_background_color;
   G.main_pane.text_color = &G.default_text_color;
   G.main_pane.highlight_background_color = &G.highlight_background_color.color;
-  G.main_pane.draw_gutter = true;
 
   // search pane
   G.search_buffer.empty();
+  G.search_pane.type = PANETYPE_SINGLE_LINE;
   G.search_pane.buffer = &G.search_buffer;
   G.search_pane.syntax_highlight = true;
   G.search_pane.background_color = &G.bottom_pane_highlight.color;
   G.search_pane.text_color = &G.default_text_color;
   // G.search_pane.highlight_background_color = &G.highlight_background_color.color;
   G.search_pane.margin = 5;
+  G.search_pane.single_line.prefix = Slice::create("search: ");
 
   // menu pane
   G.menu_buffer.empty();
+  G.menu_pane.type = PANETYPE_SINGLE_LINE;
   G.menu_pane.buffer = &G.menu_buffer;
   G.menu_pane.syntax_highlight = true;
   G.menu_pane.background_color = &G.bottom_pane_highlight.color;
   G.menu_pane.text_color = &G.default_text_color;
   // G.menu_pane.highlight_background_color = &G.highlight_background_color.color;
   G.menu_pane.margin = 5;
+  G.menu_pane.single_line.prefix = Slice::create("menu: ");
 
   // file tree pane
   G.filetree_buffer.empty();
+  G.filetree_pane.type = PANETYPE_SINGLE_LINE;
   G.filetree_pane.buffer = &G.filetree_buffer;
   G.filetree_pane.syntax_highlight = false;
   G.filetree_pane.background_color = &COLOR_GREY;
   G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.text_color = &G.default_text_color;
   G.filetree_pane.margin = 5;
+  G.filetree_pane.single_line.prefix = Slice::create("open: ");
 
   // dropdown pane
   G.dropdown_buffer.empty();
+  G.dropdown_pane.type = PANETYPE_MENU;
   G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.background_color = &COLOR_GREY;
   G.dropdown_pane.text_color = &COLOR_WHITE;
   G.dropdown_pane.margin = 5;
   G.dropdown_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
-  G.dropdown_pane.draw_shadow = true;
 
   // status message pane
   G.status_message_buffer.empty();
+  G.status_message_pane.type = PANETYPE_SINGLE_LINE;
   G.status_message_pane.buffer = &G.status_message_buffer;
   G.status_message_pane.syntax_highlight = true;
   G.status_message_pane.background_color = &G.bottom_pane_highlight.color;
@@ -1342,6 +1370,7 @@ static void state_init() {
     G.menu_buffer.identifiers[i] = Slice::create(menu_options[i].name);
 
   filetree_init();
+  status_message_set("Welcome!");
 }
 
 static int char2pixelx(int x) {
@@ -1655,19 +1684,13 @@ static void handle_rendering() {
   prev_pos = G.center_pane->buffer->pos;
   prev_mode = G.mode;
 
+  // update colors
   G.marker_background_color.tick();
   G.highlight_background_color.tick();
   G.bottom_pane_highlight.tick();
   G.search_term_background_color.tick();
 
   // highlight some colors
-  static float hue;
-  const float sat = 0.3f;
-  hue = fmodf(hue + 7.0f, 360.0f);
-  if (G.highlight_number)
-    G.number_color = Color::from_hsl(hue, sat, 0.5f);
-  else
-    G.number_color = G.default_number_color;
   G.default_marker_background_color.tick();
   G.marker_background_color.popped_color = G.default_marker_background_color.color;
 
@@ -1681,11 +1704,11 @@ static void handle_rendering() {
   // reflow panes
   G.bottom_pane->margin = 3;
   G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
-  G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
+  // G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
   G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.bottom_pane->bounds.h};
   G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
-  G.side_pane->render_as_menu();
+  // G.side_pane->render();
   G.center_pane->render();
   G.bottom_pane->render();
 
@@ -2527,6 +2550,8 @@ void Canvas::init(int width, int height) {
   this->h = height;
   this->chars = new Utf8char[w*h]();
   this->styles = new Style[w*h]();
+  for (int i = 0; i < w*h; ++i)
+    chars[i] = ' ';
 }
 
 void Canvas::resize(int width, int height) {
@@ -2560,7 +2585,7 @@ void Pane::render_as_menu() {
   canvas.background = *this->background_color;
   canvas.fill(Utf8char{' '});
   canvas.fill(Style{*this->text_color, *this->background_color});
-  canvas.draw_shadow = this->draw_shadow;
+  canvas.draw_shadow = true;
   canvas.margin = this->margin;
 
   // draw each line 
@@ -2578,149 +2603,203 @@ void Pane::render_as_menu() {
   render_text();
 }
 
+void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
+  Buffer &b = *this->buffer;
+  // syntax @highlighting
+  Pos pos = {0, y0};
+  for (;;) {
+    Pos prev,next;
+    auto t = b.token_read(&pos, y1);
+    prev = t.a;
+    next = t.b;
+
+    check_token:
+
+    bool do_render = false;
+
+    Color highlighted_text_color = {};
+
+    if (t.tok == TOKEN_NULL)
+      break;
+    switch (t.tok) {
+
+      case TOKEN_NUMBER:
+        do_render = true;
+        highlighted_text_color = G.number_color;
+        break;
+
+      case TOKEN_BLOCK_COMMENT_BEGIN:
+        do_render = 1;
+        highlighted_text_color = G.comment_color;
+        next = {b.lines[y1-1].length, y1-1};
+        break;
+
+      case TOKEN_BLOCK_COMMENT:
+        do_render = 1;
+        highlighted_text_color = G.comment_color;
+        break;
+
+      case TOKEN_BLOCK_COMMENT_END:
+        do_render = 1;
+        highlighted_text_color = G.comment_color;
+        prev = {x0, y0};
+        break;
+
+      case TOKEN_LINE_COMMENT_BEGIN:
+        do_render = true;
+        // just fast forward to the end of the line, no need to parse it
+        pos = {0, prev.y+1};
+        next = {b.lines[prev.y].length-1, prev.y};
+        highlighted_text_color = G.comment_color;
+        break;
+
+      case TOKEN_STRING:
+        do_render = true;
+        highlighted_text_color = G.string_color;
+        break;
+
+      case TOKEN_STRING_BEGIN:
+        do_render = true;
+        highlighted_text_color = G.string_color;
+        break;
+
+      case TOKEN_OPERATOR:
+        do_render = true;
+        highlighted_text_color = G.operator_color;
+        break;
+
+      case TOKEN_IDENTIFIER: {
+        // check for keywords
+        for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
+          if (b[prev.y](prev.x, next.x+1) == keywords[i].name) {
+            highlighted_text_color = keyword_colors[keywords[i].type];
+            goto done;
+          }
+        }
+
+        // otherwise check for functions
+        // we assume something not indented and followed by a '(' is a function
+        // TODO: @utf8
+        if (isspace(b.getchar(0, prev.y).ansi()))
+          break;
+        t = b.token_read(&pos, y1);
+        if (t.tok != '(') {
+          prev = t.a;
+          next = t.b;
+          goto check_token;
+        }
+        highlighted_text_color = G.identifier_color;
+
+        done:
+        do_render = true;
+      } break;
+
+      case '#':
+        do_render = true;
+        highlighted_text_color = keyword_colors[KEYWORD_MACRO];
+        break;
+
+      default:
+        break;
+    }
+    if (do_render) {
+      prev = b.to_visual_pos(prev);
+      next = b.to_visual_pos(next);
+
+      prev.x -= x0;
+      prev.y -= y0;
+      next.x -= x0;
+      next.y -= y0;
+
+      canvas.fill_textcolor({prev, next}, Rect{0, -1, -1}, highlighted_text_color);
+    }
+
+    if (pos.y > y1)
+      break;
+  }
+}
+
 void Pane::render() {
+  switch (type) {
+    case PANETYPE_EDIT:
+      render_as_edit();
+      break;
+    case PANETYPE_SINGLE_LINE:
+      render_as_single_line();
+      break;
+    case PANETYPE_MENU:
+      render_as_menu();
+      break;
+  }
+}
+
+void Pane::render_as_single_line() {
   Buffer &b = *buffer;
-  // calc bounds 
-  int buf_y0 = this->calc_top_visible_row();
-  int buf_y1 = at_most(buf_y0 + this->numchars_y(), b.lines.size);
-
-  if (this->draw_gutter)
-    this->gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
-  else
-    this->gutter_width = 0;
-
-  int buf_x0 = this->calc_left_visible_column();
+  // TODO: scrolling in x
+  Pos buf_offset = {this->single_line.prefix.length, 0};
 
   Canvas canvas;
-  canvas.init(this->numchars_x(), this->numchars_y());
-  canvas.fill(Utf8char{' '});
+  canvas.init(this->numchars_x(), 1);
   canvas.fill(Style{*this->text_color, *this->background_color});
   canvas.background = *this->background_color;
-  canvas.draw_shadow = this->draw_shadow;
+  canvas.margin = this->margin;
+
+  // draw prefix
+  canvas.render_str({0, 0}, &G.default_gutter_style.text_color, NULL, 0, -1, this->single_line.prefix);
+
+  // draw buffer
+  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0]);
+
+  // highlight
+  if (this->highlight_background_color)
+    canvas.fill_background({0, 0, {-1, 1}}, *this->highlight_background_color);
+
+  // draw marker
+  if (G.selected_pane == this) {
+    canvas.fill_background({b.pos + buf_offset, {1, 1}}, G.marker_background_color.color);
+    // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
+  } else if (G.bottom_pane != this) {
+    canvas.fill_background({b.pos + buf_offset, {1, 1}}, G.marker_inactive_color);
+    // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
+  }
+
+  canvas.render(this->bounds.p);
+
+  util_free(canvas);
+  render_quads();
+  render_text();
+}
+
+void Pane::render_as_edit() {
+  Buffer &b = *buffer;
+  // calc bounds 
+  Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
+  int buf_y1 = at_most(buf_offset.y + this->numchars_y(), b.lines.size);
+
+  // draw gutter
+  const int gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
+  {
+    Canvas gutter;
+    gutter.init(gutter_width, this->numchars_y());
+    gutter.background = *this->background_color;
+    for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
+      gutter.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, gutter_width, " %i", line + 1);
+    gutter.render(this->bounds.p);
+    util_free(gutter);
+  }
+
+  Canvas canvas;
+  canvas.init(this->numchars_x()-gutter_width, this->numchars_y());
+  canvas.fill(Style{*this->text_color, *this->background_color});
+  canvas.background = *this->background_color;
   canvas.margin = this->margin;
 
   // draw each line 
-  for (int y = 0, buf_y = buf_y0; buf_y < buf_y1; ++buf_y, ++y) {
-    // gutter 
-    canvas.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, this->gutter_width, " %i", buf_y+1);
-    // text 
-    canvas.render_str(buf2char({buf_x0, buf_y}), this->text_color, NULL, this->gutter_width, -1, b.lines[buf_y]);
-  }
+  for (int y = 0, buf_y = buf_offset.y; buf_y < buf_y1; ++buf_y, ++y)
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y]);
 
-  // syntax @highlighting
-  if (this->syntax_highlight) {
-    Pos pos = {0, buf_y0};
-    for (;;) {
-      Pos prev,next;
-      auto t = b.token_read(&pos, buf_y1);
-      prev = t.a;
-      next = t.b;
-
-      check_token:
-
-      bool do_render = false;
-
-      Color highlighted_text_color = {};
-
-      if (t.tok == TOKEN_NULL)
-        break;
-      switch (t.tok) {
-
-        case TOKEN_NUMBER:
-          do_render = true;
-          highlighted_text_color = G.number_color;
-          break;
-
-        case TOKEN_BLOCK_COMMENT_BEGIN:
-          do_render = 1;
-          highlighted_text_color = G.comment_color;
-          next = {b.lines[buf_y1-1].length, buf_y1-1};
-          break;
-
-        case TOKEN_BLOCK_COMMENT:
-          do_render = 1;
-          highlighted_text_color = G.comment_color;
-          break;
-
-        case TOKEN_BLOCK_COMMENT_END:
-          do_render = 1;
-          highlighted_text_color = G.comment_color;
-          prev = {buf_x0, buf_y0};
-          break;
-
-        case TOKEN_LINE_COMMENT_BEGIN:
-          do_render = true;
-          // just fast forward to the end of the line, no need to parse it
-          pos = {0, prev.y+1};
-          next = {b.lines[prev.y].length-1, prev.y};
-          highlighted_text_color = G.comment_color;
-          break;
-
-        case TOKEN_STRING:
-          do_render = true;
-          highlighted_text_color = G.string_color;
-          break;
-
-        case TOKEN_STRING_BEGIN:
-          do_render = true;
-          highlighted_text_color = G.string_color;
-          break;
-
-        case TOKEN_OPERATOR:
-          do_render = true;
-          highlighted_text_color = G.operator_color;
-          break;
-
-        case TOKEN_IDENTIFIER: {
-          // check for keywords
-          for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-            if (b[prev.y](prev.x, next.x+1) == keywords[i].name) {
-              highlighted_text_color = keyword_colors[keywords[i].type];
-              goto done;
-            }
-          }
-
-          // otherwise check for functions
-          // we assume something not indented and followed by a '(' is a function
-          // TODO: @utf8
-          if (isspace(b.getchar(0, prev.y).ansi()))
-            break;
-          t = b.token_read(&pos, buf_y1);
-          if (t.tok != '(') {
-            prev = t.a;
-            next = t.b;
-            goto check_token;
-          }
-          highlighted_text_color = G.identifier_color;
-
-          done:
-          do_render = true;
-        } break;
-
-        case '#':
-          do_render = true;
-          highlighted_text_color = keyword_colors[KEYWORD_MACRO];
-          break;
-
-        default:
-          break;
-      }
-      if (do_render) {
-        prev = b.to_visual_pos(prev);
-        next = b.to_visual_pos(next);
-
-        prev.x -= buf_x0;
-        prev.y -= buf_y0;
-        next.x -= buf_x0;
-        next.y -= buf_y0;
-
-        canvas.fill_textcolor({prev, next}, Rect{this->gutter_width, 0, -1, -1}, highlighted_text_color);
-      }
-
-      if (pos.y > buf_y1)
-        break;
-    }
-  }
+  if (this->syntax_highlight)
+    this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
 
   // highlight the line you're on
   if (this->highlight_background_color)
@@ -2728,23 +2807,18 @@ void Pane::render() {
 
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
-    Pos pos = {0, buf_y0};
-    while (b.find(G.search_buffer.lines[0], false, &pos) && pos.y < buf_y1) {
-      canvas.fill_background({this->buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
-      // canvas.fill_textcolor(this->gutter_width + x0, pos.y - buf_y0, x1-x0, 1, G.search_term_text_color);
-    }
+    Pos pos = {0, buf_offset.y};
+    while (b.find(G.search_buffer.lines[0], false, &pos) && pos.y < buf_y1)
+      canvas.fill_background({buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
   }
 
   // draw marker
-  if (G.selected_pane == this) {
+  if (G.selected_pane == this)
     canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_background_color.color);
-    // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b.pos.y - buf_y0);
-  } else if (G.bottom_pane != this) {
+  else if (G.bottom_pane != this)
     canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_inactive_color);
-    // canvas.invert_color(this->gutter_width + pos.x - buf_x0, b.pos.y - buf_y0);
-  }
 
-  canvas.render(this->bounds.p);
+  canvas.render(this->bounds.p + Pos{gutter_width*G.font_width, 0});
 
   util_free(canvas);
   render_quads();
@@ -2755,7 +2829,6 @@ Pos Pane::buf2pixel(Pos p) const {
   p = buffer->to_visual_pos(p);
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
-  p.x += this->gutter_width;
   p = char2pixel(p) + this->bounds.p;
   return p;
 }
@@ -2764,7 +2837,6 @@ Pos Pane::buf2char(Pos p) const {
   p = buffer->to_visual_pos(p);
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
-  p.x += this->gutter_width;
   return p;
 }
 
@@ -2775,7 +2847,7 @@ int Pane::calc_top_visible_row() const {
 int Pane::calc_left_visible_column() const {
   int x = this->buffer->pos.x;
   x = this->buffer->lines[this->buffer->pos.y].visual_offset(x, G.tab_width);
-  x -= (this->numchars_x() - this->gutter_width)*6/7;
+  x -= this->numchars_x()*6/7;
   return at_least(x, 0);
 }
 
@@ -2848,7 +2920,7 @@ void Canvas::fill_background(Rect r, Color c) {
     styles[y*this->w + x].background_color = c;
 }
 
-void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, String s) {
+void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, const Slice& s) {
   if (!s)
     return;
 
