@@ -3086,10 +3086,9 @@ static void test() {
 }
 #endif
 
-#if 0
-// TODO: Find a way 
+#if 1
 #include <type_traits>
-STATIC_ASSERT(std::is_pod<StringBuffer>::value, state_must_be_pod);
+STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 #endif
 
 #ifdef OS_WINDOWS
