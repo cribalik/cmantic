@@ -239,7 +239,7 @@ struct Buffer {
 
   /* parser stuff */
   Array<Array<TokenInfo>> tokens;
-  Array<const char*> identifiers;
+  Array<Slice> identifiers;
 
   #define GHOST_EOL -1
   #define GHOST_BOL -2
@@ -255,7 +255,7 @@ struct Buffer {
 
   int num_lines() const {return lines.size;}
 
-  String slice(Pos p, int len) {return lines[p.y](p.x,p.x+len); }
+  Slice slice(Pos p, int len) {return lines[p.y](p.x,p.x+len); }
   Pos to_visual_pos(Pos p);
   void move_to_y(int y);
   void move_to_x(int x);
@@ -289,7 +289,7 @@ struct Buffer {
   int autoindent(const int y);
   int isempty();
   void push_line(const char *str);
-  void push_line(String s);
+  void push_line(Slice s);
   void insert_newline();
   void insert_newline_below();
   void guess_tab_type();
@@ -386,7 +386,7 @@ struct Pane {
 
   // methods
   void render();
-  void render_as_menu(int selected);
+  void render_as_menu();
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
 
@@ -554,7 +554,7 @@ static void status_message_set(const char *fmt, ...) {
 /****** @TOKENIZER ******/
 
 static void tokenize(Buffer &b) {
-  static Array<char> identifier_buffer;
+  static String identifier_buffer;
   int x = 0, y = 0;
 
   /* reset old tokens */
@@ -577,27 +577,22 @@ static void tokenize(Buffer &b) {
     char *row = b.lines[y].chars;
     int rowsize = b.lines[y].length;
     if (is_identifier_head(row[x])) {
-      char *str;
-
-      identifier_buffer.resize(0);
+      identifier_buffer.length = 0;
       /* TODO: predefined keywords */
       b.tokens[y].push({TOKEN_IDENTIFIER, x});
 
-      identifier_buffer.push(row[x]);
+      identifier_buffer += row[x];
       for (++x; x < rowsize; ++x) {
         if (!is_identifier_tail(row[x]))
           break;
-        identifier_buffer.push(row[x]);
+        identifier_buffer += row[x];
       }
-      identifier_buffer.push('\0');
       /* check if identifier already exists */
       for (int i = 0; i < b.identifiers.size; ++i)
-        if (strcmp(identifier_buffer, b.identifiers[i]) == 0)
+        if (identifier_buffer == b.identifiers[i])
           goto identifier_done;
 
-      str = (char*)malloc(identifier_buffer.size);
-      identifier_buffer.copy_to(str);
-      b.identifiers.push((const char*)str);
+      b.identifiers += identifier_buffer.copy();
 
       identifier_done:;
     }
@@ -624,7 +619,7 @@ static void tokenize(Buffer &b) {
 }
 
 // MUST BE REVERSE SIZE ORDER
-static const String operators[] = {
+static const Slice operators[] = {
   {(char*)"===", 3},
   {(char*)"!==", 3},
   {(char*)"<<=", 3},
@@ -667,7 +662,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
 
   /* get line count */
   int num_lines = 0;
-  for (char c; (c = fgetc(f)), !feof(f);)
+  for (char c; (c = (char)fgetc(f)), !feof(f);)
     num_lines += c == '\n';
   if (ferror(f))
     goto err;
@@ -683,7 +678,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
     fseek(f, 0, SEEK_SET);
     for (int i = 0; i <= num_lines; ++i) {
       while (1) {
-        c = fgetc(f);
+        c = (char)fgetc(f);
         if (feof(f)) {
           if (ferror(f))
             goto err;
@@ -719,7 +714,7 @@ static int buffer_from_file(const char *filename, Buffer *buffer_out) {
 static const char* cman_strerror(int e) {
   #ifdef OS_WINDOWS
     static char buf[128];
-    strerror_s(buf.push(sizeof(buf), e);
+    strerror_s(buf, sizeof(buf), e);
     return buf;
   #else
     return strerror(e);
@@ -852,7 +847,7 @@ static void mode_menu() {
 }
 
 struct FuzzyMatch {
-  const char *str;
+  Slice str;
   float points;
 };
 
@@ -861,23 +856,23 @@ static int fuzzy_cmp(const void *aa, const void *bb) {
 
   if (a->points != b->points)
     return (int)(b->points - a->points + 0.5f);
-  return strlen(a->str) - strlen(b->str);
+  return a->str.length - b->str.length;
 }
 
 // returns number of found matches
-static int fuzzy_match(String string, Array<const char*> strings, FuzzyMatch result[], int max_results) {
+static int fuzzy_match(Slice string, Array<Slice> strings, FuzzyMatch result[], int max_results) {
   int num_results = 0;
 
   for (int i = 0; i < strings.size; ++i) {
-    const char *identifier = strings[i];
+    Slice identifier = strings[i];
 
-    const int test_len = strlen(identifier);
+    const int test_len = identifier.length;
     if (string.length > test_len)
       continue;
 
     const char *in = string.chars;
     const char *in_end = in + string.length;
-    const char *test = identifier;
+    const char *test = identifier.chars;
     const char *test_end = test + test_len;
 
     float points = 0;
@@ -949,7 +944,7 @@ static void fill_dropdown_buffer(Pane *active_pane) {
   Pos p = find_start_of_identifier(*active_pane->buffer);
   G.dropdown_pos = p;
 
-  String input = b.slice({p.x, b.pos.y}, b.pos.x - p.x);
+  Slice input = b.slice({p.x, b.pos.y}, b.pos.x - p.x);
   int num_best_matches = fuzzy_match(input, b.identifiers, best_matches, ARRAY_LEN(best_matches));
 
   const int y = G.dropdown_buffer.pos.y;
@@ -970,7 +965,7 @@ static void dropdown_autocomplete(Buffer &b) {
   G.dropdown_visible = false;
 }
 
-static void dropdown_update_on_insert(Pane *active_pane, Utf8char input) {
+static void dropdown_update_on_insert(Utf8char input) {
   if (!G.dropdown_visible && is_identifier_head(input)) {
     G.dropdown_visible = true;
     G.dropdown_buffer.pos = {};
@@ -994,7 +989,7 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
   }
 
   if (!special_key && !ctrl) {
-    dropdown_update_on_insert(p, input);
+    dropdown_update_on_insert(input);
     b.insert_char(input);
     return;
   }
@@ -1181,14 +1176,19 @@ static void _filetree_fill(Path &path) {
   if (!File::list_files(path, &files))
     goto err;
 
+  #if 1
   for (String f : files) {
     path.push(f);
     if (File::filetype(path) == FILETYPE_DIR)
       _filetree_fill(path);
-    else
-      G.filetree_buffer.identifiers += path.copy().string.chars;
+    else {
+      G.filetree_buffer.push_line(path.name());
+      String name = String::create(path.name());
+      G.filetree_buffer.identifiers += name;
+    }
     path.pop();
   }
+  #endif
 
   err:
   files.free_recursive();
@@ -1198,10 +1198,8 @@ static void filetree_init() {
   G.filetree_buffer.empty();
 
   Path cwd = {};
-
-  Path path = Path::base();
   if (File::cwd(&cwd))
-    _filetree_fill(path);
+    _filetree_fill(cwd);
   util_free(cwd);
 }
 
@@ -1311,6 +1309,7 @@ static void state_init() {
   G.filetree_pane.buffer = &G.filetree_buffer;
   G.filetree_pane.syntax_highlight = false;
   G.filetree_pane.background_color = &COLOR_GREY;
+  G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.text_color = &G.default_text_color;
   G.filetree_pane.margin = 5;
 
@@ -1340,7 +1339,7 @@ static void state_init() {
   G.menu_buffer.identifiers = {};
   G.menu_buffer.identifiers.pushn((int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
-    G.menu_buffer.identifiers[i] = menu_options[i].name;
+    G.menu_buffer.identifiers[i] = Slice::create(menu_options[i].name);
 
   filetree_init();
 }
@@ -1388,7 +1387,7 @@ static void render_dropdown(Pane *active_pane) {
   G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
 
   if (G.dropdown_visible && !G.dropdown_buffer.isempty())
-    G.dropdown_pane.render_as_menu(0);
+    G.dropdown_pane.render_as_menu();
 }
 
 static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
@@ -1643,6 +1642,59 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     }
   }
+}
+
+static void handle_rendering() {
+  // boost marker when you move or change modes
+  static Pos prev_pos;
+  static Mode prev_mode;
+  if (prev_pos != G.center_pane->buffer->pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
+    G.marker_background_color.reset();
+    G.highlight_background_color.reset();
+  }
+  prev_pos = G.center_pane->buffer->pos;
+  prev_mode = G.mode;
+
+  G.marker_background_color.tick();
+  G.highlight_background_color.tick();
+  G.bottom_pane_highlight.tick();
+  G.search_term_background_color.tick();
+
+  // highlight some colors
+  static float hue;
+  const float sat = 0.3f;
+  hue = fmodf(hue + 7.0f, 360.0f);
+  if (G.highlight_number)
+    G.number_color = Color::from_hsl(hue, sat, 0.5f);
+  else
+    G.number_color = G.default_number_color;
+  G.default_marker_background_color.tick();
+  G.marker_background_color.popped_color = G.default_marker_background_color.color;
+
+  // render
+  G.font_width = graphics_get_font_advance();
+  G.line_height = G.font_height + G.line_margin;
+  SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
+  glClearColor(G.default_background_color.r, G.default_background_color.g, G.default_background_color.g, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+
+  // reflow panes
+  G.bottom_pane->margin = 3;
+  G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
+  G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
+  G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.bottom_pane->bounds.h};
+  G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
+
+  G.side_pane->render_as_menu();
+  G.center_pane->render();
+  G.bottom_pane->render();
+
+  /* draw dropdown ? */
+  G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
+  if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
+    render_dropdown(G.bottom_pane);
+  else
+    render_dropdown(&G.main_pane);
 }
 
 Pos Buffer::to_visual_pos(Pos p) {
@@ -2012,7 +2064,7 @@ int Buffer::indentdepth(int y, bool *has_statement) {
       case '(': ++depth; break;
       case ')': --depth; break;
       case TOKEN_IDENTIFIER: {
-        String s = lines[y](t.a.x, t.b.x+1);
+        Slice s = lines[y](t.a.x, t.b.x+1);
         assert(t.b.y == t.a.y);
         if (first && (
             s == "for" ||
@@ -2107,7 +2159,7 @@ void Buffer::push_line(const char *str) {
   lines[y] += str;
 }
 
-void Buffer::push_line(String s) {
+void Buffer::push_line(Slice s) {
   modified = 1;
   int y = lines.size;
   if (!isempty())
@@ -2121,7 +2173,7 @@ void Buffer::insert_newline() {
   modified = 1;
 
   lines.insertz(pos.y+1);
-  lines[pos.y+1] += lines[pos.y] + pos.x;
+  lines[pos.y+1] += lines[pos.y](pos.x, -1);
   lines[pos.y].length = pos.x;
 
   move_y(1);
@@ -2499,7 +2551,7 @@ void Canvas::invert_color(Pos p) {
   swap(styles[p.y*w + p.x].text_color, styles[p.y*w + p.x].background_color);
 }
 
-void Pane::render_as_menu(int selected) {
+void Pane::render_as_menu() {
   Buffer &b = *buffer;
 
   Canvas canvas;
@@ -2516,7 +2568,8 @@ void Pane::render_as_menu(int selected) {
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y]);
 
   // highlight the line you're on
-  canvas.fill_background({0, b.pos.y, {-1, 1}}, *highlight_background_color);
+  if (highlight_background_color)
+    canvas.fill_background({0, b.pos.y, {-1, 1}}, *highlight_background_color);
 
   canvas.render(this->bounds.p);
 
@@ -2948,15 +3001,15 @@ static void test() {
 #endif
 
 #ifdef OS_WINDOWS
-int wmain(int argc, const wchar_t *argv[], wchar_t *[])
+int wmain(int, const wchar_t *[], wchar_t *[])
 #else
-int main(int argc, const char *argv[])
+int main(int, const char *[])
 #endif
 {
   state_init();
 
   /* open a buffer */
-  #if 1
+  #if 0
   {
     const char *filename = argc >= 2 ? argv[1] : "src/cmantic.cpp";
     Buffer *b = (Buffer*)malloc(sizeof(Buffer));
@@ -2973,7 +3026,6 @@ int main(int argc, const char *argv[])
   #endif
 
   for (;;) {
-
     Utf8char input = {};
     SpecialKey special_key = KEY_NONE;
     bool ctrl = false;
@@ -3046,7 +3098,7 @@ int main(int argc, const char *argv[])
         case SDLK_x:
         case SDLK_y:
         case SDLK_z:
-          input = (event.key.keysym.mod & KMOD_SHIFT) ? toupper(event.key.keysym.sym) : event.key.keysym.sym;
+          input = (char)((event.key.keysym.mod & KMOD_SHIFT) ? toupper(event.key.keysym.sym) : event.key.keysym.sym);
           break;
         }
         break;
@@ -3064,56 +3116,7 @@ int main(int argc, const char *argv[])
     if (input.code || special_key)
       handle_input(input, special_key, ctrl);
 
-    // boost marker when you move or change modes
-    static Pos prev_pos;
-    static Mode prev_mode;
-    if (prev_pos != G.center_pane->buffer->pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
-      G.marker_background_color.reset();
-      G.highlight_background_color.reset();
-    }
-    prev_pos = G.center_pane->buffer->pos;
-    prev_mode = G.mode;
-
-    G.marker_background_color.tick();
-    G.highlight_background_color.tick();
-    G.bottom_pane_highlight.tick();
-    G.search_term_background_color.tick();
-
-    // highlight some colors
-    static float hue;
-    const float sat = 0.3f;
-    hue = fmodf(hue + 7.0f, 360.0f);
-    if (G.highlight_number)
-      G.number_color = Color::from_hsl(hue, sat, 0.5f);
-    else
-      G.number_color = G.default_number_color;
-    G.default_marker_background_color.tick();
-    G.marker_background_color.popped_color = G.default_marker_background_color.color;
-
-    // render
-    G.font_width = graphics_get_font_advance();
-    G.line_height = G.font_height + G.line_margin;
-    SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
-    glClearColor(G.default_background_color.r, G.default_background_color.g, G.default_background_color.g, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    // reflow panes
-    G.bottom_pane->margin = 3;
-    G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
-    // G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
-    G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.bottom_pane->bounds.h};
-    G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
-
-    // G.side_pane->render_as_menu(0);
-    G.center_pane->render();
-    G.bottom_pane->render();
-
-    /* draw dropdown ? */
-    G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
-    if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
-      render_dropdown(G.bottom_pane);
-    else
-      render_dropdown(&G.main_pane);
+    handle_rendering();
 
     // the quad and text buffers should be empty, but we flush them just to be safe
     render_quads();

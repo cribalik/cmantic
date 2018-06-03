@@ -1,10 +1,14 @@
 
 #ifdef OS_LINUX
-#include <errno.h>
-#include <sys/types.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#endif
+  #include <errno.h>
+  #include <sys/types.h>
+  #include <dirent.h>
+  #include <sys/stat.h>
+#else
+  #include <direct.h>
+  #include <sys/types.h>
+  #include <sys/stat.h>
+#endif /* OS */
 
 
 struct Path;
@@ -324,18 +328,13 @@ struct Utf8Iter {
   }
 };
 
-struct String {
+struct String;
+struct Slice {
   char *chars;
-  int length, cap;
+  int length;
 
   char& operator[](int i) {return chars[i];}
   char operator[](int i) const {return chars[i];}
-
-  String copy() const {
-    String s = {(char*)malloc(length), length, cap};
-    memcpy(s.chars, chars, length);
-    return s;
-  }
 
   Utf8Iter begin() {
     return {chars, chars+length};
@@ -345,12 +344,20 @@ struct String {
     return {};
   }
 
-  String operator()(int a, int b) const {
+  Slice copy() const {
+    Slice s = {};
+    s.chars = (char*)malloc(length);
+    s.length = length;
+    memcpy(s.chars, chars, length);
+    return s;
+  }
+
+  Slice operator()(int a, int b) const {
     if (b < 0)
       b = length+b+1;
     return {chars+a, b-a};
   }
-
+  
   int prev(int i) const {
     for (--i;; --i) {
       if (i < 0)
@@ -415,7 +422,7 @@ struct String {
     return length == n && !memcmp(chars, str, n);
   }
 
-  bool find(int offset, String s, int *result) const {
+  bool find(int offset, const Slice &s, int *result) const {
     void *p = memmem(s.chars, s.length, chars + offset, length - offset);
     if (!p)
       return false;
@@ -436,7 +443,7 @@ struct String {
     return find(0, c, result);
   }
 
-  bool find_r(String s, int *result) const {
+  bool find_r(const Slice& s, int *result) const {
     // TODO: implement properly
     char *p = (char*)memmem(s.chars, s.length, chars, length);
     if (!p)
@@ -464,7 +471,7 @@ struct String {
     return false;
   }
 
-  bool begins_with(int offset, String s) const {
+  bool begins_with(int offset, const Slice& s) const {
     return length - offset >= s.length && !memcmp(s.chars, chars+offset, s.length);
   }
 
@@ -475,6 +482,24 @@ struct String {
   bool begins_with(int offset, const char *str) const {
     int n = strlen(str);
     return length - offset >= n && !memcmp(str, chars+offset, n);
+  }
+
+  static Slice create(const char *str) {
+    return Slice{(char*)str, (int)strlen(str)};
+  }
+
+};
+
+struct String : public Slice {
+  int cap;
+
+  String copy() const {
+    String s;
+    s.chars = (char*)malloc(length);
+    s.length = length;
+    s.cap = cap;
+    memcpy(s.chars, chars, length);
+    return s;
   }
 
   void extend(int l) {
@@ -516,7 +541,7 @@ struct String {
     if (!(c.code & 0xFF00)) goto done;
     buf[n++] = (c.code & 0xFF00) >> 8;
     if (!(c.code & 0xFF0000)) goto done;
-    buf[n++] = (c.code & 0xFF0000) >> 16;
+    buf[n++] = (char)((c.code & 0xFF0000) >> 16);
     if (!(c.code & 0xFF000000)) goto done;
     buf[n++] = (c.code & 0xFF000000) >> 24;
 
@@ -614,7 +639,7 @@ struct String {
     if (!(c.code & 0xFF00)) goto done;
     buf[n++] = (c.code & 0xFF00) >> 8;
     if (!(c.code & 0xFF0000)) goto done;
-    buf[n++] = (c.code & 0xFF0000) >> 16;
+    buf[n++] = (char)((c.code & 0xFF0000) >> 16);
     if (!(c.code & 0xFF000000)) goto done;
     buf[n++] = (c.code & 0xFF000000) >> 24;
 
@@ -679,20 +704,22 @@ struct String {
     #endif
   }
 
-  void operator+=(const String b) {
+  void operator+=(const Slice& b) {
     if (!b.length)
       return;
     extend(b.length);
     memcpy(chars + length - b.length, b.chars, b.length);
   }
 
-  String operator+(int i) {
-    return {chars+i, length-i};
-  }
-
   static String create(const char *str) {
     String s = {};
     s += str;
+    return s;
+  }
+
+  static String create(Slice sl) {
+    String s = {};
+    s += sl;
     return s;
   }
 };
@@ -704,18 +731,22 @@ void util_free(String &s) {
   s.length = s.cap = 0;
 }
 
-bool operator==(String a, const char *str) {
+bool operator==(const Slice& a, const Slice& b) {
+  return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
+}
+
+bool operator==(const Slice& a, const char *str) {
   int l = strlen(str);
   return a.length == l && !memcmp(a.chars, str, l);
 }
 
-bool operator==(const char *str, String a) {
+bool operator==(const char *str, const Slice& a) {
   return a == str;
 }
 
-bool operator==(String a, String b) {
-  return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
-}
+// bool operator==(String a, String b) {
+//   return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
+// }
 
 #endif /* UTIL_STRING */
 
@@ -733,7 +764,11 @@ bool operator==(String a, String b) {
 #define UTIL_FILE
 
 struct Path {
+  #ifdef OS_LINUX
   static const char separator = '/';
+  #else
+  static const char separator = '\\';
+  #endif
 
   static Path base() {
     Path p = {};
@@ -743,17 +778,31 @@ struct Path {
 
   String string;
 
+  void push(const char *str) {
+    string += Path::separator;
+    string += str;
+  }
+
   void push(String file) {
     string += Path::separator;
     string += file;
   }
 
   void pop() {
-    string.find_r(separator, &string.length);
+    int l;
+    if (string.find_r(separator, &l))
+      string.length = l;
   }
 
   Path copy() const {
-    return {string.copy()};
+    return Path{string.copy()};
+  }
+
+  Slice name() const {
+    int x;
+    if (string.find_r(separator, &x))
+      return string(x+1, -1);
+    return string;
   }
 };
 
@@ -768,6 +817,7 @@ enum FileType {
 };
 
 namespace File {
+
   #ifdef OS_LINUX
 
   bool cwd(Path *p) {
@@ -775,16 +825,21 @@ namespace File {
     s.extend(64);
     while (1) {
       char *ptr = getcwd(s.chars, s.length);
+
       if (ptr == s.chars)
         break;
       else if (errno == ERANGE)
         s.extend(64);
       else
-        return false;
+        goto err;
     }
     s.length = strlen(s.chars);
     p->string = s;
     return true;
+
+    err:
+    util_free(s);
+    return false;
   }
 
   FileType filetype(Path path) {
@@ -818,7 +873,61 @@ namespace File {
     return true;
   }
 
-  #endif
+  #else
+
+  bool cwd(Path *p) {
+    String s = {};
+    s.extend(64);
+    int n;
+    while (1) {
+      n = GetCurrentDirectory(s.length, s.chars);
+      if (!n)
+        goto err;
+      if (n <= s.length)
+        break;
+      else
+        s.extend(64);
+    }
+    s.length = n;
+    p->string = s;
+    return true;
+
+    err:
+    util_free(s);
+    return false;
+  }
+
+  FileType filetype(Path path) {
+    DWORD res = GetFileAttributes(path.string.chars);
+    if (res == INVALID_FILE_ATTRIBUTES)
+      return FILETYPE_UNKNOWN;
+    if (res & FILE_ATTRIBUTE_DIRECTORY)
+      return FILETYPE_DIR;
+    if (res & FILE_ATTRIBUTE_NORMAL)
+      return FILETYPE_FILE;
+    return FILETYPE_UNKNOWN;
+  }
+
+  bool list_files(Path &directory, Array<String> *result) {
+    WIN32_FIND_DATA find_data;
+    directory.push("*");
+    HANDLE handle = FindFirstFile(directory.string.chars, &find_data);
+    directory.pop();
+
+    if (handle == INVALID_HANDLE_VALUE)
+      return false;
+
+    do {
+      if (find_data.cFileName[0] == '.')
+        continue;
+      result->push(String::create(find_data.cFileName));
+    } while (FindNextFile(handle, &find_data) != 0);
+
+    FindClose(handle);
+    return true;
+  }
+
+  #endif /* OS */
 }
 
 #endif /* UTIL_FILE */

@@ -9,3 +9,4 @@ include
 *.db
 *.suo
 *.lnk
+.vs
