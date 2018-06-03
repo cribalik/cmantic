@@ -189,6 +189,8 @@ struct TokenInfo {
   int x;
 };
 
+void util_free(TokenInfo) {}
+
 static int calc_num_chars(int i) {
   int result = 0;
   while (i > 0) {
@@ -233,8 +235,9 @@ static bool is_identifier_tail(Utf8char c) {
 }
 
 struct Buffer {
+  String filename;
+
   Array<String> lines;
-  const char *filename;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
   /* parser stuff */
@@ -313,7 +316,16 @@ struct Buffer {
     Pos b;
   };
   TokenResult token_read(Pos *p, int y_end);
+
+  static Buffer* from_file(Slice filename);
 };
+
+void util_free(Buffer &b) {
+  util_free(b.lines);
+  util_free(b.filename);
+  util_free(b.tokens);
+  util_free(b.identifiers);
+}
 
 struct v2 {
   int x;
@@ -461,8 +473,7 @@ struct FileNode {
 };
 
 struct State {
-
-  /* @renderer some rendering state */
+  /* @renderer rendering state */
   SDL_Window *window;
   int font_width;
   int font_height;
@@ -471,7 +482,7 @@ struct State {
   String tmp_render_buffer;
   int win_height, win_width;
 
-  /* some settings */
+  /* settings */
   Color default_background_color;
   Color default_text_color;
   Style default_gutter_style;
@@ -494,10 +505,11 @@ struct State {
   /* highlighting flags */
   bool highlight_number;
 
-  /* some editor state */
+  /* editor state */
   Pane *center_pane;
   Pane *bottom_pane;
   Pane *side_pane;
+  Pane *selected_pane;
 
   Pane main_pane;
   Pane search_pane;
@@ -510,12 +522,9 @@ struct State {
   Buffer dropdown_buffer;
   Pane filetree_pane;
   Buffer filetree_buffer;
-
   Buffer null_buffer;
 
   Mode mode;
-
-  Pane *selected_pane;
 
   /* insert state */
   int insert_mode_begin_y;
@@ -538,6 +547,7 @@ struct State {
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
   #define DROPDOWN_SIZE 7
+
 };
 
 State G;
@@ -611,7 +621,7 @@ static void tokenize(Buffer &b) {
         if (identifier_buffer == b.identifiers[i])
           goto identifier_done;
 
-      b.identifiers += identifier_buffer.copy();
+      b.identifiers.push(identifier_buffer.copy());
 
       identifier_done:;
     }
@@ -670,66 +680,6 @@ static int file_open(FILE **f, const char *filename, const char *mode) {
   #endif
 }
 
-/* grabs ownership of filename */
-static int buffer_from_file(const char *filename, Buffer *buffer_out) {
-  Buffer buffer = {};
-
-  buffer.filename = filename;
-  FILE* f;
-  if (file_open(&f, buffer.filename, "r"))
-    return -1;
-
-  /* get line count */
-  int num_lines = 0;
-  for (char c; (c = (char)fgetc(f)), !feof(f);)
-    num_lines += c == '\n';
-  if (ferror(f))
-    goto err;
-
-  printf("Number of lines: %i\n", num_lines)
-  IF_DEBUG(status_message_set("File has %i rows", num_lines));
-
-  if (num_lines > 0) {
-    buffer.lines.resize(num_lines+1);
-    buffer.lines.zero();
-
-    char c = 0;
-    fseek(f, 0, SEEK_SET);
-    for (int i = 0; i <= num_lines; ++i) {
-      while (1) {
-        c = (char)fgetc(f);
-        if (feof(f)) {
-          if (ferror(f))
-            goto err;
-          goto last_line;
-        }
-        if (c == '\r') c = (char)fgetc(f);
-        if (c == '\n') break;
-        buffer[i] += c;
-      }
-    }
-    last_line:;
-    assert(feof(f));
-  } else {
-    buffer.lines.push();
-  }
-
-  tokenize(buffer);
-
-  buffer.guess_tab_type();
-
-  *buffer_out = buffer;
-  fclose(f);
-  return 0;
-
-  err:
-  buffer.lines.free_recursive();
-  fclose(f);
-
-  return -1;
-}
-
-
 static const char* cman_strerror(int e) {
   #ifdef OS_WINDOWS
     static char buf[128];
@@ -749,12 +699,12 @@ static void save_buffer(Buffer *b) {
 
   assert(b->filename);
 
-  if (file_open(&f, b->filename, "wb")) {
+  if (file_open(&f, b->filename.chars, "wb")) {
     status_message_set("Could not open file %s for writing: %s", b->filename, cman_strerror(errno));
     return;
   }
 
-  printf("Opened file %s\n", b->filename);
+  printf("Opened file %s\n", b->filename.chars);
 
   /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
   for (i = 0; i < b->num_lines(); ++i) {
@@ -1211,7 +1161,7 @@ static void _filetree_fill(Path &path) {
   #endif
 
   err:
-  files.free_recursive();
+  util_free(files);
 }
 
 static void filetree_init() {
@@ -1768,6 +1718,70 @@ void Buffer::move_x(int dx) {
   ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
 }
 
+static Buffer* open_file(Slice filename) {
+  Buffer *buffer = (Buffer*)malloc(sizeof(Buffer));
+  if (!buffer)
+    goto err;
+  Buffer &b = *buffer;
+  b = {};
+
+  b.filename = String::create(filename);
+  FILE* f = 0;
+  if (file_open(&f, b.filename.chars, "r"))
+    goto err;
+
+  /* get line count */
+  int num_lines = 0;
+  for (char c; (c = (char)fgetc(f)), !feof(f);)
+    num_lines += c == '\n';
+  if (ferror(f))
+    goto err;
+
+  printf("Number of lines: %i\n", num_lines)
+  IF_DEBUG(status_message_set("File has %i rows", num_lines));
+
+  if (num_lines > 0) {
+    b.lines.resize(num_lines+1);
+    b.lines.zero();
+
+    char c = 0;
+    fseek(f, 0, SEEK_SET);
+    for (int i = 0; i <= num_lines; ++i) {
+      while (1) {
+        c = (char)fgetc(f);
+        if (feof(f)) {
+          if (ferror(f))
+            goto err;
+          goto last_line;
+        }
+        if (c == '\r') c = (char)fgetc(f);
+        if (c == '\n') break;
+        b[i] += c;
+      }
+    }
+    last_line:;
+    assert(feof(f));
+  } else {
+    b.lines.push();
+  }
+
+  tokenize(b);
+
+  b.guess_tab_type();
+
+  fclose(f);
+  return buffer;
+
+  err:
+  if (buffer) {
+    util_free(*buffer);
+    free(buffer);
+  }
+  if (f)
+    fclose(f);
+  return 0;
+}
+
 void Buffer::move(int dx, int dy) {
   if (dy)
     move_y(dy);
@@ -2295,7 +2309,7 @@ void Buffer::goto_beginline() {
 void Buffer::empty() {
   modified = 1;
 
-  lines.free_recursive();
+  util_free(lines);
   lines.push();
   pos.x = pos.y = 0;
 }

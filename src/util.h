@@ -174,12 +174,6 @@ struct Array {
     memcpy(data+size-n, data, n*sizeof(T));
   }
 
-  void free_recursive() {
-    for (int i = 0; i < size; ++i)
-      util_free(data[i]);
-    util_free(*this);
-  }
-
   void clear() {
     size = 0;
   }
@@ -187,8 +181,11 @@ struct Array {
 
 template<class T>
 void util_free(Array<T> &a) {
-  if (a.data)
+  if (a.data) {
+    for (int i = 0; i < a.size; ++i)
+      util_free(a.data[i]);
     ::free(a.data);
+  }
   a.data = 0;
   a.size = a.cap = 0;
 }
@@ -346,13 +343,13 @@ struct Slice {
     return {};
   }
 
-  Slice copy() const {
-    Slice s = {};
-    s.chars = (char*)malloc(length);
-    s.length = length;
-    memcpy(s.chars, chars, length);
-    return s;
-  }
+  // String copy() const {
+  //   Slice s = {};
+  //   s.chars = (char*)malloc(length);
+  //   s.length = length;
+  //   memcpy(s.chars, chars, length);
+  //   return s;
+  // }
 
   Slice operator()(int a, int b) const {
     if (b < 0)
@@ -489,8 +486,13 @@ struct Slice {
   static Slice create(const char *str) {
     return Slice{(char*)str, (int)strlen(str)};
   }
-
 };
+
+void util_free(Slice &s) {
+  s.chars = 0;
+  s.length = 0;
+  return;
+}
 
 struct String : public Slice {
   int cap;
