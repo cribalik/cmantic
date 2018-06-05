@@ -82,65 +82,6 @@
     #define IF_DEBUG(stmt)
   #endif
 
-// @utils
-  #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
-  #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
-  #define foreach(a) for (auto it = a; it < (a)+ARRAY_LEN(a); ++it)
-  #define findn_min_by(array, n, ptr, field) do { \
-        ptr = array; \
-        for (auto _it = array; _it < array + n; ++_it) { \
-          if (_it->field < ptr->field) { \
-            ptr = _it; \
-          } \
-        } \
-    } while (0)
-  #define find_min_by(array, ptr, field) findn_min_by(array, ARRAY_LEN(array), ptr, field)
-  typedef unsigned int u32;
-  STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
-  #if 0
-  static void Array<char> array_push_str(const char *str) {
-    for (; *str; ++str)
-      array_push(*a, *str);
-  }
-  #endif
-
-  static void panic(const char *fmt = "", ...) {
-    // term_reset_to_default_settings();
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
-    fflush(stderr);
-
-    abort();
-  }
-
-  #define at_least(a,b) max((a),(b))
-  #define at_most(a, b) min((a),(b))
-
-  /* a,b inclusive */
-  template<class T>
-  static T clamp(T x, T a, T b) {
-    return x < a ? a : (b < x ? b : x);
-  }
-
-  template<class T>
-  T max(T a, T b) {return a < b ? b : a;}
-  template<class T>
-  T min(T a, T b) {return b < a ? b : a;}
-
-  float angle_to_range(float v, float a, float b) {
-    return (sinf(v)*0.5f + 0.5f)*(b-a) + a;
-  }
-
-  template<class T>
-  void swap(T &a, T &b) {
-    T tmp;
-    tmp = a;
-    a = b;
-    b = tmp;
-  }
-
 enum Mode {
   MODE_NORMAL,
   MODE_INSERT,
@@ -270,9 +211,9 @@ struct Buffer {
   void update();
   bool find_r(StringBuffer s, int stay, Pos *pos);
   bool find_r(char c, int stay, Pos *pos);
-  bool find(StringBuffer s, bool stay, Pos *pos);
+  bool find(Slice s, bool stay, Pos *pos);
   bool find(char c, bool stay, Pos *pos);
-  bool find_and_move(StringBuffer s, bool stay);
+  bool find_and_move(Slice s, bool stay);
   bool find_and_move(char c, bool stay);
   bool find_and_move_r(StringBuffer s, bool stay);
   bool find_and_move_r(char c, bool stay);
@@ -697,7 +638,7 @@ static void save_buffer(Buffer *b) {
   FILE* f;
   int i;
 
-  assert(b->filename);
+  assert(b->filename.length);
 
   if (file_open(&f, b->filename.chars, "wb")) {
     status_message_set("Could not open file %s for writing: %s", b->filename, cman_strerror(errno));
@@ -1432,7 +1373,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
           goto done;
         }
       }
-      status_message_set("Unknown option '{}'", G.menu_buffer[0]);
+      status_message_set("Unknown option '{}'", &G.menu_buffer[0]);
       done:
 
       mode_normal(false);
@@ -1469,14 +1410,14 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       insert_default(&G.search_pane, special_key, input, ctrl);
 
     search = G.search_buffer.lines[0];
-    G.search_failed = !buffer.find_and_move(search, true);
+    G.search_failed = !buffer.find_and_move(search.str(), true);
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
       if (G.dropdown_visible)
-        G.search_failed = !buffer.find_and_move(search, true);
+        G.search_failed = !buffer.find_and_move(search.str(), true);
       if (G.search_failed) {
         buffer.pos = G.search_begin_pos;
-        status_message_set("'{}' not found", G.search_buffer[0]);
+        status_message_set("'{}' not found", &G.search_buffer[0]);
         mode_normal(false);
       } else
         mode_normal(true);
@@ -1575,14 +1516,14 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     case 'n':
       G.search_term_background_color.reset();
-      if (!buffer.find_and_move(G.search_buffer[0], false))
-        status_message_set("'{}' not found", G.search_buffer[0]);
+      if (!buffer.find_and_move(G.search_buffer[0].str(), false))
+        status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
     case 'N':
       G.search_term_background_color.reset();
       if (!buffer.find_and_move_r(G.search_buffer[0], false))
-        status_message_set("'{}' not found", G.search_buffer[0]);
+        status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
     case ' ':
@@ -1721,9 +1662,9 @@ void Buffer::move_x(int dx) {
 Buffer* Buffer::from_file(Slice filename) {
   FILE* f = 0;
   Buffer *buffer = (Buffer*)malloc(sizeof(Buffer));
+  Buffer &b = *buffer;
   if (!buffer)
     goto err;
-  Buffer &b = *buffer;
   b = {};
 
   b.filename = filename.copy();
@@ -1731,38 +1672,40 @@ Buffer* Buffer::from_file(Slice filename) {
     goto err;
 
   /* get line count */
-  int num_lines = 0;
-  for (char c; (c = (char)fgetc(f)), !feof(f);)
-    num_lines += c == '\n';
-  if (ferror(f))
-    goto err;
+  {
+    int num_lines = 0;
+    for (char c; (c = (char)fgetc(f)), !feof(f);)
+      num_lines += c == '\n';
+    if (ferror(f))
+      goto err;
 
-  printf("Number of lines: %i\n", num_lines)
-  IF_DEBUG(status_message_set("File has %i rows", num_lines));
+    printf("Number of lines: %i\n", num_lines)
+    IF_DEBUG(status_message_set("File has %i rows", num_lines));
 
-  if (num_lines > 0) {
-    b.lines.resize(num_lines+1);
-    b.lines.zero();
+    if (num_lines > 0) {
+      b.lines.resize(num_lines+1);
+      b.lines.zero();
 
-    char c = 0;
-    fseek(f, 0, SEEK_SET);
-    for (int i = 0; i <= num_lines; ++i) {
-      while (1) {
-        c = (char)fgetc(f);
-        if (feof(f)) {
-          if (ferror(f))
-            goto err;
-          goto last_line;
+      char c = 0;
+      fseek(f, 0, SEEK_SET);
+      for (int i = 0; i <= num_lines; ++i) {
+        while (1) {
+          c = (char)fgetc(f);
+          if (feof(f)) {
+            if (ferror(f))
+              goto err;
+            goto last_line;
+          }
+          if (c == '\r') c = (char)fgetc(f);
+          if (c == '\n') break;
+          b[i] += c;
         }
-        if (c == '\r') c = (char)fgetc(f);
-        if (c == '\n') break;
-        b[i] += c;
       }
+      last_line:;
+      assert(feof(f));
+    } else {
+      b.lines.push();
     }
-    last_line:;
-    assert(feof(f));
-  } else {
-    b.lines.push();
   }
 
   tokenize(b);
@@ -1796,7 +1739,7 @@ void Buffer::update() {
 bool Buffer::find_r(StringBuffer s, int stay, Pos *p) {
   int x, y;
 
-  if (!s)
+  if (!s.length)
     return false;
 
   x = p->x;
@@ -1878,9 +1821,9 @@ bool Buffer::find(char s, bool stay, Pos *p) {
   return false;
 }
 
-bool Buffer::find(StringBuffer s, bool stay, Pos *p) {
+bool Buffer::find(Slice s, bool stay, Pos *p) {
   int x, y;
-  if (!s)
+  if (!s.length)
     return false;
 
   x = p->x;
@@ -1932,7 +1875,7 @@ bool Buffer::find_and_move(char c, bool stay) {
   return true;
 }
 
-bool Buffer::find_and_move(StringBuffer s, bool stay) {
+bool Buffer::find_and_move(Slice s, bool stay) {
   Pos p = pos;
   if (!find(s, stay, &p))
     return false;
@@ -2232,7 +2175,7 @@ void Buffer::guess_tab_type() {
   /* TODO: use tokens here instead, so we skip comments */
   tab_type = -1;
   for (i = 0; i < lines.size; ++i) {
-    if (!lines[i])
+    if (!lines[i].length)
       continue;
 
     /* skip comments */
@@ -2257,7 +2200,7 @@ void Buffer::guess_tab_type() {
       }
     }
 
-    if (!lines[i])
+    if (!lines[i].length)
       continue;
 
     if (lines[i][0] == '\t') {
@@ -2694,7 +2637,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         // otherwise check for functions
         // we assume something not indented and followed by a '(' is a function
         // TODO: @utf8
-        if (isspace(b.getchar(0, prev.y).ansi()))
+        if (b.getchar(0, prev.y).isspace())
           break;
         t = b.token_read(&pos, y1);
         if (t.tok != '(') {
@@ -2725,7 +2668,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
       next.x -= x0;
       next.y -= y0;
 
-      canvas.fill_textcolor({prev, next}, Rect{0, -1, -1}, highlighted_text_color);
+      canvas.fill_textcolor({prev, next}, Rect{0, 0, -1, -1}, highlighted_text_color);
     }
 
     if (pos.y > y1)
@@ -2735,6 +2678,8 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
 
 void Pane::render() {
   switch (type) {
+    case PANETYPE_NULL:
+      break;
     case PANETYPE_EDIT:
       render_as_edit();
       break;
@@ -2822,7 +2767,7 @@ void Pane::render_as_edit() {
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
     Pos pos = {0, buf_offset.y};
-    while (b.find(G.search_buffer.lines[0], false, &pos) && pos.y < buf_y1)
+    while (b.find(G.search_buffer.lines[0].str(), false, &pos) && pos.y < buf_y1)
       canvas.fill_background({buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
   }
 
@@ -2870,35 +2815,34 @@ void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
   Pos a = range.a;
   Pos b = range.b;
   if (bounds.w == -1)
-    bounds.w = this->w - bounds.x;
+    bounds.w = w - bounds.x;
   if (bounds.h == -1)
-    bounds.h = this->h - bounds.y;
-  // single line outside of bounds, early exit
-  if (a.y == b.y && (b.x < 0 || a.x > this->w))
-    return;
+    bounds.h = h - bounds.y;
 
-  int x,y,x0,x1,y0,y1;
-  a.x = clamp(a.x, 0, bounds.w-1);
-  a.y = clamp(a.y, 0, bounds.h-1);
-  b.x = clamp(b.x, 0, bounds.w-1);
-  b.y = clamp(b.y, 0, bounds.h-1);
-  x0 = bounds.x;
-  x1 = bounds.x + bounds.w;
-  y0 = bounds.y + a.y;
-  y1 = bounds.y + b.y;
+  bounds.x = clamp(bounds.x, 0, w-1);
+  bounds.w = clamp(bounds.w, 0, w-bounds.x);
+  bounds.y = clamp(bounds.y, 0, h-1);
+  bounds.h = clamp(bounds.h, 0, h-bounds.y);
 
-  if (y0 == y1) {
-    for (x = x0 + a.x, y = y0; x <= x0 + b.x; ++x)
-      this->styles[y*this->w + x].text_color = c;
+  a.x = clamp(a.x, bounds.x, bounds.w-1);
+  a.y = clamp(a.y, bounds.y, bounds.h-1);
+  b.x = clamp(b.x, bounds.x, bounds.w-1);
+  b.y = clamp(b.y, bounds.y, bounds.h-1);
+
+  if (a.y == b.y) {
+    for (int x = a.x; x <= b.x; ++x)
+      this->styles[a.y*this->w + x].text_color = c;
     return;
   }
 
-  for (x = x0 + a.x, y = y0; x < x1 && y < y1; ++x)
-    this->styles[y*this->w + x].text_color = c;
-  for (++y; y < y1; ++y)
-  for (x = x0; x < x1; ++x)
-    this->styles[y*this->w + x].text_color = c;
-  for (x = x0; x <= x0 + b.x; ++x)
+  int y = a.y;
+  if (y < b.y)
+    for (int x = a.x; x < bounds.x+bounds.w; ++x)
+      this->styles[y*this->w + x].text_color = c;
+  for (++y; y < b.y; ++y)
+    for (int x = bounds.x; x < bounds.x+bounds.w; ++x)
+      this->styles[y*this->w + x].text_color = c;
+  for (int x = bounds.x; x <= b.x; ++x)
     this->styles[y*this->w + x].text_color = c;
 }
 
@@ -2935,7 +2879,7 @@ void Canvas::fill_background(Rect r, Color c) {
 }
 
 void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
-  if (!s)
+  if (!s.length)
     return;
 
   if (xclip1 == -1)
@@ -3025,7 +2969,7 @@ void Canvas::render(Pos offset) {
   // render background
   for (int y = 0; y < h; ++y) {
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-      if (styles[y*w + x1] == styles[y*w + x0] && x1 < w)
+      if (x1 < w && styles[y*w + x1] == styles[y*w + x0])
         continue;
       Pos p0 = char2pixel(x0,y) + offset;
       Pos p1 = char2pixel(x1,y+1) + offset;
@@ -3042,7 +2986,7 @@ void Canvas::render(Pos offset) {
     G.tmp_render_buffer.append(&chars[row*w], w);
     int y = char2pixely(row+1) + text_offset_y + offset.y;
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-      if (styles[row*w + x1].text_color == styles[row*w + x0].text_color && x1 < w)
+      if (x1 < w && styles[row*w + x1].text_color == styles[row*w + x0].text_color)
         continue;
       int x = char2pixelx(x0) + offset.x;
       push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, styles[row*w + x0].text_color);
@@ -3071,7 +3015,6 @@ int Pane::numchars_y() const {
   return (this->bounds.h - 2*this->margin) / G.line_height + 1;
 }
 
-#ifdef DEBUG
 static void test() {
   assert(memmem("a", 1, "a", 1));
   assert(!memmem("", 0, "", 0));
@@ -3083,8 +3026,23 @@ static void test() {
   assert(!memmem("aa", 2, "a", 1));
   assert(memmem("abcd", 4, "abcd", 4));
   assert(memmem("abcd", 4, "xabcdy", 6));
+  Slice a = Slice::create("hello world");
+  Slice b = Slice::create("hello");
+  printf("%s %i\n", b(2,-1).chars, b(2,-1).length);
+  assert(a.begins_with(0, b));
+  assert(a.begins_with(2, b(2, -1)));
+  int x;
+  b = Slice::create("llo");
+  assert(a.find(2, b, &x));
+  printf("%i\n", x);
+  assert(x == 2);
+  assert(a.find(1, b, &x));
+  printf("%i\n", x);
+  assert(x == 2);
+  assert(a.find(0, b, &x));
+  printf("%i\n", x);
+  assert(x == 2);
 }
-#endif
 
 #if 1
 #include <type_traits>
@@ -3098,6 +3056,8 @@ int main(int, const char *[])
 #endif
 {
   state_init();
+
+  test();
 
   /* open a buffer */
   G.main_pane.buffer = Buffer::from_file(Slice::create("src/cmantic.cpp"));

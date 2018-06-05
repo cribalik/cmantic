@@ -10,19 +10,64 @@
   #include <sys/stat.h>
 #endif /* OS */
 
-#define CAST(type, val) (*(type*)(&(val)))
-
 struct Path;
 struct Slice;
-struct String;
-struct Slice;
-struct StringBuffer;
+union String;
+union StringBuffer;
 void util_free(Path &p);
 void util_free(StringBuffer &s);
 void util_free(String &s);
 void util_free(Slice &s);
 template<class T> struct Array;
 template<class T> void util_free(Array<T> &);
+
+#define CAST(type, val) (*(type*)(&(val)))
+#define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
+#define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
+#define foreach(a) for (auto it = a; it < (a)+ARRAY_LEN(a); ++it)
+#define findn_min_by(array, n, ptr, field) do { \
+      ptr = array; \
+      for (auto _it = array; _it < array + n; ++_it) { \
+        if (_it->field < ptr->field) { \
+          ptr = _it; \
+        } \
+      } \
+  } while (0)
+#define find_min_by(array, ptr, field) findn_min_by(array, ARRAY_LEN(array), ptr, field)
+typedef unsigned int u32;
+STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
+#if 0
+static void Array<char> array_push_str(const char *str) {
+  for (; *str; ++str)
+    array_push(*a, *str);
+}
+#endif
+
+#define at_least(a,b) max((a),(b))
+#define at_most(a, b) min((a),(b))
+
+/* a,b inclusive */
+template<class T>
+static T clamp(T x, T a, T b) {
+  return x < a ? a : (b < x ? b : x);
+}
+
+template<class T>
+T max(T a, T b) {return a < b ? b : a;}
+template<class T>
+T min(T a, T b) {return b < a ? b : a;}
+
+float angle_to_range(float v, float a, float b) {
+  return (sinf(v)*0.5f + 0.5f)*(b-a) + a;
+}
+
+template<class T>
+void swap(T &a, T &b) {
+  T tmp;
+  tmp = a;
+  a = b;
+  b = tmp;
+}
 
 
 /***************************************************************
@@ -238,8 +283,6 @@ void util_free(Array<T> &a) {
 #define is_utf8_head(c) ((c)&0x80)
 #define is_utf8_symbol(c) ((c)&0x80)
 
-typedef unsigned int u32;
-
 struct Utf8char {
   u32 code;
 
@@ -336,13 +379,11 @@ struct Utf8Iter {
 #define TO_STR(s) (*(Slice*)(&(s)))
 
 #define STRING_METHODS_DECLARATION \
-  operator bool() const {return length;} \
   char& operator[](int i); \
   const char& operator[](int i) const; \
   Slice operator()(int a, int b) const; \
   Utf8Iter begin() const; \
   Utf8Iter end() const; \
-  Slice slice() const; \
   int prev(int i) const; \
   int next(int i) const; \
   int from_visual_offset(int x, int tab_width) const; \
@@ -360,16 +401,16 @@ struct Utf8Iter {
   bool begins_with(int offset, StringBuffer s) const; \
   bool begins_with(int offset, const char *str, int n) const; \
   bool begins_with(int offset, const char *str) const; \
+  bool empty() const {return length;}; \
   String copy() const; \
   Slice& str() const {return *(Slice*)this;}
 
 #define STRING_METHODS_IMPL(classname) \
-  char& classname::operator[](int i) {return chars[i];} \
+  char& classname::operator[](int i) {return (char&)chars[i];} \
   const char& classname::operator[](int i) const {return chars[i];} \
   Slice classname::operator()(int a, int b) const {return Slice::slice(chars,length,a,b);} \
-  Utf8Iter classname::begin() const {return {chars, chars+length};} \
+  Utf8Iter classname::begin() const {return Utf8Iter{(char*)chars, (char*)chars+length};} \
   Utf8Iter classname::end() const {return {};} \
-  Slice classname::slice() const {return Slice{chars, length};} \
   int classname::prev(int i) const {return Slice::prev(chars, i);} \
   int classname::next(int i) const {return Slice::next(chars, length, i);} \
   int classname::from_visual_offset(int x, int tab_width) const {return Slice::from_visual_offset(chars, length, x, tab_width);} \
@@ -378,13 +419,13 @@ struct Utf8Iter {
   bool classname::find(int offset, Slice s, int *result) const {return Slice::find(chars, length, offset, s, result);} \
   bool classname::find(int offset, char c, int *result) const {return Slice::find(chars, length, offset, c, result);} \
   bool classname::find(char c, int *result) const {return Slice::find(chars, length, c, result);} \
-  bool classname::find_r(String s, int *result) const {return Slice::find_r(s.chars, s.length, TO_STR(s), result);} \
-  bool classname::find_r(Slice s, int *result) const {return Slice::find_r(s.chars, s.length, TO_STR(s), result);} \
-  bool classname::find_r(StringBuffer s, int *result) const {return Slice::find_r(s.chars, s.length, TO_STR(s), result);} \
+  bool classname::find_r(String s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
+  bool classname::find_r(Slice s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
+  bool classname::find_r(StringBuffer s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
   bool classname::find_r(char c, int *result) const {return Slice::find_r(chars, length, c, result);} \
-  bool classname::begins_with(int offset, String s) const {return Slice::begins_with(s.chars, s.length, offset, TO_STR(s));} \
-  bool classname::begins_with(int offset, Slice s) const {return Slice::begins_with(s.chars, s.length, offset, TO_STR(s));} \
-  bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(s.chars, s.length, offset, TO_STR(s));} \
+  bool classname::begins_with(int offset, String s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
+  bool classname::begins_with(int offset, Slice s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
+  bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, const char *str, int n) const {return Slice::begins_with(chars, length, offset, str, n);} \
   bool classname::begins_with(int offset, const char *str) const {return Slice::begins_with(chars, length, offset, str);} \
   String classname::copy() const {return Slice::copy(chars, length);};
@@ -392,7 +433,7 @@ struct Utf8Iter {
 // A non-owning string
 
 struct Slice {
-  char *chars;
+  const char *chars;
   int length;
 
   static Slice slice(const char *str, int len, int a, int b);
@@ -463,7 +504,7 @@ struct Slice {
     return length == n && !memcmp(chars, str, n);
   }
 
-  static bool find(const char *chars, int length, int offset, Slice &s, int *result) {
+  static bool find(const char *chars, int length, int offset, Slice s, int *result) {
     const void *p = memmem(s.chars, s.length, chars + offset, length - offset);
     if (!p)
       return false;
@@ -525,14 +566,14 @@ struct Slice {
     return length - offset >= n && !memcmp(str, chars+offset, n);
   }
 
-  static Slice create(char *s, int len) {
+  static Slice create(const char *s, int len) {
     Slice sl;
     sl.chars = s;
     sl.length = len;
     return sl;
   }
 
-  static Slice create(char *s) {
+  static Slice create(const char *s) {
     return Slice::create(s, strlen(s));
   }
 
@@ -551,9 +592,12 @@ static bool operator==(Slice a, const char *str) {
 }
 
 // A string that owns its data
-struct String {
-  char *chars;
-  int length;
+union String {
+  struct {
+    char *chars;
+    int length;
+  };
+  Slice slice;
 
   static String create(const char *str, int len) {
     String s;
@@ -581,10 +625,13 @@ void util_free(String &s) {
   return;
 }
 
-struct StringBuffer {
-  char *chars;
-  int length;
-  int cap;
+union StringBuffer {
+  struct {
+    char *chars;
+    int length;
+    int cap;
+  };
+  Slice slice;
 
   void resize(int l) {
     if (l > length)
@@ -918,7 +965,7 @@ struct Path {
     int x;
     if (string.find_r(separator, &x))
       return string(x+1, -1);
-    return string.slice();
+    return string.slice;
   }
 };
 
