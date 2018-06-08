@@ -268,6 +268,8 @@ static int graphics_init(SDL_Window **window) {
   }
   gl_ok_or_die;
 
+  SDL_GL_SetSwapInterval(1);
+
   // load gl functions
   *(void**) (&glEnableVertexAttribArray) = (void*)SDL_GL_GetProcAddress("glEnableVertexAttribArray");
   if (!glEnableVertexAttribArray) { fprintf(stderr, "Couldn't load gl function \"glEnableVertexAttribArray\"\n"); return 1;}

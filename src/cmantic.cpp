@@ -25,6 +25,7 @@
  * Fuzzy file finding
  * movement (parentheses, block, etc.)
  * actions (Delete, Yank, ...)
+ * SDL doesn't handle caps-escape swapping correctly on Windows.. We probably need to use VK directly for windows
  * add folders
  */
 // @includes
@@ -384,9 +385,9 @@ struct PoppedColor {
   Color color;
 
   void reset() {amount = max + cooldown*speed*(max-min);}
-  void tick() {
+  void tick(float dt) {
     assert(speed);
-    amount -= speed*(max-min)*0.04f;
+    amount -= dt*speed*(max-min)*0.04f;
     color = Color::blend(base_color, popped_color, clamp(amount, min, max));
   }
 };
@@ -398,8 +399,8 @@ struct RotatingColor {
   float hue; // 0
   Color color;
 
-  void tick() {
-    hue = fmodf(hue + speed*0.1f, 360.0f);
+  void tick(float dt) {
+    hue = fmodf(hue + dt*speed*0.1f, 360.0f);
     color = Color::from_hsl(hue, saturation, light);
   }
   void jump() {
@@ -1564,7 +1565,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
   }
 }
 
-static void handle_rendering() {
+static void handle_rendering(float dt) {
   // boost marker when you move or change modes
   static Pos prev_pos;
   static Mode prev_mode;
@@ -1576,13 +1577,13 @@ static void handle_rendering() {
   prev_mode = G.mode;
 
   // update colors
-  G.marker_background_color.tick();
-  G.highlight_background_color.tick();
-  G.bottom_pane_highlight.tick();
-  G.search_term_background_color.tick();
+  G.marker_background_color.tick(dt);
+  G.highlight_background_color.tick(dt);
+  G.bottom_pane_highlight.tick(dt);
+  G.search_term_background_color.tick(dt);
 
   // highlight some colors
-  G.default_marker_background_color.tick();
+  G.default_marker_background_color.tick(dt);
   G.marker_background_color.popped_color = G.default_marker_background_color.color;
 
   // render
@@ -3063,6 +3064,10 @@ int main(int, const char *[])
   G.main_pane.buffer = Buffer::from_file(Slice::create("src/cmantic.cpp"));
 
   for (;;) {
+    static u32 ticks = SDL_GetTicks();
+    float dt = (float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f;
+    ticks = SDL_GetTicks();
+
     Utf8char input = {};
     SpecialKey special_key = KEY_NONE;
     bool ctrl = false;
@@ -3153,7 +3158,7 @@ int main(int, const char *[])
     if (input.code || special_key)
       handle_input(input, special_key, ctrl);
 
-    handle_rendering();
+    handle_rendering(dt);
 
     // the quad and text buffers should be empty, but we flush them just to be safe
     render_quads();
