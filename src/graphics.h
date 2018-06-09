@@ -592,8 +592,8 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
       chr = '?';
     Glyph g = graphics_text_state.glyphs[chr - 32];
 
-    u16 x = pos_x + (int)g.offset_x;
-    u16 y = pos_y + (int)g.offset_y;
+    u16 x = (u16)(pos_x + (int)g.offset_x);
+    u16 y = (u16)(pos_y + (int)g.offset_y);
     u16 w = (g.x1 - g.x0);
     u16 h = (g.y1 - g.y0);
 
