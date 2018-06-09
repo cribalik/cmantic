@@ -1,5 +1,6 @@
 /*
  * TODO:
+ *   Use PANETYPE_MENU.options instead of buffer.identifiers
  *   File tree
  *
  * Update identifiers as you type
@@ -8,7 +9,6 @@
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
- * File system
  * Undo
  * Folding
  * Multiuser editing
@@ -324,9 +324,15 @@ void util_free(Canvas &c) {
 enum PaneType {
   PANETYPE_NULL,
   PANETYPE_EDIT,
+  PANETYPE_DROPDOWN,
   PANETYPE_MENU,
-  PANETYPE_SINGLE_LINE,
 };
+
+struct MenuOption {
+  Slice name;
+  Slice description;
+};
+
 struct Pane {
   PaneType type;
 
@@ -335,7 +341,7 @@ struct Pane {
   const Color *highlight_background_color;
   const Color *text_color;
   bool syntax_highlight;
-  Buffer *buffer;
+  Buffer *buffer; // TODO: move to PANETYPE_EDIT specific data
   int _gutter_width;
 
   // visual settings
@@ -347,12 +353,13 @@ struct Pane {
     struct {
     };
 
-    // PANETYPE_SINGLE_LINE
+    // PANETYPE_MENU
     struct {
       String prefix;
-    } single_line;
+      Array<MenuOption> options;
+    } menu;
 
-    // PANETYPE_MENU
+    // PANETYPE_DROPDOWN
     struct {
     };
   };
@@ -362,8 +369,8 @@ struct Pane {
 
   // internal methods
   void render_as_edit();
+  void render_as_dropdown();
   void render_as_menu();
-  void render_as_single_line();
   void render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
@@ -377,6 +384,16 @@ struct Pane {
   Pos buf2char(Pos p) const;
   Pos buf2pixel(Pos p) const;
 };
+
+void util_free(Pane &p) {
+  switch (p.type) {
+  case PANETYPE_MENU:
+    util_free(p.menu.prefix);
+    break;
+  default:
+    break;
+  }
+}
 
 struct PoppedColor {
   Color base_color;
@@ -455,7 +472,6 @@ struct State {
   /* editor state */
   Pane *center_pane;
   Pane *bottom_pane;
-  Pane *side_pane;
   Pane *selected_pane;
 
   Pane main_pane;
@@ -698,6 +714,9 @@ static struct {const char *name; void(*fun)();} menu_options[] = {
 };
 
 static void mode_cleanup() {
+  if (G.mode == MODE_FILESEARCH)
+    G.filetree_buffer.empty();
+
   G.dropdown_visible = false;
 }
 
@@ -877,14 +896,15 @@ static bool find_start_of_identifier(Buffer &b, Pos pos, Pos &pout) {
 }
 
 static void dropdown_autocomplete(Buffer &b) {
-  if (!G.dropdown_visible || G.dropdown_buffer.isempty())
+  if (!G.dropdown_visible || G.dropdown_buffer.isempty() || G.dropdown_buffer.markers.size > 1)
     return;
 
   Pos start;
   if (!find_start_of_identifier(b, b.markers[0].pos, start))
     return;
-  Slice s = G.dropdown_buffer[G.dropdown_buffer.markers[0].y](b.markers[0].x - start.x, -1);
-  b.insert(s);
+  for (int i = b.markers[0].x - start.x; i; --i)
+    b.delete_char();
+  b.insert(G.dropdown_buffer[G.dropdown_buffer.markers[0].y].slice);
   G.dropdown_visible = false;
 }
 
@@ -907,7 +927,7 @@ static void render_dropdown(Pane *active_pane) {
   G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
 
   if (!G.dropdown_buffer.isempty())
-    G.dropdown_pane.render_as_menu();
+    G.dropdown_pane.render();
 }
 
 static void dropdown_update(Pane *pane) {
@@ -1155,7 +1175,6 @@ static void _filetree_fill(Path &path) {
     if (File::filetype(path) == FILETYPE_DIR)
       _filetree_fill(path);
     else {
-      G.filetree_buffer.push_line(path.name());
       String name = path.name().copy();
       G.filetree_buffer.identifiers += name;
     }
@@ -1263,40 +1282,40 @@ static void state_init() {
 
   // search pane
   G.search_buffer.empty();
-  G.search_pane.type = PANETYPE_SINGLE_LINE;
+  G.search_pane.type = PANETYPE_MENU;
   G.search_pane.buffer = &G.search_buffer;
   G.search_pane.syntax_highlight = true;
   G.search_pane.background_color = &G.bottom_pane_highlight.color;
   G.search_pane.text_color = &G.default_text_color;
   // G.search_pane.highlight_background_color = &G.highlight_background_color.color;
   G.search_pane.margin = 5;
-  G.search_pane.single_line.prefix = String::create("search: ");
+  G.search_pane.menu.prefix = String::create("search: ");
 
   // menu pane
   G.menu_buffer.empty();
-  G.menu_pane.type = PANETYPE_SINGLE_LINE;
+  G.menu_pane.type = PANETYPE_MENU;
   G.menu_pane.buffer = &G.menu_buffer;
   G.menu_pane.syntax_highlight = true;
   G.menu_pane.background_color = &G.bottom_pane_highlight.color;
   G.menu_pane.text_color = &G.default_text_color;
   // G.menu_pane.highlight_background_color = &G.highlight_background_color.color;
   G.menu_pane.margin = 5;
-  G.menu_pane.single_line.prefix = String::create("menu: ");
+  G.menu_pane.menu.prefix = String::create("menu: ");
 
   // file tree pane
   G.filetree_buffer.empty();
-  G.filetree_pane.type = PANETYPE_SINGLE_LINE;
+  G.filetree_pane.type = PANETYPE_MENU;
   G.filetree_pane.buffer = &G.filetree_buffer;
   G.filetree_pane.syntax_highlight = false;
   G.filetree_pane.background_color = &COLOR_GREY;
-  G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.text_color = &G.default_text_color;
+  // G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.margin = 5;
-  G.filetree_pane.single_line.prefix = String::create("open: ");
+  G.filetree_pane.menu.prefix = String::create("open: ");
 
   // dropdown pane
   G.dropdown_buffer.empty();
-  G.dropdown_pane.type = PANETYPE_MENU;
+  G.dropdown_pane.type = PANETYPE_DROPDOWN;
   G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.background_color = &COLOR_GREY;
   G.dropdown_pane.text_color = &COLOR_WHITE;
@@ -1305,7 +1324,7 @@ static void state_init() {
 
   // status message pane
   G.status_message_buffer.empty();
-  G.status_message_pane.type = PANETYPE_SINGLE_LINE;
+  G.status_message_pane.type = PANETYPE_MENU;
   G.status_message_pane.buffer = &G.status_message_buffer;
   G.status_message_pane.syntax_highlight = true;
   G.status_message_pane.background_color = &G.bottom_pane_highlight.color;
@@ -1313,7 +1332,6 @@ static void state_init() {
   // G.status_message_pane.highlight_background_color = &G.highlight_background_color.color;
   G.status_message_pane.margin = 5;
 
-  G.side_pane = &G.filetree_pane;
   G.center_pane = &G.main_pane;
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = &G.main_pane;
@@ -1409,17 +1427,26 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
   case MODE_FILESEARCH:
     if (special_key == KEY_RETURN) {
-      dropdown_autocomplete(G.filetree_buffer);
       Slice filename = G.filetree_buffer[0].slice;
-      Buffer *b = Buffer::from_file(filename);
+
+      Buffer **b = 0;
+      ARRAY_FIND(G.buffers, b, (*b)->filename.slice == filename);
       if (b) {
-        G.buffers.push(b);
-        G.main_pane.buffer = b;
-        status_message_set("Loaded file {}\n", &filename);
-      } else {
-        status_message_set("Failed to load file {}\n", &filename);
+        status_message_set("Switched to {}", &filename);
+        G.main_pane.buffer = *b;
       }
-      mode_normal(true);
+      else {
+        Buffer *b = Buffer::from_file(filename);
+        if (b) {
+          G.buffers.push(b);
+          G.main_pane.buffer = b;
+          status_message_set("Loaded file {}", &filename);
+        } else {
+          status_message_set("Failed to load file {}", &filename);
+        }
+      }
+      G.filetree_buffer.empty();
+      mode_normal(false);
     }
     else
       insert_default(G.bottom_pane, special_key, input, ctrl);
@@ -1641,17 +1668,15 @@ static void handle_rendering(float dt) {
   // reflow panes
   G.bottom_pane->margin = 3;
   G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
-  // G.side_pane->bounds = {0, 0, 200, G.win_height - G.bottom_pane->bounds.h};
-  G.center_pane->bounds = {G.side_pane->bounds.w, 0, G.win_width - G.side_pane->bounds.w, G.win_height - G.bottom_pane->bounds.h};
+  G.center_pane->bounds = {0, 0, G.win_width, G.win_height - G.bottom_pane->bounds.h};
   G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
-  // G.side_pane->render();
   G.center_pane->render();
   G.bottom_pane->render();
 
   /* draw dropdown ? */
   G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
-  if (G.mode == MODE_SEARCH || G.mode == MODE_MENU)
+  if (G.mode == MODE_SEARCH || G.mode == MODE_MENU || G.mode == MODE_FILESEARCH)
     render_dropdown(G.bottom_pane);
   else
     render_dropdown(&G.main_pane);
@@ -2231,11 +2256,8 @@ void Buffer::insert_newline() {
       }
     }
 
-    printf("%.*s\n", lines[pos.y](pos.x, -1).length, lines[pos.y](pos.x, -1).chars);
     lines[pos.y+1] += lines[pos.y](pos.x, -1);
     lines[pos.y].length = pos.x;
-    printf("%.*s\n", lines[pos.y].length, lines[pos.y].chars);
-    printf("%.*s\n", lines[pos.y+1].length, lines[pos.y+1].chars);
 
     ++markers[i].y;
     markers[i].x = markers[i].ghost_x = 0;
@@ -2247,14 +2269,14 @@ void Buffer::insert_newline() {
 void Buffer::insert_newline_below() {
   modified = 1;
   for (int i = 0; i < markers.size; ++i) {
-    Pos pos = markers[i].pos;
+    Pos &pos = markers[i].pos;
 
     lines.insertz(pos.y+1);
 
     // after we add a new line we have to push y of all markers below us
     for (int j = 0; j < markers.size; ++j)
       if (markers[j].pos.y > pos.y)
-        ++markers[j].pos.y;
+        ++markers[j].y;
 
     move_y(i, 1);
     move_x(i, autoindent(pos.y));
@@ -2643,7 +2665,7 @@ void Canvas::invert_color(Pos p) {
   swap(text_colors[p.y*w + p.x], background_colors[p.y*w + p.x]);
 }
 
-void Pane::render_as_menu() {
+void Pane::render_as_dropdown() {
   Buffer &b = *buffer;
 
   Canvas canvas;
@@ -2795,19 +2817,19 @@ void Pane::render() {
     case PANETYPE_EDIT:
       render_as_edit();
       break;
-    case PANETYPE_SINGLE_LINE:
-      render_as_single_line();
-      break;
     case PANETYPE_MENU:
       render_as_menu();
+      break;
+    case PANETYPE_DROPDOWN:
+      render_as_dropdown();
       break;
   }
 }
 
-void Pane::render_as_single_line() {
+void Pane::render_as_menu() {
   Buffer &b = *buffer;
   // TODO: scrolling in x
-  Pos buf_offset = {this->single_line.prefix.length, 0};
+  Pos buf_offset = {this->menu.prefix.length, 0};
 
   Canvas canvas;
   canvas.init(this->numchars_x(), 1);
@@ -2816,7 +2838,7 @@ void Pane::render_as_single_line() {
   canvas.margin = this->margin;
 
   // draw prefix
-  canvas.render_str({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, this->single_line.prefix.str());
+  canvas.render_str({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, this->menu.prefix.str());
 
   // draw buffer
   canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].str());
@@ -3065,9 +3087,10 @@ void Canvas::render(Pos offset) {
   if (draw_shadow) {
     int shadow_offset = 3;
     Color shadow_color = COLOR_BLACK;
-    shadow_color.a = 0.7f;
+    shadow_color.a = 170;
     Color shadow_color2 = COLOR_BLACK;
-    shadow_color2.a = 0.0f;
+    shadow_color2.a = 0;
+
     // right side
     push_quad(
       {(u16)(offset.x + size.x),                 (u16)(offset.y + shadow_offset),          shadow_color},
@@ -3182,7 +3205,9 @@ int main(int, const char *[])
   test();
 
   /* open a buffer */
-  G.main_pane.buffer = Buffer::from_file(Slice::create("src/cmantic.cpp"));
+  Buffer *b = Buffer::from_file(Slice::create("./src/cmantic.cpp"));
+  G.buffers.push(b);
+  G.main_pane.buffer = b;
 
   for (;;) {
     static u32 ticks = SDL_GetTicks();
