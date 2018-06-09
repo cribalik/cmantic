@@ -1,9 +1,6 @@
 /*
  * TODO:
- *   Clean up dropdown api, and make it stateless (immediate mode)
  *   File tree
- *
- * Multiple cursors
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -167,6 +164,19 @@ static bool is_identifier_tail(Utf8char c) {
   return c.is_ansi() && is_identifier_tail(c.ansi());
 }
 
+union Marker {
+  struct {
+    int x,y;
+  };
+  struct {
+    Pos pos;
+    /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+    int ghost_x;
+  };
+};
+
+void util_free(Marker m) {}
+
 struct Buffer {
   String filename;
 
@@ -179,8 +189,7 @@ struct Buffer {
 
   #define GHOST_EOL -1
   #define GHOST_BOL -2
-  Pos pos;
-  int ghost_x; /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+  Array<Marker> markers;
   int modified;
 
   // methods
@@ -193,13 +202,13 @@ struct Buffer {
 
   Slice slice(Pos p, int len) {return lines[p.y](p.x,p.x+len); }
   Pos to_visual_pos(Pos p);
-  void move_to_y(int y);
-  void move_to_x(int x);
-  void move_to(int x, int y);
-  void move_to(Pos p);
-  void move_y(int dy);
-  void move_x(int dx);
-  void move(int dx, int dy);
+  void move_to_y(int marker_idx, int y);
+  void move_to_x(int marker_idx, int x);
+  void move_to(int marker_idx, int x, int y);
+  void move_to(int marker_idx, Pos p);
+  void move_y(int marker_idx, int dy);
+  void move_x(int marker_idx, int dx);
+  void move(int marker_idx, int dx, int dy);
   void update();
   bool find_r(StringBuffer s, int stay, Pos *pos);
   bool find_r(char c, int stay, Pos *pos);
@@ -209,8 +218,7 @@ struct Buffer {
   bool find_and_move(char c, bool stay);
   bool find_and_move_r(StringBuffer s, bool stay);
   bool find_and_move_r(char c, bool stay);
-  void insert_str(int x, int y, StringBuffer s);
-  void replace(int x0, int x1, int y, StringBuffer s);
+  void insert(Slice s);
   void remove_trailing_whitespace(int y);
   void pretty_range(int y0, int y1);
   void pretty(int y);
@@ -230,18 +238,19 @@ struct Buffer {
   void insert_newline_below();
   void guess_tab_type();
   void goto_endline();
+  void goto_endline(int marker_idx);
   int begin_of_line(int y);
   void goto_beginline();
   void empty();
   void truncate_to_n_lines(int n);
-  int advance(int *x, int *y);
-  int advance(Pos &p);
-  int advance();
-  int advance_r(Pos &p);
-  int advance_r();
+  int advance(int *x, int *y) const;
+  int advance(Pos &p) const;
+  int advance(int marker_idx);
+  int advance_r(Pos &p) const;
+  int advance_r(int marker_idx);
   Utf8char getchar(Pos p);
   Utf8char getchar(int x, int y);
-  Utf8char getchar();
+  Utf8char getchar(int marker_idx);
 
   struct TokenResult {
     int tok;
@@ -258,6 +267,7 @@ void util_free(Buffer &b) {
   util_free(b.filename);
   util_free(b.tokens);
   util_free(b.identifiers);
+  util_free(b.markers);
 }
 
 struct v2 {
@@ -464,9 +474,6 @@ struct State {
   Array<Buffer*> buffers;
 
   Mode mode;
-
-  /* insert state */
-  int insert_mode_begin_y;
 
   /* dropdown state */
   Pos dropdown_pos;
@@ -696,10 +703,13 @@ static void mode_cleanup() {
 
 static void mode_search() {
   mode_cleanup();
+
+  G.center_pane->buffer->markers.size = 1;
+
   G.mode = MODE_SEARCH;
   G.bottom_pane_highlight.reset();
   G.selected_pane = &G.search_pane;
-  G.search_begin_pos = G.center_pane->buffer->pos;
+  G.search_begin_pos = G.center_pane->buffer->markers[0].pos;
   G.search_failed = 0;
   G.bottom_pane = &G.search_pane;
   puts("Using searc pane");
@@ -751,7 +761,6 @@ static void mode_insert() {
 
   G.mode = MODE_INSERT;
   G.bottom_pane = &G.status_message_pane;
-  G.insert_mode_begin_y = G.center_pane->buffer->pos.y;
   status_message_set("insert");
 }
 
@@ -848,22 +857,22 @@ static Pos char2pixel(int x, int y) {
   return {char2pixelx(x), char2pixely(y)};
 }
 
-static bool find_start_of_identifier(Buffer &b, Pos &p) {
-  p = b.pos;
-  b.advance_r(p);
-  Utf8char c = b.getchar(p);
+static bool find_start_of_identifier(Buffer &b, Pos pos, Pos &pout) {
+  pout = pos;
+  b.advance_r(pout);
+  Utf8char c = b.getchar(pout);
 
   if (!is_identifier_tail(c) && !is_identifier_head(c))
     return false;
 
-  while (is_identifier_tail(b.getchar(p)))
-    if (b.advance_r(p))
+  while (is_identifier_tail(b.getchar(pout)))
+    if (b.advance_r(pout))
       return true;
-  if (!is_identifier_head(b.getchar(p)))
-    b.advance(p);
-  if (p.y != b.pos.y)
-    p.y = b.pos.y,
-    p.x = 0;
+  if (!is_identifier_head(b.getchar(pout)))
+    b.advance(pout);
+  if (pout.y != pos.y)
+    pout.y = pos.y,
+    pout.x = 0;
   return true;
 }
 
@@ -871,8 +880,11 @@ static void dropdown_autocomplete(Buffer &b) {
   if (!G.dropdown_visible || G.dropdown_buffer.isempty())
     return;
 
-  StringBuffer s = G.dropdown_buffer[G.dropdown_buffer.pos.y];
-  b.replace(G.dropdown_pos.x, b.pos.x, b.pos.y, s);
+  Pos start;
+  if (!find_start_of_identifier(b, b.markers[0].pos, start))
+    return;
+  Slice s = G.dropdown_buffer[G.dropdown_buffer.markers[0].y](b.markers[0].x - start.x, -1);
+  b.insert(s);
   G.dropdown_visible = false;
 }
 
@@ -882,7 +894,7 @@ static void render_dropdown(Pane *active_pane) {
 
   // position pane
   Pos p;
-  if (!find_start_of_identifier(*active_pane->buffer, p))
+  if (!find_start_of_identifier(*active_pane->buffer, active_pane->buffer->markers[0].pos, p))
     return;
   p = active_pane->buf2pixel(p);
   p.y += G.line_height;
@@ -900,14 +912,14 @@ static void render_dropdown(Pane *active_pane) {
 
 static void dropdown_update(Pane *pane) {
   Buffer &b = *pane->buffer;
-  if (!find_start_of_identifier(b, G.dropdown_pos)) {
+  if (!find_start_of_identifier(b, b.markers[0].pos, G.dropdown_pos)) {
     G.dropdown_visible = false;
     return;
   }
 
   G.dropdown_visible = true;
 
-  Slice identifier = b.slice({G.dropdown_pos.x, b.pos.y}, b.pos.x - G.dropdown_pos.x);
+  Slice identifier = b.slice({G.dropdown_pos.x, b.markers[0].y}, b.markers[0].x - G.dropdown_pos.x);
   FuzzyMatch best_matches[DROPDOWN_SIZE];
   int num_best_matches = fuzzy_match(identifier, CAST(Array<Slice>, b.identifiers), best_matches, ARRAY_LEN(best_matches));
 
@@ -935,7 +947,6 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (special_key == KEY_ESCAPE) {
-    b.pretty_range(G.insert_mode_begin_y, b.pos.y+1);
     mode_normal(true);
     return;
   }
@@ -969,12 +980,12 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
 
     case CONTROL('j'):
       puts("Moving down");
-      G.dropdown_buffer.move_y(1);
+      G.dropdown_buffer.move_y(0, 1);
       break;
 
     case CONTROL('k'):
       puts("Moving up");
-      G.dropdown_buffer.move_y(-1);
+      G.dropdown_buffer.move_y(0, -1);
       break;
 
     default:
@@ -1332,20 +1343,21 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
   switch (G.mode) {
   case MODE_GOTO:
+    buffer.markers.size = 1;
     if (isdigit(key)) {
       G.goto_line_number *= 10;
       G.goto_line_number += input.ansi() - '0';
-      buffer.move_to_y(G.goto_line_number-1);
+      buffer.move_to_y(0, G.goto_line_number-1);
       status_message_set("goto %u", G.goto_line_number);
       break;
     }
 
     switch (key) {
       case 't':
-        buffer.move_to(0, 0);
+        buffer.move_to(0, 0, 0);
         break;
       case 'b':
-        buffer.move_to(0, buffer.num_lines()-1);
+        buffer.move_to(0, 0, buffer.num_lines()-1);
         break;
     }
     mode_normal(true);
@@ -1428,7 +1440,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       if (G.dropdown_visible)
         G.search_failed = !buffer.find_and_move(search.str(), true);
       if (G.search_failed) {
-        buffer.pos = G.search_begin_pos;
+        buffer.move_to(0, G.search_begin_pos);
         status_message_set("'{}' not found", &G.search_buffer[0]);
         mode_normal(false);
       } else
@@ -1458,11 +1470,17 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
   case MODE_NORMAL:
     switch (key) {
+    case KEY_ESCAPE:
+      buffer.markers.size = 1;
+      break;
     case '=':
-      if (buffer.lines[buffer.pos.y].length == 0)
-        break;
-      buffer.modified = true;
-      buffer.move_x(buffer.autoindent(buffer.pos.y));
+      for (int i = 0; i < buffer.markers.size; ++i) {
+        Pos pos = buffer.markers[i].pos;
+        if (buffer.lines[pos.y].length == 0)
+          break;
+        buffer.modified = true;
+        buffer.move_x(i, buffer.autoindent(pos.y));
+      }
       break;
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
@@ -1475,29 +1493,33 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         exit(1);
       break;
     case 'b': {
-      if (buffer.advance_r())
-        break;
-      // if not in word, back to word
-      Utf8char c = buffer.getchar();
-      if (!(is_identifier_tail(c) || is_identifier_head(c)))
-        while (c = buffer.getchar(), !(is_identifier_tail(c) || is_identifier_head(c)))
-          if (buffer.advance_r())
-            break;
-      // go to beginning of word
-      while (c = buffer.getchar(), is_identifier_tail(c) || is_identifier_head(c))
-        if (buffer.advance_r())
+      for (int i = 0; i < buffer.markers.size; ++i) {
+        if (buffer.advance_r(i))
           break;
-      buffer.advance();
+        // if not in word, back to word
+        Utf8char c = buffer.getchar(i);
+        if (!(is_identifier_tail(c) || is_identifier_head(c)))
+          while (c = buffer.getchar(i), !(is_identifier_tail(c) || is_identifier_head(c)))
+            if (buffer.advance_r(i))
+              break;
+        // go to beginning of word
+        while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
+          if (buffer.advance_r(i))
+            break;
+        buffer.advance(i);
+      }
       break;}
     case 'w': {
-      Utf8char c = buffer.getchar();
-      if (is_identifier_tail(c) || is_identifier_head(c))
-        while (c = buffer.getchar(), is_identifier_tail(c) || is_identifier_head(c))
-          if (buffer.advance())
+      for (int i = 0; i < buffer.markers.size; ++i) {
+        Utf8char c = buffer.getchar(i);
+        if (is_identifier_tail(c) || is_identifier_head(c))
+          while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
+            if (buffer.advance(i))
+              break;
+        while (c = buffer.getchar(i), !is_identifier_head(c))
+          if (buffer.advance(i))
             break;
-      while (c = buffer.getchar(), !is_identifier_head(c))
-        if (buffer.advance())
-          break;
+      }
       break;}
     case 'q':
       // TODO: uncomment
@@ -1510,16 +1532,20 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_insert();
       break;
     case 'j':
-      buffer.move_y(1);
+      for (int i = 0; i < buffer.markers.size; ++i)
+        buffer.move_y(i, 1);
       break;
     case 'k':
-      buffer.move_y(-1);
+      for (int i = 0; i < buffer.markers.size; ++i)
+        buffer.move_y(i, -1);
       break;
     case 'h':
-      buffer.advance_r();
+      for (int i = 0; i < buffer.markers.size; ++i)
+        buffer.advance_r(i);
       break;
     case 'l':
-      buffer.advance();
+      for (int i = 0; i < buffer.markers.size; ++i)
+        buffer.advance(i);
       break;
     case 'L':
       buffer.goto_endline();
@@ -1533,6 +1559,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
+    case 'm': {
+      int i = buffer.markers.size;
+      buffer.markers.push(buffer.markers[i-1]);
+      buffer.move_y(i, 1);
+      break;}
     case 'N':
       G.search_term_background_color.reset();
       if (!buffer.find_and_move_r(G.search_buffer[0], false))
@@ -1568,10 +1599,12 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_delete();
       break;
     case 'J':
-      buffer.move_y(G.center_pane->numchars_y()/2);
+      for (int i = 0; i < buffer.markers.size; ++i)
+        buffer.move_y(i, G.center_pane->numchars_y()/2);
       break;
     case 'K':
-      buffer.move_y(-G.center_pane->numchars_y()/2);
+      for (int i = 0; i < buffer.markers.size; ++i)
+        buffer.move_y(i, -G.center_pane->numchars_y()/2);
       break;
     }
   }
@@ -1581,11 +1614,11 @@ static void handle_rendering(float dt) {
   // boost marker when you move or change modes
   static Pos prev_pos;
   static Mode prev_mode;
-  if (prev_pos != G.center_pane->buffer->pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
+  if (prev_pos != G.center_pane->buffer->markers[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
     G.marker_background_color.reset();
     G.highlight_background_color.reset();
   }
-  prev_pos = G.center_pane->buffer->pos;
+  prev_pos = G.center_pane->buffer->markers[0].pos;
   prev_mode = G.mode;
 
   // update colors
@@ -1629,28 +1662,31 @@ Pos Buffer::to_visual_pos(Pos p) {
   return p;
 }
 
-void Buffer::move_to_y(int y) {
+void Buffer::move_to_y(int marker_idx, int y) {
   y = clamp(y, 0, lines.size-1);
-  pos.y = y;
+  markers[marker_idx].y = y;
 }
 
-void Buffer::move_to_x(int x) {
-  x = clamp(x, 0, lines[pos.y].length);
-  pos.x = x;
-  ghost_x = lines[pos.y].visual_offset(x, G.tab_width);
+void Buffer::move_to_x(int marker_idx, int x) {
+  x = clamp(x, 0, lines[markers[marker_idx].y].length);
+  markers[marker_idx].x = x;
+  markers[marker_idx].ghost_x = lines[markers[marker_idx].y].visual_offset(x, G.tab_width);
 }
 
-void Buffer::move_to(int x, int y) {
-  move_to_y(y);
-  move_to_x(x);
+void Buffer::move_to(int marker_idx, int x, int y) {
+  move_to_y(marker_idx, y);
+  move_to_x(marker_idx, x);
 }
 
-void Buffer::move_to(Pos p) {
-  move_to_y(p.y);
-  move_to_x(p.x);
+void Buffer::move_to(int marker_idx, Pos p) {
+  move_to_y(marker_idx, p.y);
+  move_to_x(marker_idx, p.x);
 }
 
-void Buffer::move_y(int dy) {
+void Buffer::move_y(int marker_idx, int dy) {
+  Pos &pos = markers[marker_idx].pos;
+  int ghost_x = markers[marker_idx].ghost_x;
+
   pos.y = clamp(pos.y + dy, 0, lines.size - 1);
 
   if (ghost_x == GHOST_EOL)
@@ -1661,7 +1697,8 @@ void Buffer::move_y(int dy) {
     pos.x = lines[pos.y].from_visual_offset(ghost_x, G.tab_width);
 }
 
-void Buffer::move_x(int dx) {
+void Buffer::move_x(int marker_idx, int dx) {
+  Pos &pos = markers[marker_idx].pos;
   if (dx > 0)
     for (; dx > 0; --dx)
       pos.x = lines[pos.y].next(pos.x);
@@ -1669,7 +1706,7 @@ void Buffer::move_x(int dx) {
     for (; dx < 0; ++dx)
       pos.x = lines[pos.y].prev(pos.x);
   pos.x = clamp(pos.x, 0, lines[pos.y].length);
-  ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+  markers[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
 }
 
 Buffer* Buffer::from_file(Slice filename) {
@@ -1679,6 +1716,7 @@ Buffer* Buffer::from_file(Slice filename) {
   if (!buffer)
     goto err;
   b = {};
+  b.markers.push({});
 
   b.filename = filename.copy();
   if (file_open(&f, b.filename.chars, "r"))
@@ -1738,15 +1776,16 @@ Buffer* Buffer::from_file(Slice filename) {
   return 0;
 }
 
-void Buffer::move(int dx, int dy) {
+void Buffer::move(int marker_idx, int dx, int dy) {
   if (dy)
-    move_y(dy);
+    move_y(marker_idx, dy);
   if (dx)
-    move_x(dx);
+    move_x(marker_idx, dx);
 }
 
 void Buffer::update() {
-  move(0, 0);
+  for (int i = 0; i < markers.size; ++i)
+    move(i, 0, 0);
 }
 
 bool Buffer::find_r(StringBuffer s, int stay, Pos *p) {
@@ -1865,48 +1904,47 @@ bool Buffer::find(Slice s, bool stay, Pos *p) {
 }
 
 bool Buffer::find_and_move_r(char c, bool stay) {
-  Pos p = pos;
+  markers.size = 1;
+  Pos p = markers[0].pos;
   if (!find_r(c, stay, &p))
     return false;
-  move_to(p);
+  move_to(0, p);
   return true;
 }
 
 bool Buffer::find_and_move_r(StringBuffer s, bool stay) {
-  Pos p = pos;
+  markers.size = 1;
+  Pos p = markers[0].pos;
   if (!find_r(s, stay, &p))
     return false;
-  move_to(p);
+  move_to(0, p);
   return true;
 }
 
 bool Buffer::find_and_move(char c, bool stay) {
-  Pos p = pos;
+  markers.size = 1;
+  Pos p = markers[0].pos;
   if (!find(c, stay, &p))
     return false;
-  move_to(p);
+  move_to(0, p);
   return true;
 }
 
 bool Buffer::find_and_move(Slice s, bool stay) {
-  Pos p = pos;
+  markers.size = 1;
+  Pos p = markers[0].pos;
   if (!find(s, stay, &p))
     return false;
-  move_to(p);
+  move_to(0, p);
   return true;
 }
 
-void Buffer::insert_str(int x, int y, StringBuffer s) {
+void Buffer::insert(Slice s) {
   modified = 1;
-  lines[y].insert(x, s);
-  move_x(s.length);
-}
-
-void Buffer::replace(int x0, int x1, int y, StringBuffer s) {
-  modified = 1;
-  lines[y].remove(x0, x1-x0);
-  move_to(x0, y);
-  insert_str(x0, y, s);
+  for (int i = 0; i < markers.size; ++i) {
+    lines[markers[i].y].insert(markers[i].x, s);
+    move_x(i, s.length);
+  }
 }
 
 void Buffer::remove_trailing_whitespace(int y) {
@@ -1917,8 +1955,10 @@ void Buffer::remove_trailing_whitespace(int y) {
   while (x >= 0 && isspace(getchar(x, y).ansi()))
     --x;
   lines[y].length = x+1;
-  if (pos.y == y && pos.x > x+1)
-    move_to_x(x+1);
+  for (int i = 0; i < markers.size; ++i) {
+    if (markers[i].y == y && markers[i].x > x+1)
+      move_to_x(i, x+1);
+  }
 }
 
 void Buffer::pretty_range(int y0, int y1) {
@@ -1938,11 +1978,14 @@ void Buffer::pretty(int y) {
 }
 
 void Buffer::insert_char(Utf8char ch) {
-  modified = true;
-  lines[pos.y].insert(pos.x, ch);
-  move_x(1);
-  if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
-    move_x(autoindent(pos.y));
+  for (int i = 0; i < markers.size; ++i) {
+    Pos &pos = markers[i].pos;
+    modified = true;
+    lines[pos.y].insert(pos.x, ch);
+    move_x(i, 1);
+    if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
+      move_x(i, autoindent(pos.y));
+  }
 }
 
 void Buffer::delete_line_at(int y) {
@@ -1951,10 +1994,14 @@ void Buffer::delete_line_at(int y) {
   if (lines.size == 1)
     return;
   lines.remove_slow(y);
+  for (int i = 0; i < markers.size; ++i)
+    if (markers[i].y >= y)
+      move_y(i, -1);
 }
 
 void Buffer::delete_line() {
-  delete_line_at(pos.y);
+  for (int i = 0; i < markers.size; ++i)
+    delete_line_at(markers[i].y);
 }
 
 void Buffer::remove_range(Pos a, Pos b) {
@@ -1980,20 +2027,23 @@ void Buffer::remove_range(Pos a, Pos b) {
 
 void Buffer::delete_char() {
   modified = 1;
-  if (pos.x == 0) {
-    if (pos.y == 0)
-      return;
+  for (int i = 0; i < markers.size; ++i) {
+    Pos &pos = markers[i].pos;
+    if (pos.x == 0) {
+      if (pos.y == 0)
+        return;
 
-    /* move up and right */
-    move_y(-1);
-    goto_endline();
-    lines[pos.y] += lines[pos.y+1];
-    delete_line_at(pos.y+1);
-  }
-  else {
-    Pos p = pos;
-    move_x(-1);
-    remove_range(pos, p);
+      /* move up and right */
+      move_y(i, -1);
+      lines[pos.y] += lines[pos.y+1];
+      delete_line_at(pos.y+1);
+      goto_endline(i);
+    }
+    else {
+      Pos p = pos;
+      move_x(i, -1);
+      remove_range(pos, p);
+    }
   }
 }
 
@@ -2003,15 +2053,18 @@ void Buffer::insert_tab() {
   n = tab_type;
 
   modified = 1;
-  if (n == 0) {
-    lines[pos.y].insert(pos.x, '\t');
-    move_x(1);
-  }
-  else {
-    /* TODO: optimize? */
-    while (n--)
-      lines[pos.y].insert(pos.x, ' ');
-    move_x(tab_type);
+  for (int i =0 ; i < markers.size; ++i) {
+    Pos pos = markers[i].pos;
+    if (n == 0) {
+      lines[pos.y].insert(pos.x, '\t');
+      move_x(i, 1);
+    }
+    else {
+      /* TODO: optimize? */
+      while (n--)
+        lines[pos.y].insert(pos.x, ' ');
+      move_x(i, tab_type);
+    }
   }
 }
 
@@ -2130,11 +2183,8 @@ int Buffer::autoindent(const int y) {
     diff = -current_indent*tab_size;
   if (diff < 0)
     lines[y].remove(0, at_most(current_indent*tab_size, -diff));
-  if (diff > 0) {
+  if (diff > 0)
     lines[y].insert(0, tab_char, diff);
-    for (int i = 0; i < diff; ++i)
-      lines[y][i] = tab_char;
-  }
   return diff;
 }
 
@@ -2165,21 +2215,50 @@ void Buffer::push_line(Slice s) {
 void Buffer::insert_newline() {
   modified = 1;
 
-  lines.insertz(pos.y+1);
-  lines[pos.y+1] += lines[pos.y](pos.x, -1);
-  lines[pos.y].length = pos.x;
+  for (int i = 0; i < markers.size; ++i) {
+    Pos &pos = markers[i].pos;
+    lines.insertz(pos.y+1);
 
-  move_y(1);
-  move_to_x(0);
-  move_x(autoindent(pos.y));
-  pretty(pos.y-1);
+    // after we add a new line we have to push y of all markers below us
+    for (int j = 0; j < markers.size; ++j) {
+      if (i == j) continue;
+      if (markers[j].pos.y == pos.y) {
+        markers[j].pos = {markers[j].pos.x - pos.x, markers[j].pos.y+1};
+        markers[j].ghost_x = markers[j].pos.x;
+      }
+      else if (markers[j].pos.y > pos.y) {
+        ++markers[j].pos.y;
+      }
+    }
+
+    printf("%.*s\n", lines[pos.y](pos.x, -1).length, lines[pos.y](pos.x, -1).chars);
+    lines[pos.y+1] += lines[pos.y](pos.x, -1);
+    lines[pos.y].length = pos.x;
+    printf("%.*s\n", lines[pos.y].length, lines[pos.y].chars);
+    printf("%.*s\n", lines[pos.y+1].length, lines[pos.y+1].chars);
+
+    ++markers[i].y;
+    markers[i].x = markers[i].ghost_x = 0;
+    move_x(i, autoindent(pos.y));
+    // pretty(pos.y-1);
+  }
 }
 
 void Buffer::insert_newline_below() {
   modified = 1;
-  lines.insertz(pos.y+1);
-  move_y(1);
-  move_x(autoindent(pos.y));
+  for (int i = 0; i < markers.size; ++i) {
+    Pos pos = markers[i].pos;
+
+    lines.insertz(pos.y+1);
+
+    // after we add a new line we have to push y of all markers below us
+    for (int j = 0; j < markers.size; ++j)
+      if (markers[j].pos.y > pos.y)
+        ++markers[j].pos.y;
+
+    move_y(i, 1);
+    move_x(i, autoindent(pos.y));
+  }
 }
 
 void Buffer::guess_tab_type() {
@@ -2240,9 +2319,15 @@ void Buffer::guess_tab_type() {
     tab_type = G.default_tab_type;
 }
 
+void Buffer::goto_endline(int marker_idx) {
+  Pos pos = markers[marker_idx].pos;
+  move_to_x(marker_idx, lines[pos.y].length);
+  markers[marker_idx].ghost_x = GHOST_EOL;
+}
+
 void Buffer::goto_endline() {
-  move_to_x(lines[pos.y].length);
-  ghost_x = GHOST_EOL;
+  for (int i = 0; i < markers.size; ++i)
+    goto_endline(i);
 }
 
 int Buffer::begin_of_line(int y) {
@@ -2257,9 +2342,11 @@ int Buffer::begin_of_line(int y) {
 void Buffer::goto_beginline() {
   int x;
 
-  x = begin_of_line(pos.y);
-  move_to_x(x);
-  ghost_x = GHOST_BOL;
+  for (int i = 0; i < markers.size; ++i) {
+    x = begin_of_line(markers[i].y);
+    move_to_x(i, x);
+    markers[i].ghost_x = GHOST_BOL;
+  }
 }
 
 void Buffer::empty() {
@@ -2267,13 +2354,17 @@ void Buffer::empty() {
 
   util_free(lines);
   lines.push();
-  move_to(0, 0);
+  if (!markers.size)
+    markers.push({});
+  markers.size = 1;
+  move_to(0, 0, 0);
 }
 
 void Buffer::truncate_to_n_lines(int n) {
   int i;
 
   modified = 1;
+  markers.size = 1;
   n = at_least(n, 1);
 
   if (n >= lines.size)
@@ -2282,10 +2373,10 @@ void Buffer::truncate_to_n_lines(int n) {
   for (i = n; i < lines.size; ++i)
     util_free(lines[i]);
   lines.size = n;
-  pos.y = at_most(pos.y, n-1);
+  markers[0].y = at_most(markers[0].y, n-1);
 }
 
-int Buffer::advance(int *x, int *y) {
+int Buffer::advance(int *x, int *y) const {
   if (*x < lines[*y].length)
     *x = lines[*y].next(*x);
   else {
@@ -2300,19 +2391,20 @@ int Buffer::advance(int *x, int *y) {
   return 0;
 }
 
-int Buffer::advance(Pos &p) {
+int Buffer::advance(Pos &p) const {
   return advance(&p.x, &p.y);
 }
 
-int Buffer::advance() {
+int Buffer::advance(int marker_idx) {
+  Pos &pos = markers[marker_idx].pos;
   int err = advance(&pos.x, &pos.y);
   if (err)
     return err;
-  ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+  markers[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
-int Buffer::advance_r(Pos &p) {
+int Buffer::advance_r(Pos &p) const {
   if (p.x > 0)
     p.x = lines[p.y].prev(p.x);
   else {
@@ -2327,11 +2419,12 @@ int Buffer::advance_r(Pos &p) {
   return 0;
 }
 
-int Buffer::advance_r() {
+int Buffer::advance_r(int marker_idx) {
+  Pos &pos = markers[marker_idx].pos;
   int err = advance_r(pos);
   if (err)
     return err;
-  ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+  markers[marker_idx].ghost_x = lines[markers[marker_idx].y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
@@ -2344,7 +2437,8 @@ Utf8char Buffer::getchar(Pos p) {
   return getchar(p.x, p.y);
 }
 
-Utf8char Buffer::getchar() {
+Utf8char Buffer::getchar(int marker_idx) {
+  Pos pos = markers[marker_idx].pos;
   return Utf8char::create(pos.x >= lines[pos.y].length ? '\n' : lines[pos.y][pos.x]);
 }
 
@@ -2566,8 +2660,10 @@ void Pane::render_as_menu() {
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y].str());
 
   // highlight the line you're on
-  if (highlight_background_color)
-    canvas.fill_background({0, b.pos.y, {-1, 1}}, *highlight_background_color);
+  if (highlight_background_color) {
+    for (int i = 0; i < b.markers.size; ++i)
+      canvas.fill_background({0, b.markers[i].y, {-1, 1}}, *highlight_background_color);
+  }
 
   canvas.render(this->bounds.p);
 
@@ -2730,12 +2826,15 @@ void Pane::render_as_single_line() {
     canvas.fill_background({0, 0, {-1, 1}}, *this->highlight_background_color);
 
   // draw marker
-  if (G.selected_pane == this) {
-    canvas.fill_background({b.pos + buf_offset, {1, 1}}, G.marker_background_color.color);
-    // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
-  } else if (G.bottom_pane != this) {
-    canvas.fill_background({b.pos + buf_offset, {1, 1}}, G.marker_inactive_color);
-    // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
+  for (int i = 0; i < b.markers.size; ++i) {
+    Pos pos = b.markers[i].pos;
+    if (G.selected_pane == this) {
+      canvas.fill_background({pos + buf_offset, {1, 1}}, G.marker_background_color.color);
+      // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
+    } else if (G.bottom_pane != this) {
+      canvas.fill_background({pos + buf_offset, {1, 1}}, G.marker_inactive_color);
+      // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
+    }
   }
 
   canvas.render(this->bounds.p);
@@ -2777,8 +2876,10 @@ void Pane::render_as_edit() {
     this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
 
   // highlight the line you're on
-  if (this->highlight_background_color)
-    canvas.fill_background({0, buf2char(b.pos).y, {-1, 1}}, *this->highlight_background_color);
+  if (this->highlight_background_color) {
+    for (int i = 0; i < b.markers.size; ++i)
+      canvas.fill_background({0, buf2char(b.markers[i].pos).y, {-1, 1}}, *this->highlight_background_color);
+  }
 
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
@@ -2788,10 +2889,13 @@ void Pane::render_as_edit() {
   }
 
   // draw marker
-  if (G.selected_pane == this)
-    canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_background_color.color);
-  else if (G.bottom_pane != this)
-    canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_inactive_color);
+  for (int i = 0; i < b.markers.size; ++i) {
+    Pos pos = b.markers[i].pos;
+    if (G.selected_pane == this)
+      canvas.fill_background({buf2char(pos), {1, 1}}, G.marker_background_color.color);
+    else if (G.bottom_pane != this)
+      canvas.fill_background({buf2char(pos), {1, 1}}, G.marker_inactive_color);
+  }
 
   canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
 
@@ -2817,12 +2921,12 @@ Pos Pane::buf2char(Pos p) const {
 }
 
 int Pane::calc_top_visible_row() const {
-  return at_least(0, this->buffer->pos.y - this->numchars_y()/2);
+  return at_least(0, this->buffer->markers[0].y - this->numchars_y()/2);
 }
 
 int Pane::calc_left_visible_column() const {
-  int x = this->buffer->pos.x;
-  x = this->buffer->lines[this->buffer->pos.y].visual_offset(x, G.tab_width);
+  int x = this->buffer->markers[0].x;
+  x = this->buffer->lines[this->buffer->markers[0].y].visual_offset(x, G.tab_width);
   x -= this->numchars_x()*6/7;
   return at_least(x, 0);
 }

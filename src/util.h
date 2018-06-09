@@ -662,7 +662,7 @@ union StringBuffer {
 
   void insert(int i, char c, int n) {
     extend(n);
-    memmove(chars+i+1, chars+i, length-i-1);
+    memmove(chars+i+n, chars+i, length-i-n);
     for (int j = i; j < i+n; ++j)
       chars[j] = c;
   }
@@ -686,6 +686,10 @@ union StringBuffer {
 
     done:
     insert(i, buf, n);
+  }
+
+  void insert(int i, Slice s) {
+    insert(i, s.chars, s.length);
   }
 
   void insert(int i, StringBuffer s) {
