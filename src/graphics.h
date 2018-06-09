@@ -58,14 +58,14 @@ static int graphics_quad_init();
 static void push_quad(Quad a, Quad b, Quad c, Quad d);
 static void render_quads();
 
-#if defined(OS_WINDOWS)
+#ifdef OS_WINDOWS
   #ifndef WIN32_LEAN_AND_MEAN
   #define WIN32_LEAN_AND_MEAN 1
   #endif
   #include <windows.h>
-  #define GLAPI __stdcall
+  #define GLAPIENTRY __stdcall
 #else
-  #define GLAPI
+  #define GLAPIENTRY
 #endif /* OS */
 
 #define GL_GLEXT_LEGACY
@@ -122,37 +122,37 @@ static void render_quads();
   #define GL_TEXTURE30                      0x84DE
   #define GL_TEXTURE31                      0x84DF
 
-  static void (GLAPI *glEnableVertexAttribArray) (GLuint index);
-  static void (GLAPI *glVertexAttribPointer) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
-  static void (GLAPI *glVertexAttribIPointer) (GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
-  static void (GLAPI *glUseProgram) (GLuint program);
-  static void (GLAPI *glUniform1i) (GLint location, GLint v0);
-  static GLint (GLAPI *glGetUniformLocation) (GLuint program, const GLchar *name);
-  static GLuint (GLAPI *glCreateShader) (GLenum type);
-  static void (GLAPI *glShaderSource) (GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length);
-  static void (GLAPI *glCompileShader) (GLuint shader);
-  static void (GLAPI *glGetShaderiv) (GLuint shader, GLenum pname, GLint *params);
-  static void (GLAPI *glGetShaderInfoLog) (GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
-  static GLuint (GLAPI *glCreateProgram) (void);
-  static void (GLAPI *glAttachShader) (GLuint program, GLuint shader);
-  static void (GLAPI *glLinkProgram) (GLuint program);
-  static void (GLAPI *glGetProgramiv) (GLuint program, GLenum pname, GLint *params);
-  static void (GLAPI *glGetProgramInfoLog) (GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
-  static void (GLAPI *glDeleteShader) (GLuint shader);
-  static void (GLAPI *glGenerateMipmap) (GLenum target);
-  static void (GLAPI *glGenVertexArrays) (GLsizei n, GLuint *arrays);
-  static void (GLAPI *glBindVertexArray) (GLuint array);
-  static void (GLAPI *glGenBuffers) (GLsizei n, GLuint *buffers);
-  static void (GLAPI *glBindBuffer) (GLenum target, GLuint buffer);
-  static void (GLAPI *glBufferData) (GLenum target, GLsizeiptr size, const void *data, GLenum usage);
-  static void (GLAPI *glUniform1f) (GLint location, GLfloat v0);
-  static void (GLAPI *glUniform2f) (GLint location, GLfloat v0, GLfloat v1);
-  static void (GLAPI *glUniform3f) (GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
-  static void (GLAPI *glUniform2i) (GLint location, GLint v0, GLint v1);
-  static void (GLAPI *glBufferSubData) (GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
-  static void (GLAPI *glUniform3fv) (GLint location, GLsizei count, const GLfloat *value);
+  static void (GLAPIENTRY *glEnableVertexAttribArray) (GLuint index);
+  static void (GLAPIENTRY *glVertexAttribPointer) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
+  static void (GLAPIENTRY *glVertexAttribIPointer) (GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
+  static void (GLAPIENTRY *glUseProgram) (GLuint program);
+  static void (GLAPIENTRY *glUniform1i) (GLint location, GLint v0);
+  static GLint (GLAPIENTRY *glGetUniformLocation) (GLuint program, const GLchar *name);
+  static GLuint (GLAPIENTRY *glCreateShader) (GLenum type);
+  static void (GLAPIENTRY *glShaderSource) (GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length);
+  static void (GLAPIENTRY *glCompileShader) (GLuint shader);
+  static void (GLAPIENTRY *glGetShaderiv) (GLuint shader, GLenum pname, GLint *params);
+  static void (GLAPIENTRY *glGetShaderInfoLog) (GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+  static GLuint (GLAPIENTRY *glCreateProgram) (void);
+  static void (GLAPIENTRY *glAttachShader) (GLuint program, GLuint shader);
+  static void (GLAPIENTRY *glLinkProgram) (GLuint program);
+  static void (GLAPIENTRY *glGetProgramiv) (GLuint program, GLenum pname, GLint *params);
+  static void (GLAPIENTRY *glGetProgramInfoLog) (GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
+  static void (GLAPIENTRY *glDeleteShader) (GLuint shader);
+  static void (GLAPIENTRY *glGenerateMipmap) (GLenum target);
+  static void (GLAPIENTRY *glGenVertexArrays) (GLsizei n, GLuint *arrays);
+  static void (GLAPIENTRY *glBindVertexArray) (GLuint array);
+  static void (GLAPIENTRY *glGenBuffers) (GLsizei n, GLuint *buffers);
+  static void (GLAPIENTRY *glBindBuffer) (GLenum target, GLuint buffer);
+  static void (GLAPIENTRY *glBufferData) (GLenum target, GLsizeiptr size, const void *data, GLenum usage);
+  static void (GLAPIENTRY *glUniform1f) (GLint location, GLfloat v0);
+  static void (GLAPIENTRY *glUniform2f) (GLint location, GLfloat v0, GLfloat v1);
+  static void (GLAPIENTRY *glUniform3f) (GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+  static void (GLAPIENTRY *glUniform2i) (GLint location, GLint v0, GLint v1);
+  static void (GLAPIENTRY *glBufferSubData) (GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
+  static void (GLAPIENTRY *glUniform3fv) (GLint location, GLsizei count, const GLfloat *value);
   #ifdef OS_WINDOWS
-  static void (GLAPI *glActiveTexture) (GLenum);
+  static void (GLAPIENTRY *glActiveTexture) (GLenum);
   #endif
 
 
@@ -267,6 +267,8 @@ static int graphics_init(SDL_Window **window) {
     return 1;
   }
   gl_ok_or_die;
+
+  SDL_GL_SetSwapInterval(1);
 
   // load gl functions
   *(void**) (&glEnableVertexAttribArray) = (void*)SDL_GL_GetProcAddress("glEnableVertexAttribArray");
