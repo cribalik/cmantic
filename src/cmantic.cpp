@@ -333,6 +333,7 @@ struct Pane {
   const Color *text_color;
   bool syntax_highlight;
   Buffer *buffer;
+  int _gutter_width;
 
   // visual settings
   int margin;
@@ -465,6 +466,8 @@ struct State {
   Pane filetree_pane;
   Buffer filetree_buffer;
   Buffer null_buffer;
+
+  Array<Buffer*> buffers;
 
   Mode mode;
 
@@ -693,7 +696,12 @@ static struct {const char *name; void(*fun)();} menu_options[] = {
   {"show_tab_type", menu_option_show_tab_type}
 };
 
+static void mode_cleanup() {
+  G.dropdown_visible = false;
+}
+
 static void mode_search() {
+  mode_cleanup();
   G.mode = MODE_SEARCH;
   G.bottom_pane_highlight.reset();
   G.selected_pane = &G.search_pane;
@@ -705,15 +713,18 @@ static void mode_search() {
 }
 
 static void mode_highlight() {
+  mode_cleanup();
   G.mode = MODE_HIGHLIGHT;
 }
 
 static void mode_filesearch() {
+  mode_cleanup();
   G.mode = MODE_FILESEARCH;
   G.bottom_pane = &G.filetree_pane;
 }
 
 static void mode_goto() {
+  mode_cleanup();
   G.mode = MODE_GOTO;
   G.goto_line_number = 0;
   G.bottom_pane = &G.status_message_pane;
@@ -721,12 +732,14 @@ static void mode_goto() {
 }
 
 static void mode_delete() {
+  mode_cleanup();
   G.mode = MODE_DELETE;
   G.bottom_pane = &G.status_message_pane;
   status_message_set("delete");
 }
 
 static void mode_normal(bool set_message) {
+  mode_cleanup();
   if (G.mode == MODE_INSERT)
     G.default_marker_background_color.jump();
 
@@ -734,23 +747,22 @@ static void mode_normal(bool set_message) {
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = &G.main_pane;
 
-  G.dropdown_visible = false;
-
   if (set_message)
     status_message_set("normal");
 }
 
 static void mode_insert() {
+  mode_cleanup();
   G.default_marker_background_color.jump();
 
   G.mode = MODE_INSERT;
   G.bottom_pane = &G.status_message_pane;
-  G.dropdown_visible = false;
   G.insert_mode_begin_y = G.center_pane->buffer->pos.y;
   status_message_set("insert");
 }
 
 static void mode_menu() {
+  mode_cleanup();
   G.mode = MODE_MENU;
   G.selected_pane = &G.menu_pane;
   G.bottom_pane_highlight.reset();
@@ -830,42 +842,35 @@ static int fuzzy_match(Slice string, Array<Slice> strings, FuzzyMatch result[], 
   return num_results;
 }
 
-static Pos find_start_of_identifier(Buffer &b) {
-  Pos p = b.pos;
+static int char2pixelx(int x) {
+  return x*G.font_width;
+}
+
+static int char2pixely(int y) {
+  return y*G.line_height;
+}
+
+static Pos char2pixel(int x, int y) {
+  return {char2pixelx(x), char2pixely(y)};
+}
+
+static bool find_start_of_identifier(Buffer &b, Pos &p) {
+  p = b.pos;
   b.advance_r(p);
+  Utf8char c = b.getchar(p);
+
+  if (!is_identifier_tail(c) && !is_identifier_head(c))
+    return false;
+
   while (is_identifier_tail(b.getchar(p)))
     if (b.advance_r(p))
-      return p;
+      return true;
   if (!is_identifier_head(b.getchar(p)))
     b.advance(p);
   if (p.y != b.pos.y)
     p.y = b.pos.y,
     p.x = 0;
-  return p;
-}
-
-static void fill_dropdown_buffer(Pane *active_pane) {
-  static FuzzyMatch best_matches[DROPDOWN_SIZE];
-  Buffer &b = *active_pane->buffer;
-
-  if (!G.dropdown_visible)
-    return;
-
-  /* find matching identifiers */
-  // go back to start of identifier
-  Pos p = find_start_of_identifier(*active_pane->buffer);
-  G.dropdown_pos = p;
-
-  Slice input = b.slice({p.x, b.pos.y}, b.pos.x - p.x);
-  int num_best_matches = fuzzy_match(input, CAST(Array<Slice>, b.identifiers), best_matches, ARRAY_LEN(best_matches));
-
-  const int y = G.dropdown_buffer.pos.y;
-  G.dropdown_buffer.empty();
-  for (int i = 0; i < num_best_matches; ++i) {
-    G.dropdown_buffer.push_line(best_matches[i].str);
-    // G.dropdown_buffer.lines.last() += best_matches[i].points;
-  }
-  G.dropdown_buffer.move_to_y(y);
+  return true;
 }
 
 static void dropdown_autocomplete(Buffer &b) {
@@ -877,14 +882,55 @@ static void dropdown_autocomplete(Buffer &b) {
   G.dropdown_visible = false;
 }
 
-static void dropdown_update_on_insert(Utf8char input) {
-  if (!G.dropdown_visible && is_identifier_head(input)) {
-    G.dropdown_visible = true;
-    G.dropdown_buffer.pos = {};
-  }
-  else if (G.dropdown_visible && !is_identifier_tail(input)) {
+static void render_dropdown(Pane *active_pane) {
+  if (!G.dropdown_visible)
+    return;
+
+  // position pane
+  Pos p;
+  if (!find_start_of_identifier(*active_pane->buffer, p))
+    return;
+  p = active_pane->buf2pixel(p);
+  p.y += G.line_height;
+  G.dropdown_pane.bounds.p = p;
+
+  // move it up if it would go outside the screen
+  if (G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h > G.win_height)
+    G.dropdown_pane.bounds.y -= G.dropdown_pane.bounds.h + 2*G.line_height;
+
+  G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
+
+  if (!G.dropdown_buffer.isempty())
+    G.dropdown_pane.render_as_menu();
+}
+
+static void dropdown_update(Pane *pane) {
+  Buffer &b = *pane->buffer;
+  if (!find_start_of_identifier(b, G.dropdown_pos)) {
     G.dropdown_visible = false;
+    return;
   }
+
+  G.dropdown_visible = true;
+
+  Slice identifier = b.slice({G.dropdown_pos.x, b.pos.y}, b.pos.x - G.dropdown_pos.x);
+  FuzzyMatch best_matches[DROPDOWN_SIZE];
+  int num_best_matches = fuzzy_match(identifier, CAST(Array<Slice>, b.identifiers), best_matches, ARRAY_LEN(best_matches));
+
+  G.dropdown_buffer.empty();
+  for (int i = 0; i < num_best_matches; ++i) {
+    G.dropdown_buffer.push_line(best_matches[i].str);
+    // G.dropdown_buffer.lines.last() += best_matches[i].points;
+  }
+
+  // resize dropdown pane
+  int max_width = 0;
+  for (StringBuffer s : G.dropdown_buffer.lines)
+    max_width = max(max_width, s.length);
+
+  G.dropdown_pane.bounds.size =
+    char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
+  G.dropdown_pane.bounds.h = at_most(G.dropdown_pane.bounds.h, G.win_height - 10*G.line_height);
 }
 
 #define CONTROL(c) ((c)|KEY_CONTROL)
@@ -901,8 +947,8 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
   }
 
   if (!special_key && !ctrl) {
-    dropdown_update_on_insert(input);
     b.insert_char(input);
+    dropdown_update(p);
     return;
   }
 
@@ -914,23 +960,27 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
       b.insert_newline();
       break;
 
-    case KEY_TAB: {
+    case KEY_TAB:
       if (G.dropdown_visible)
         dropdown_autocomplete(b);
       else
         b.insert_tab();
-    } break;
+      dropdown_update(p);
+      break;
 
     case KEY_BACKSPACE:
       b.delete_char();
+      dropdown_update(p);
       break;
 
     case CONTROL('j'):
-      ++G.dropdown_buffer.pos.y;
+      puts("Moving down");
+      G.dropdown_buffer.move_y(1);
       break;
 
     case CONTROL('k'):
-      --G.dropdown_buffer.pos.y;
+      puts("Moving up");
+      G.dropdown_buffer.move_y(-1);
       break;
 
     default:
@@ -1265,50 +1315,8 @@ static void state_init() {
   status_message_set("Welcome!");
 }
 
-static int char2pixelx(int x) {
-  return x*G.font_width;
-}
-
-static int char2pixely(int y) {
-  return y*G.line_height;
-}
-
-static Pos char2pixel(int x, int y) {
-  return {char2pixelx(x), char2pixely(y)};
-}
-
 static Pos char2pixel(Pos p) {
   return char2pixel(p.x, p.y);
-}
-
-static void render_dropdown(Pane *active_pane) {
-  if (!G.dropdown_visible)
-    return;
-
-  fill_dropdown_buffer(active_pane);
-
-  // resize dropdown pane
-  int max_width = 0;
-  for (StringBuffer s : G.dropdown_buffer.lines)
-    max_width = max(max_width, s.length);
-
-  G.dropdown_pane.bounds.size =
-    char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
-
-  // position pane
-  Pos p = find_start_of_identifier(*active_pane->buffer);
-  p = active_pane->buf2pixel(p);
-  p.y += G.line_height;
-  G.dropdown_pane.bounds.p = p;
-
-  // move it up if it would go outside the screen
-  if (G.dropdown_pane.bounds.y + G.dropdown_pane.bounds.h > G.win_height)
-    G.dropdown_pane.bounds.y -= G.dropdown_pane.bounds.h + 2*G.line_height;
-
-  G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
-
-  if (G.dropdown_visible && !G.dropdown_buffer.isempty())
-    G.dropdown_pane.render_as_menu();
 }
 
 static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
@@ -1387,19 +1395,21 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_FILESEARCH:
-    switch (key) {
-      case KEY_ARROW_DOWN:
-      case 'j':
-        G.filetree_buffer.move_y(1);
-        break;
-      case KEY_ARROW_UP:
-      case 'k':
-        G.filetree_buffer.move_y(-1);
-        break;
-      case KEY_RETURN:
-        mode_normal(false);
-        break;
+    if (special_key == KEY_RETURN) {
+      dropdown_autocomplete(G.filetree_buffer);
+      Slice filename = G.filetree_buffer[0].slice;
+      Buffer *b = Buffer::from_file(filename);
+      if (b) {
+        G.buffers.push(b);
+        G.main_pane.buffer = b;
+        status_message_set("Loaded file {}\n", &filename);
+      } else {
+        status_message_set("Failed to load file {}\n", &filename);
+      }
+      mode_normal(true);
     }
+    else
+      insert_default(G.bottom_pane, special_key, input, ctrl);
     break;
 
   case MODE_SEARCH: {
@@ -1441,6 +1451,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_INSERT:
+    puts("mode_insert");
     insert_default(&G.main_pane, special_key, input, ctrl);
     break;
 
@@ -2255,7 +2266,7 @@ void Buffer::empty() {
 
   util_free(lines);
   lines.push();
-  pos.x = pos.y = 0;
+  move_to(0, 0);
 }
 
 void Buffer::truncate_to_n_lines(int n) {
@@ -2737,19 +2748,19 @@ void Pane::render_as_edit() {
   int buf_y1 = at_most(buf_offset.y + this->numchars_y(), b.lines.size);
 
   // draw gutter
-  const int gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
+  this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   {
     Canvas gutter;
-    gutter.init(gutter_width, this->numchars_y());
+    gutter.init(_gutter_width, this->numchars_y());
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
-      gutter.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, gutter_width, " %i", line + 1);
+      gutter.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, _gutter_width, " %i", line + 1);
     gutter.render(this->bounds.p);
     util_free(gutter);
   }
 
   Canvas canvas;
-  canvas.init(this->numchars_x()-gutter_width, this->numchars_y());
+  canvas.init(this->numchars_x()-_gutter_width, this->numchars_y());
   canvas.fill(Style{*this->text_color, *this->background_color});
   canvas.background = *this->background_color;
   canvas.margin = this->margin;
@@ -2778,7 +2789,7 @@ void Pane::render_as_edit() {
   else if (G.bottom_pane != this)
     canvas.fill_background({buf2char(b.pos), {1, 1}}, G.marker_inactive_color);
 
-  canvas.render(this->bounds.p + Pos{gutter_width*G.font_width, 0});
+  canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
 
   util_free(canvas);
   render_quads();
@@ -2790,6 +2801,7 @@ Pos Pane::buf2pixel(Pos p) const {
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
   p = char2pixel(p) + this->bounds.p;
+  p.x += this->_gutter_width * G.font_width;
   return p;
 }
 
