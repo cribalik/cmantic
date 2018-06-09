@@ -970,17 +970,24 @@ enum KeywordType {
   KEYWORD_DECLARATION,
   KEYWORD_FUNCTION,
   KEYWORD_MACRO,
+  KEYWORD_CONSTANT,
   KEYWORD_COUNT
 };
 
 Color keyword_colors[KEYWORD_COUNT];
-STATIC_ASSERT(ARRAY_LEN(keyword_colors) == KEYWORD_COUNT, all_keyword_colors_assigned);
 
 struct Keyword {
   const char *name;
   KeywordType type;
 };
 static Keyword keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"NULL", KEYWORD_CONSTANT},
+
   // types
 
   {"char", KEYWORD_TYPE},
@@ -1155,6 +1162,7 @@ static void state_init() {
   keyword_colors[KEYWORD_DECLARATION] = COLOR_PINK;
   keyword_colors[KEYWORD_FUNCTION]    = COLOR_BLUE;
   keyword_colors[KEYWORD_MACRO]       = COLOR_DEEP_ORANGE;
+  keyword_colors[KEYWORD_CONSTANT]    = G.number_color;
 
   G.highlight_background_color.base_color = G.default_background_color;
   G.highlight_background_color.popped_color = COLOR_WHITE;
