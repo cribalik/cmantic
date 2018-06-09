@@ -625,20 +625,6 @@ static void push_text(const char *str, int pos_x, int pos_y, bool center, Color 
   push_textn(str, strlen(str), pos_x, pos_y, center, color);
 }
 
-#define TEXT_IMPLEMENTATION
-#include "text.h"
-
-static void push_textf(int pos_x, int pos_y, bool center, Color color, const char *fmt, ...) {
-  if (!fmt) return;
-  Text t = text_create();
-  va_list args;
-  va_start(args, fmt);
-  text_append_v(&t, fmt, args);
-  va_end(args);
-  push_text(text_get(t), pos_x, pos_y, center, color);
-  text_free(t);
-}
-
 static void render_text() {
   SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
   glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
