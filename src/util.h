@@ -641,9 +641,11 @@ union StringBuffer {
 
   void extend(int l) {
     length += l;
-    while (cap <= length+1)
-      cap = cap ? cap*2 : 4;
-    chars = (char*)realloc(chars, cap);
+    if (cap <= length) {
+      while (cap <= length+1)
+        cap = cap ? cap*2 : 4;
+      chars = (char*)realloc(chars, cap);
+    }
     chars[length] = '\0';
   }
 

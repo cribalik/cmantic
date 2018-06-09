@@ -17,15 +17,15 @@
  *   GENERAL  *
  *************/
 
-static int graphics_init(SDL_Window **window);
-struct Color {
-  float r,g,b,a;
+typedef unsigned char u8;
+typedef unsigned int u32;
+typedef unsigned short u16;
+#define U16_MAX 65535
 
-  // returns
-  // h [0,360]
-  // s [0,1]
-  // v [0,1]
-  Color hsv() const;
+static int graphics_init(SDL_Window **window);
+
+struct Color {
+  u8 r,g,b,a;
 
   // h [0,360]
   // s [0,1]
@@ -51,7 +51,7 @@ static void render_text();
  *************/
 
 struct Quad {
-  float x,y;
+  u16 x,y;
   Color color;
 };
 static int graphics_quad_init();
@@ -187,12 +187,12 @@ struct Texture {
 };
 
 bool operator==(Color a, Color b) {
-  return a.r == b.r && a.g == b.g && a.b == b.b;
+  return *(u32*)&a == *(u32*)&b;
 }
 
 struct TextVertex {
-  int x,y;
-  float tx,ty;
+  u16 x,y;
+  u16 tx,ty;
   Color color;
 };
 
@@ -228,7 +228,7 @@ static struct {
 
 // return 0 on success
 static int graphics_init(SDL_Window **window) {
-  if (SDL_Init(SDL_INIT_EVERYTHING)) {
+  if (SDL_Init(SDL_INIT_VIDEO)) {
     fprintf(stderr, "Failed to init SDL\n");
     return 1;
   }
@@ -469,9 +469,9 @@ static int graphics_text_init(const char *ttf_file, int font_size) {
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glEnableVertexAttribArray(2);
-  glVertexAttribIPointer(0, 2, GL_INT, sizeof(*graphics_text_state.vertices), (void*) 0);
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(*graphics_text_state.vertices), (void*) offsetof(TextVertex, tx));
-  glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(*graphics_text_state.vertices), (void*) offsetof(TextVertex, color));
+  glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(*graphics_text_state.vertices), (void*) 0);
+  glVertexAttribIPointer(1, 2, GL_UNSIGNED_SHORT, sizeof(*graphics_text_state.vertices), (void*) offsetof(TextVertex, tx));
+  glVertexAttribPointer(2, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(*graphics_text_state.vertices), (void*) offsetof(TextVertex, color));
   gl_ok_or_die;
 
   /* Create font texture and read in font from file */
@@ -492,15 +492,16 @@ static int graphics_text_init(const char *ttf_file, int font_size) {
   // @shader
   const char *vertex_src = "#version 330 core\n" \
   "layout(location = 0) in ivec2 pos;\n" \
-  "layout(location = 1) in vec2 tpos;\n" \
+  "layout(location = 1) in ivec2 tpos;\n" \
   "layout(location = 2) in vec3 color;\n" \
   "out vec2 ftpos;\n" \
   "out vec3 fcolor;\n" \
   "uniform vec2 screensize;\n" \
+  "uniform vec2 texture_size;\n" \
   "void main() { \n" \
   "vec2 p = vec2(pos.x*2/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);\n" \
   "gl_Position = vec4(p, 0, 1);\n" \
-  "ftpos = tpos;\n" \
+  "ftpos = tpos / texture_size;\n" \
   "fcolor = color;\n" \
   "}";
 
@@ -536,12 +537,12 @@ static void render_textatlas(int x, int y, int w, int h) {
   glUseProgram(graphics_text_state.shader);
 
   TextVertex vertices[6] = {
-    {x, y+h, 0.0f, 0.0f},
-    {x+w, y+h, 1.0f, 0.0f},
-    {x+w, y, 1.0f, 1.0f},
-    {x, y+h, 0.0f, 0.0f},
-    {x+w, y, 1.0f, 1.0f},
-    {x, y, 0.0f, 1.0f},
+    {(u16)x,     (u16)(y+h), 0,       0},
+    {(u16)(x+w), (u16)(y+h), U16_MAX, 0},
+    {(u16)(x+w), (u16)(y),   U16_MAX, U16_MAX},
+    {(u16)(x),   (u16)(y+h), 0,       0},
+    {(u16)(x+w), (u16)(y),   U16_MAX, U16_MAX},
+    {(u16)(x),   (u16)(y),   0,       U16_MAX},
   };
 
   glBindVertexArray(graphics_text_state.vertex_array);
@@ -557,11 +558,6 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
 
   if (!str)
     return;
-
-  float ipw,iph, tx0,ty0,tx1,ty1;
-
-  ipw = 1.0f / graphics_text_state.text_atlas.w;
-  iph = 1.0f / graphics_text_state.text_atlas.h;
 
   // allocate new memory if needed
   int newsize = graphics_text_state.num_vertices + 6*n;
@@ -589,34 +585,38 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
 
   for (int i = 0; i < n; ++i) {
     // assert(str[i] >= GraphicsTextState::FIRST_CHAR && str[i] <= GraphicsTextState::LAST_CHAR);
-    char c = str[i];
-    if (c < GraphicsTextState::FIRST_CHAR || c > GraphicsTextState::LAST_CHAR)
-      c = '?';
-    Glyph g = graphics_text_state.glyphs[c - 32];
+    char chr = str[i];
+    if (!chr)
+      chr = ' ';
+    else if (chr < GraphicsTextState::FIRST_CHAR || chr > GraphicsTextState::LAST_CHAR)
+      chr = '?';
+    Glyph g = graphics_text_state.glyphs[chr - 32];
 
-    int x = pos_x + (int)g.offset_x;
-    int y = pos_y + (int)g.offset_y;
-    int w = (g.x1 - g.x0);
-    int h = (g.y1 - g.y0);
+    u16 x = pos_x + (int)g.offset_x;
+    u16 y = pos_y + (int)g.offset_y;
+    u16 w = (g.x1 - g.x0);
+    u16 h = (g.y1 - g.y0);
 
     pos_x += (int)g.advance;
-    if (x + w <= 0) continue;
-    if (x - w >= graphics_state.window_width) break;
+    if (pos_x >= graphics_state.window_width)
+      break;
 
-    /* scale texture to atlas */
-    tx0 = g.x0 * ipw,
-    tx1 = g.x1 * ipw;
-    ty0 = g.y0 * iph;
-    ty1 = g.y1 * iph;
+    u16 x0 = x;
+    u16 x1 = x+w;
+    u16 y0 = y;
+    u16 y1 = y+h;
 
     TextVertex *v = graphics_text_state.vertices + graphics_text_state.num_vertices;
-
-    *v++ = {x, y, tx0, ty0, color};
-    *v++ = {x + w, y, tx1, ty0, color};
-    *v++ = {x, y+h, tx0, ty1, color};
-    *v++ = {x, y+h, tx0, ty1, color};
-    *v++ = {x + w, y, tx1, ty0, color};
-    *v++ = {x + w, y+h, tx1, ty1, color};
+    TextVertex a = {x0, y0, g.x0, g.y0, color};
+    TextVertex b = {x1, y0, g.x1, g.y0, color};
+    TextVertex c = {x1, y1, g.x1, g.y1, color};
+    TextVertex d = {x0, y1, g.x0, g.y1, color};
+    v[0] = a;
+    v[1] = b;
+    v[2] = c;
+    v[3] = a;
+    v[4] = c;
+    v[5] = d;
 
     graphics_text_state.num_vertices += 6;
   }
@@ -625,20 +625,6 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
 static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color) {
   if (!str) return;
   push_textn(str, strlen(str), pos_x, pos_y, center, color);
-}
-
-#define TEXT_IMPLEMENTATION
-#include "text.h"
-
-static void push_textf(int pos_x, int pos_y, bool center, Color color, const char *fmt, ...) {
-  if (!fmt) return;
-  Text t = text_create();
-  va_list args;
-  va_start(args, fmt);
-  text_append_v(&t, fmt, args);
-  va_end(args);
-  push_text(text_get(t), pos_x, pos_y, center, color);
-  text_free(t);
 }
 
 static void render_text() {
@@ -650,8 +636,8 @@ static void render_text() {
   glUseProgram(graphics_text_state.shader);
 
   // set screen size
-  GLint loc = glGetUniformLocation(graphics_text_state.shader, "screensize");
-  glUniform2f(loc, (float)graphics_state.window_width, (float)graphics_state.window_height);
+  glUniform2f(glGetUniformLocation(graphics_text_state.shader, "screensize"), (float)graphics_state.window_width, (float)graphics_state.window_height);
+  glUniform2f(glGetUniformLocation(graphics_text_state.shader, "texture_size"), (float)graphics_text_state.text_atlas.w, (float)graphics_text_state.text_atlas.h);
 
   // set alpha blending
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -727,13 +713,13 @@ static int graphics_quad_init() {
   glBufferData(GL_ARRAY_BUFFER, sizeof(graphics_quad_state.vertices), 0, GL_DYNAMIC_DRAW);
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) 0);
-  glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
+  glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(QuadVertex), (void*) 0);
+  glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
   gl_ok_or_die;
 
   // @shader
   const char *vertex_src = "#version 330 core\n" \
-  "layout(location = 0) in vec2 pos;\n" \
+  "layout(location = 0) in ivec2 pos;\n" \
   "layout(location = 1) in vec4 color;\n" \
   "out vec4 fcolor;\n" \
   "uniform vec2 screensize;\n" \
@@ -787,11 +773,11 @@ static void push_quad(Quad a, Quad b, Quad c, Quad d) {
   graphics_quad_state.num_vertices += 6;
 }
 
-static void push_square_quad(float x0, float x1, float y0, float y1, Color topleft, Color topright, Color bottomleft, Color bottomright) {
+static void push_square_quad(u16 x0, u16 x1, u16 y0, u16 y1, Color topleft, Color topright, Color bottomleft, Color bottomright) {
   push_quad({x0,y0,topleft}, {x1,y0,topright}, {x1,y1,bottomright}, {x0,y1,bottomleft});
 }
 
-static void push_square_quad(float x0, float x1, float y0, float y1, Color c) {
+static void push_square_quad(u16 x0, u16 x1, u16 y0, u16 y1, Color c) {
   push_quad({x0,y0,c}, {x1,y0,c}, {x1,y1,c}, {x0,y1,c});
 }
 
@@ -822,81 +808,68 @@ static void render_quads() {
   gl_ok_or_die;
 }
 
+// alpha in range [0,1]
 Color Color::blend(Color back, Color front, float alpha) {
-  Color result;
+  if (alpha < 0.0001f)
+    return back;
 
-  if (alpha > 0.0001f) {
-    result.a = alpha + back.a*(1.0f-alpha);
-    result.r = (back.r*back.a*(1.0f-alpha) + front.r*alpha) / result.a;
-    result.g = (back.g*back.a*(1.0f-alpha) + front.g*alpha) / result.a;
-    result.b = (back.b*back.a*(1.0f-alpha) + front.b*alpha) / result.a;
-  }
-  else {
-    result = back;
-  }
-  return result;
+  float a = alpha + back.a/255.0f*(1.0f-alpha);
+  float r = (back.r/255.0f*back.a/255.0f*(1.0f-alpha) + front.r/255.0f*alpha) / a;
+  float g = (back.g/255.0f*back.a/255.0f*(1.0f-alpha) + front.g/255.0f*alpha) / a;
+  float b = (back.b/255.0f*back.a/255.0f*(1.0f-alpha) + front.b/255.0f*alpha) / a;
+  return {
+    (u8)(r*255),
+    (u8)(g*255),
+    (u8)(b*255),
+    (u8)(a*255),
+  };
 }
 
 Color Color::blend(Color back, Color front) {
-  return blend(back, front, front.a);
-}
-
-Color Color::hsv() const {
-  float max,min, d, h,s,v;
-  max = r > g ? r : g;
-  max = max > b ? max : b;
-  min = r < g ? r : g;
-  min = min < b ? min : b;
-
-  d = max - min;
-  if (d < 0.00001f)
-    return {};
-  if (max <= 0.0f)
-    return {};
-
-  s = d/max;
-  if (max == r)
-    h = (g-b)/d;
-  else if (max == g)
-    h = 2.0f + (b-r)/d;
-  else
-    h = 4.0f + (r-g)/d;
-
-  h *= 60.0f;
-
-  while (h > 1.0f)
-    h -= 360.0f;
-  while (h < 0.0f)
-    h += 360.0f;
-
-  v = max;
-  return  {h,s,v,1.0f};
+  return blend(back, front, front.a/255.0f);
 }
 
 Color Color::from_hsl(float h, float s, float l) {
   const float c = (1.0f - fabsf(2*l - 1)) * s;
   const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
   const float m = l - c/2.0f;
-  Color result;
+  float r,g,b;
 
   if (h > 300.0f)
-    result = {c,0.0f,x};
+    r = c,
+    g = 0.0f,
+    b = x;
   else if (h > 240.0f)
-    result = {x,0.0f,c};
+    r = x,
+    g = 0.0f,
+    b = c;
   else if (h > 180.0f)
-    result = {0.0f,x,c};
+    r = 0.0f,
+    g = x,
+    b = c;
   else if (h > 120.0f)
-    result = {0.0f,c,x};
+    r = 0.0f,
+    g = c,
+    b = x;
   else if (h > 60.0f)
-    result = {x,c,0.0f};
+    r = x,
+    g = c,
+    b = 0.0f;
   else
-    result = {c,x,0.0f};
+    r = c,
+    g = x,
+    b = 0.0f;
 
-  result.r += m;
-  result.g += m;
-  result.b += m;
-  result.a = 1;
-  return result;
+  r += m;
+  g += m;
+  b += m;
+
+  return {
+    (u8)(r*255),
+    (u8)(g*255),
+    (u8)(b*255),
+    255
+  };
 }
 
 

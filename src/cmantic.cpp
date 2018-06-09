@@ -95,15 +95,6 @@ enum Mode {
   MODE_COUNT
 };
 
-struct Style {
-  Color text_color;
-  Color background_color;
-};
-
-static bool operator==(Style a, Style b) {
-  return a.text_color == b.text_color && a.background_color == b.background_color;
-}
-
 bool operator==(Utf8char uc, char c) {
   return !(uc.code & 0xFF00) && (uc.code & 0xFF) == (u32)c;
 }
@@ -293,7 +284,8 @@ union Rect {
 
 struct Canvas {
   Utf8char *chars;
-  Style *styles;
+  Color *background_colors;
+  Color *text_colors;
   int w, h;
   Color background;
   int margin;
@@ -303,11 +295,11 @@ struct Canvas {
   void render(Pos offset);
   void render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
   void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s);
+  void fill(Color text, Color background);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
   void fill_textcolor(Range range, Rect bounds, Color c);
   void invert_color(Pos p);
-  void fill(Style s);
   void fill(Utf8char c);
   void resize(int w, int h);
   void init(int w, int h);
@@ -315,7 +307,8 @@ struct Canvas {
 
 void util_free(Canvas &c) {
   delete [] c.chars;
-  delete [] c.styles;
+  delete [] c.background_colors;
+  delete [] c.text_colors;
 }
 
 enum PaneType {
@@ -428,7 +421,8 @@ struct State {
   /* settings */
   Color default_background_color;
   Color default_text_color;
-  Style default_gutter_style;
+  Color default_gutter_text_color;
+  Color default_gutter_background_color;
   Color default_highlight_background_color;
   Color number_color;
   Color comment_color;
@@ -990,27 +984,26 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
 
 static const char *ttf_file = "font.ttf";
 
-#define rgba(r,g,b,a) {(r)/255.0f, (g)/255.0f, (b)/255.0f, (a)}
-static const Color COLOR_PINK = {0.92549f, 0.25098f, 0.4784f, 1.0f};
-static const Color COLOR_YELLOW = {1.0f, 0.921568627451f, 0.23137254902f, 1.0f};
-static const Color COLOR_AMBER = rgba(255,193,7, 1.0f);
-static const Color COLOR_DEEP_ORANGE = rgba(255,138,101, 1.0f);
-static const Color COLOR_ORANGE = rgba(255,183,77, 1.0f);
-static const Color COLOR_GREEN = rgba(129,199,132, 1.0f);
-static const Color COLOR_LIGHT_GREEN = rgba(174,213,129, 1.0f);
-static const Color COLOR_INDIGO = rgba(121,134,203, 1.0f);
-static const Color COLOR_DEEP_PURPLE = rgba(149,117,205, 1.0f);
-static const Color COLOR_RED = rgba(229,115,115, 1.0f);
-static const Color COLOR_CYAN = rgba(77,208,225, 1.0f);
-static const Color COLOR_LIGHT_BLUE = rgba(79,195,247, 1.0f);
-static const Color COLOR_PURPLE = rgba(186,104,200, 1.0f);
-static const Color COLOR_BLUEGREY = {0.329411764706f, 0.43137254902f, 0.478431372549f, 1.0f};
-static const Color COLOR_GREY = {0.2f, 0.2f, 0.2f, 1.0f};
-static const Color COLOR_LIGHT_GREY = {0.3f, 0.3f, 0.3f, 1.0f};
-static const Color COLOR_BLACK = {0.1f, 0.1f, 0.1f, 1.0f};
-static const Color COLOR_WHITE = {0.9f, 0.9f, 0.9f, 1.0f};
-static const Color COLOR_BLUE = rgba(79,195,247, 1.0f);
-static const Color COLOR_DARK_BLUE = rgba(124, 173, 213, 1.0f);
+static const Color COLOR_PINK = {236, 64, 122, 255};
+static const Color COLOR_YELLOW = {255, 235, 59, 255};
+static const Color COLOR_AMBER = {255,193,7, 255};
+static const Color COLOR_DEEP_ORANGE = {255,138,101, 255};
+static const Color COLOR_ORANGE = {255,183,77, 255};
+static const Color COLOR_GREEN = {129,199,132, 255};
+static const Color COLOR_LIGHT_GREEN = {174,213,129, 255};
+static const Color COLOR_INDIGO = {121,134,203, 255};
+static const Color COLOR_DEEP_PURPLE = {149,117,205, 255};
+static const Color COLOR_RED = {229,115,115, 255};
+static const Color COLOR_CYAN = {77,208,225, 255};
+static const Color COLOR_LIGHT_BLUE = {79,195,247, 255};
+static const Color COLOR_PURPLE = {186,104,200, 255};
+static const Color COLOR_BLUEGREY = {84, 110, 122, 255};
+static const Color COLOR_GREY = {51, 51, 51, 255};
+static const Color COLOR_LIGHT_GREY = {76, 76, 76, 255};
+static const Color COLOR_BLACK = {25, 25, 25, 255};
+static const Color COLOR_WHITE = {230, 230, 230, 255};
+static const Color COLOR_BLUE = {79,195,247, 255};
+static const Color COLOR_DARK_BLUE = {124, 173, 213, 255};
 
 enum KeywordType {
   KEYWORD_NONE,
@@ -1020,17 +1013,24 @@ enum KeywordType {
   KEYWORD_DECLARATION,
   KEYWORD_FUNCTION,
   KEYWORD_MACRO,
+  KEYWORD_CONSTANT,
   KEYWORD_COUNT
 };
 
 Color keyword_colors[KEYWORD_COUNT];
-STATIC_ASSERT(ARRAY_LEN(keyword_colors) == KEYWORD_COUNT, all_keyword_colors_assigned);
 
 struct Keyword {
   const char *name;
   KeywordType type;
 };
 static Keyword keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"NULL", KEYWORD_CONSTANT},
+
   // types
 
   {"char", KEYWORD_TYPE},
@@ -1187,9 +1187,9 @@ static void state_init() {
 
   // @colors!
   G.default_text_color = COLOR_WHITE;
-  G.default_background_color = {0.16f, 0.16f, 0.16f, 1.0f};
-  G.default_gutter_style.text_color = {0.5f, 0.5f, 0.5f, 1.0f};
-  G.default_gutter_style.background_color = G.default_background_color;
+  G.default_background_color = {41, 41, 41, 255};
+  G.default_gutter_text_color = {127, 127, 127, 255};
+  G.default_gutter_background_color = G.default_background_color;
   G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
   G.operator_color =                        COLOR_RED;
@@ -1205,6 +1205,7 @@ static void state_init() {
   keyword_colors[KEYWORD_DECLARATION] = COLOR_PINK;
   keyword_colors[KEYWORD_FUNCTION]    = COLOR_BLUE;
   keyword_colors[KEYWORD_MACRO]       = COLOR_DEEP_ORANGE;
+  keyword_colors[KEYWORD_CONSTANT]    = G.number_color;
 
   G.highlight_background_color.base_color = G.default_background_color;
   G.highlight_background_color.popped_color = COLOR_WHITE;
@@ -2084,13 +2085,13 @@ int Buffer::autoindent(const int y) {
   const int current_indent = getindent(y);
 
   int y_above = y-1;
+  // skip empty lines
   while (y_above >= 0 && lines[y_above].length == 0)
     --y_above;
   if (y_above == 0) {
     diff = -getindent(y);
     goto done;
   } else {
-    /* skip empty lines */
     bool above_is_statement;
     const int above_depth = indentdepth(y_above, &above_is_statement);
     const bool above_is_indenting = (above_depth > 0 || above_is_statement);
@@ -2518,16 +2519,17 @@ void Canvas::init(int width, int height) {
   this->w = width;
   this->h = height;
   this->chars = new Utf8char[w*h]();
-  this->styles = new Style[w*h]();
-  for (int i = 0; i < w*h; ++i)
-    chars[i] = ' ';
+  this->background_colors = new Color[w*h]();
+  this->text_colors = new Color[w*h]();
 }
 
 void Canvas::resize(int width, int height) {
   if (this->chars)
     delete [] this->chars;
-  if (this->styles)
-    delete [] this->styles;
+  if (this->background_colors)
+    delete [] this->background_colors;
+  if (this->text_colors)
+    delete [] this->text_colors;
   this->init(width, height);
 }
 
@@ -2536,13 +2538,15 @@ void Canvas::fill(Utf8char c) {
     this->chars[i] = c;
 }
 
-void Canvas::fill(Style s) {
+void Canvas::fill(Color text, Color background) {
   for (int i = 0; i < w*h; ++i)
-    this->styles[i] = s;
+    background_colors[i] = background;
+  for (int i = 0; i < w*h; ++i)
+    text_colors[i] = text;
 }
 
 void Canvas::invert_color(Pos p) {
-  swap(styles[p.y*w + p.x].text_color, styles[p.y*w + p.x].background_color);
+  swap(text_colors[p.y*w + p.x], background_colors[p.y*w + p.x]);
 }
 
 void Pane::render_as_menu() {
@@ -2553,7 +2557,7 @@ void Pane::render_as_menu() {
   canvas.init(this->numchars_x(), this->numchars_y());
   canvas.background = *this->background_color;
   canvas.fill(Utf8char{' '});
-  canvas.fill(Style{*this->text_color, *this->background_color});
+  canvas.fill(*this->text_color, *this->background_color);
   canvas.draw_shadow = true;
   canvas.margin = this->margin;
 
@@ -2711,12 +2715,12 @@ void Pane::render_as_single_line() {
 
   Canvas canvas;
   canvas.init(this->numchars_x(), 1);
-  canvas.fill(Style{*this->text_color, *this->background_color});
+  canvas.fill(*this->text_color, *this->background_color);
   canvas.background = *this->background_color;
   canvas.margin = this->margin;
 
   // draw prefix
-  canvas.render_str({0, 0}, &G.default_gutter_style.text_color, NULL, 0, -1, this->single_line.prefix.str());
+  canvas.render_str({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, this->single_line.prefix.str());
 
   // draw buffer
   canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].str());
@@ -2754,14 +2758,14 @@ void Pane::render_as_edit() {
     gutter.init(_gutter_width, this->numchars_y());
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
-      gutter.render_strf({0, y}, &G.default_gutter_style.text_color, &G.default_gutter_style.background_color, 0, _gutter_width, " %i", line + 1);
+      gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
     gutter.render(this->bounds.p);
     util_free(gutter);
   }
 
   Canvas canvas;
   canvas.init(this->numchars_x()-_gutter_width, this->numchars_y());
-  canvas.fill(Style{*this->text_color, *this->background_color});
+  canvas.fill(*this->text_color, *this->background_color);
   canvas.background = *this->background_color;
   canvas.margin = this->margin;
 
@@ -2844,19 +2848,19 @@ void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
 
   if (a.y == b.y) {
     for (int x = a.x; x <= b.x; ++x)
-      this->styles[a.y*this->w + x].text_color = c;
+      this->text_colors[a.y*this->w + x] = c;
     return;
   }
 
   int y = a.y;
   if (y < b.y)
     for (int x = a.x; x < bounds.x+bounds.w; ++x)
-      this->styles[y*this->w + x].text_color = c;
+      this->text_colors[y*this->w + x] = c;
   for (++y; y < b.y; ++y)
     for (int x = bounds.x; x < bounds.x+bounds.w; ++x)
-      this->styles[y*this->w + x].text_color = c;
+      this->text_colors[y*this->w + x] = c;
   for (int x = bounds.x; x <= b.x; ++x)
-    this->styles[y*this->w + x].text_color = c;
+    this->text_colors[y*this->w + x] = c;
 }
 
 // w,h: use -1 to say it goes to the end
@@ -2872,7 +2876,7 @@ void Canvas::fill_textcolor(Rect r, Color c) {
 
   for (int y = r.y; y < r.y+r.h; ++y)
   for (int x = r.x; x < r.x+r.w; ++x)
-    styles[y*this->w + x].text_color = c;
+    text_colors[y*this->w + x] = c;
 }
 
 // w,h: use -1 to say it goes to the end
@@ -2888,7 +2892,7 @@ void Canvas::fill_background(Rect r, Color c) {
 
   for (int y = r.y; y < r.y+r.h; ++y)
   for (int x = r.x; x < r.x+r.w; ++x)
-    styles[y*this->w + x].background_color = c;
+    background_colors[y*this->w + x] = c;
 }
 
 void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
@@ -2899,7 +2903,8 @@ void Canvas::render_str(Pos p, const Color *text_color, const Color *background_
     xclip1 = this->w;
 
   Utf8char *row = &this->chars[p.y*w];
-  Style *style_row = &this->styles[p.y*w];
+  Color *text_row = &this->text_colors[p.y*w];
+  Color *background_row = &this->background_colors[p.y*w];
 
   for (Utf8char c : s) {
     if (c == '\t') {
@@ -2907,18 +2912,18 @@ void Canvas::render_str(Pos p, const Color *text_color, const Color *background_
         if (p.x >= xclip0 && p.x < xclip1) {
           row[p.x] = ' ';
           if (text_color)
-            style_row[p.x].text_color = *text_color;
+            text_row[p.x] = *text_color;
           if (background_color)
-            style_row[p.x].background_color = *background_color;
+            background_row[p.x] = *background_color;
         }
     }
     else {
       if (p.x >= xclip0 && p.x < xclip1) {
         row[p.x] = c;
         if (text_color)
-          style_row[p.x].text_color = *text_color;
+          text_row[p.x] = *text_color;
         if (background_color)
-          style_row[p.x].background_color = *background_color;
+          background_row[p.x] = *background_color;
       }
       ++p.x;
     }
@@ -2961,17 +2966,17 @@ void Canvas::render(Pos offset) {
     shadow_color2.a = 0.0f;
     // right side
     push_quad(
-      {(float)offset.x + size.x, (float)offset.y + shadow_offset, shadow_color},
-      {(float)offset.x + size.x, (float)offset.y + size.y, shadow_color},
-      {(float)offset.x + size.x + shadow_offset, (float)offset.y + size.y + shadow_offset, shadow_color2},
-      {(float)offset.x + size.x + shadow_offset, (float)offset.y + shadow_offset, shadow_color2});
+      {(u16)(offset.x + size.x),                 (u16)(offset.y + shadow_offset),          shadow_color},
+      {(u16)(offset.x + size.x),                 (u16)(offset.y + size.y),                 shadow_color},
+      {(u16)(offset.x + size.x + shadow_offset), (u16)(offset.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(offset.x + size.x + shadow_offset), (u16)(offset.y + shadow_offset),          shadow_color2});
 
     // bottom side
     push_quad(
-      {(float)offset.x + shadow_offset, (float)offset.y + size.y, shadow_color},
-      {(float)offset.x + shadow_offset, (float)offset.y + size.y + shadow_offset, shadow_color2},
-      {(float)offset.x + size.x + shadow_offset, (float)offset.y + size.y + shadow_offset, shadow_color2},
-      {(float)offset.x + size.x, (float)offset.y + size.y, shadow_color});
+      {(u16)(offset.x + shadow_offset),          (u16)(offset.y + size.y),                 shadow_color},
+      {(u16)(offset.x + shadow_offset),          (u16)(offset.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(offset.x + size.x + shadow_offset), (u16)(offset.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(offset.x + size.x),                 (u16)(offset.y + size.y),                 shadow_color});
   }
 
   // render base background
@@ -2982,11 +2987,11 @@ void Canvas::render(Pos offset) {
   // render background
   for (int y = 0; y < h; ++y) {
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-      if (x1 < w && styles[y*w + x1] == styles[y*w + x0])
+      if (x1 < w && background_colors[y*w + x1] == background_colors[y*w + x0])
         continue;
       Pos p0 = char2pixel(x0,y) + offset;
       Pos p1 = char2pixel(x1,y+1) + offset;
-      const Color c = styles[y*w + x0].background_color;
+      const Color c = background_colors[y*w + x0];
       push_square_quad((float)p0.x, (float)p1.x, (float)p0.y, (float)p1.y, c);
       x0 = x1;
     }
@@ -2999,10 +3004,10 @@ void Canvas::render(Pos offset) {
     G.tmp_render_buffer.append(&chars[row*w], w);
     int y = char2pixely(row+1) + text_offset_y + offset.y;
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-      if (x1 < w && styles[row*w + x1].text_color == styles[row*w + x0].text_color)
+      if (x1 < w && text_colors[row*w + x1] == text_colors[row*w + x0])
         continue;
       int x = char2pixelx(x0) + offset.x;
-      push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, styles[row*w + x0].text_color);
+      push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, text_colors[row*w + x0]);
       x0 = x1;
     }
   }
@@ -3180,4 +3185,5 @@ int main(int, const char *[])
     SDL_GL_SwapWindow(G.window);
   }
 }
+
 
