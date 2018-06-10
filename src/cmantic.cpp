@@ -1,6 +1,5 @@
 /*
  * TODO:
- *    Merge cursors that have the same position
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -9,20 +8,20 @@
  *       if identifier disappears, remove from autocomplete list
  *
  * Undo
+ * Goto definition
  * Folding
  * Multiuser editing
  * Pane stack
  * TODO stack
  * copy-paste
  * Jumplist
- * Do DFS on autocompletion.
+ * Optimize autocompletion using some sort of A*
+ * update file list on change
  *
  * load files
- * Fuzzy file finding
  * movement (parentheses, block, etc.)
  * actions (Delete, Yank, ...)
  * SDL doesn't handle caps-escape swapping correctly on Windows.. We probably need to use VK directly for windows
- * add folders
  */
 
 // @includes
