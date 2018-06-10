@@ -314,7 +314,7 @@ void util_free(Array<T> &a) {
   if (a.items) {
     for (int i = 0; i < a.size; ++i)
       util_free(a.items[i]);
-    ::free(a.items);
+    free(a.items);
   }
   a.items = 0;
   a.size = a.cap = 0;
@@ -483,8 +483,7 @@ struct Utf8Iter {
   bool begins_with(int offset, const char *str, int n) const; \
   bool begins_with(int offset, const char *str) const; \
   bool empty() const {return length;}; \
-  String copy() const; \
-  Slice& str() const {return *(Slice*)this;}
+  String copy() const;
 
 #define STRING_METHODS_IMPL(classname) \
   char& classname::operator[](int i) {return (char&)chars[i];} \
@@ -703,7 +702,6 @@ void util_free(String &s) {
     free(s.chars);
   s.chars = 0;
   s.length = 0;
-  return;
 }
 
 union StringBuffer {
@@ -1045,7 +1043,7 @@ struct Path {
   }
 
   Path copy() const {
-    return {StringBuffer::create(string.str())};
+    return {StringBuffer::create(string.slice)};
   }
 
   Slice name() const {

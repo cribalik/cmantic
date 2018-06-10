@@ -1,7 +1,5 @@
 /*
  * TODO:
- *   implement Pane::render_as_menu to list fuzzy matches
- *   File tree
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -25,6 +23,7 @@
  * SDL doesn't handle caps-escape swapping correctly on Windows.. We probably need to use VK directly for windows
  * add folders
  */
+
 // @includes
   #ifdef _MSC_VER
     #define OS_WINDOWS 1
@@ -324,8 +323,11 @@ void util_free(Canvas &c) {
 enum PaneType {
   PANETYPE_NULL,
   PANETYPE_EDIT,
-  PANETYPE_DROPDOWN,
+  PANETYPE_FILESEARCH,
+  PANETYPE_TEXTSEARCH,
   PANETYPE_MENU,
+  PANETYPE_STATUSMESSAGE,
+  PANETYPE_DROPDOWN,
 };
 
 struct MenuOption {
@@ -355,8 +357,9 @@ struct Pane {
 
     // PANETYPE_MENU
     struct {
-      String prefix;
       Array<MenuOption> options;
+      int current_match;
+      Array<Slice> suggestions;
     } menu;
 
     // PANETYPE_DROPDOWN
@@ -368,9 +371,13 @@ struct Pane {
   void render();
 
   // internal methods
-  void render_as_edit();
+  void render_edit();
   void render_as_dropdown();
-  void render_as_menu();
+  void render_menu();
+  void render_textsearch();
+  void render_filesearch();
+  void render_single_line(Slice prefix);
+  void render_menu_popup(View<Slice> options);
   void render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
@@ -384,16 +391,6 @@ struct Pane {
   Pos buf2char(Pos p) const;
   Pos buf2pixel(Pos p) const;
 };
-
-void util_free(Pane &p) {
-  switch (p.type) {
-  case PANETYPE_MENU:
-    util_free(p.menu.prefix);
-    break;
-  default:
-    break;
-  }
-}
 
 struct PoppedColor {
   Color base_color;
@@ -506,7 +503,6 @@ struct State {
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
   #define DROPDOWN_SIZE 7
-
 };
 
 State G;
@@ -577,7 +573,7 @@ static void tokenize(Buffer &b) {
       }
       /* check if identifier already exists */
       for (int i = 0; i < b.identifiers.size; ++i)
-        if (identifier_buffer.str() == b.identifiers[i].str())
+        if (identifier_buffer.slice == b.identifiers[i].slice)
           goto identifier_done;
 
       b.identifiers.push(identifier_buffer.copy());
@@ -879,6 +875,14 @@ static Pos char2pixel(int x, int y) {
   return {char2pixelx(x), char2pixely(y)};
 }
 
+static int pixel2charx(int x) {
+  return x/G.font_width;
+}
+
+static int pixel2chary(int y) {
+  return y/G.line_height;
+}
+
 bool Buffer::find_start_of_identifier(Pos pos, Pos *pout) {
   *pout = pos;
   advance_r(*pout);
@@ -962,31 +966,22 @@ static void render_dropdown(Pane *pane) {
 #define CONTROL(c) ((c)|KEY_CONTROL)
 
 // TODO: use a unified key instead of this specialkey hack
-static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool ctrl) {
+static void insert_default(Pane *p, int key) {
   Buffer &b = *p->buffer;
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
-  if (special_key == KEY_ESCAPE) {
+  if (key == KEY_ESCAPE) {
     mode_normal(true);
     return;
   }
 
-  if (!special_key && !ctrl) {
-    b.insert_char(input);
+  if (key >= 0 && key <= 125) {
+    b.insert_char(Utf8char::create(key));
     return;
   }
 
-  int key = special_key ? special_key : input.ansi();
-  if (ctrl)
-    key |= KEY_CONTROL;
   switch (key) {
-    case KEY_RETURN:
-      b.insert_newline();
-      break;
-
     case KEY_TAB:
-      if (dropdown_autocomplete(b))
-        break;
       b.insert_tab();
       break;
 
@@ -994,23 +989,9 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
       b.delete_char();
       break;
 
-    case CONTROL('j'): {
-      // this move should not dirty cursor
-      int f = G.flags.cursor_dirty;
-      G.dropdown_buffer.move_y(0, 1);
-      G.flags.cursor_dirty = f;
-      break;}
 
-    case CONTROL('k'): {
-      // this move should not dirty cursor
-      int f = G.flags.cursor_dirty;
-      G.dropdown_buffer.move_y(0, -1);
-      G.flags.cursor_dirty = f;
-      break;}
-
-    default:
-      break;
   }
+
 }
 
 static const char *ttf_file = "font.ttf";
@@ -1177,8 +1158,7 @@ static void _filetree_fill(Path &path) {
     if (File::filetype(path) == FILETYPE_DIR)
       _filetree_fill(path);
     else {
-      String name = path.name().copy();
-      G.filetree_buffer.identifiers += name;
+      G.files += path.copy();
     }
     path.pop();
   }
@@ -1189,8 +1169,6 @@ static void _filetree_fill(Path &path) {
 }
 
 static void filetree_init() {
-  G.filetree_buffer.empty();
-
   Path cwd = {};
   if (File::cwd(&cwd))
     _filetree_fill(cwd);
@@ -1284,14 +1262,13 @@ static void state_init() {
 
   // search pane
   G.search_buffer.empty();
-  G.search_pane.type = PANETYPE_MENU;
+  G.search_pane.type = PANETYPE_TEXTSEARCH;
   G.search_pane.buffer = &G.search_buffer;
   G.search_pane.syntax_highlight = true;
   G.search_pane.background_color = &G.bottom_pane_highlight.color;
   G.search_pane.text_color = &G.default_text_color;
-  // G.search_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.search_pane.highlight_background_color = &G.highlight_background_color.color;
   G.search_pane.margin = 5;
-  G.search_pane.menu.prefix = String::create("search: ");
 
   // menu pane
   G.menu_buffer.empty();
@@ -1300,20 +1277,18 @@ static void state_init() {
   G.menu_pane.syntax_highlight = true;
   G.menu_pane.background_color = &G.bottom_pane_highlight.color;
   G.menu_pane.text_color = &G.default_text_color;
-  // G.menu_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.menu_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.menu_pane.margin = 5;
-  G.menu_pane.menu.prefix = String::create("menu: ");
 
   // file tree pane
   G.filetree_buffer.empty();
-  G.filetree_pane.type = PANETYPE_MENU;
+  G.filetree_pane.type = PANETYPE_FILESEARCH;
   G.filetree_pane.buffer = &G.filetree_buffer;
   G.filetree_pane.syntax_highlight = false;
   G.filetree_pane.background_color = &COLOR_GREY;
   G.filetree_pane.text_color = &G.default_text_color;
-  // G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.margin = 5;
-  G.filetree_pane.menu.prefix = String::create("open: ");
 
   // dropdown pane
   G.dropdown_buffer.empty();
@@ -1326,12 +1301,12 @@ static void state_init() {
 
   // status message pane
   G.status_message_buffer.empty();
-  G.status_message_pane.type = PANETYPE_MENU;
+  G.status_message_pane.type = PANETYPE_STATUSMESSAGE;
   G.status_message_pane.buffer = &G.status_message_buffer;
   G.status_message_pane.syntax_highlight = true;
   G.status_message_pane.background_color = &G.bottom_pane_highlight.color;
   G.status_message_pane.text_color = &G.default_text_color;
-  // G.status_message_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.status_message_pane.highlight_background_color = &G.highlight_background_color.color;
   G.status_message_pane.margin = 5;
 
   G.center_pane = &G.main_pane;
@@ -1399,7 +1374,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
       line = G.menu_buffer[0];
       foreach(menu_options) {
-        if (G.menu_buffer[0].str() == it->opt.name) {
+        if (G.menu_buffer[0].slice == it->opt.name) {
           it->fun();
           goto done;
         }
@@ -1412,13 +1387,18 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     else if (special_key == KEY_ESCAPE)
       mode_normal(true);
     else
-      insert_default(&G.menu_pane, special_key, input, ctrl);
+      insert_default(&G.menu_pane, key);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
   case MODE_FILESEARCH:
     if (special_key == KEY_RETURN) {
-      Slice filename = G.filetree_buffer[0].slice;
+      Slice filename;
+      int c = G.filetree_pane.menu.current_match;
+      if (G.filetree_pane.menu.suggestions.size && c >= 0 && c < G.filetree_pane.menu.suggestions.size)
+        filename = G.filetree_pane.menu.suggestions[c];
+      else
+        filename = G.filetree_buffer[0].slice;
 
       Buffer *b = 0;
       for (Buffer *bb : G.buffers) {
@@ -1443,24 +1423,52 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       G.filetree_buffer.empty();
       mode_normal(false);
+      break;
     }
-    else
-      insert_default(G.bottom_pane, special_key, input, ctrl);
+    switch (key) {
+    case KEY_ARROW_DOWN:
+    case CONTROL('j'):
+      G.filetree_pane.menu.current_match = clamp(G.filetree_pane.menu.current_match+1, 0, G.filetree_pane.menu.suggestions.size-1);
+      break;
+    case KEY_ARROW_UP:
+    case CONTROL('k'):
+      G.filetree_pane.menu.current_match = clamp(G.filetree_pane.menu.current_match-1, 0, G.filetree_pane.menu.suggestions.size-1);
+      break;
+    default:
+      insert_default(G.bottom_pane, key);
+      break;
+    }
     break;
 
   case MODE_SEARCH: {
-    StringBuffer search;
-
     if (special_key == KEY_ESCAPE)
       dropdown_autocomplete(G.search_buffer);
-    else
-      insert_default(&G.search_pane, special_key, input, ctrl);
+    else {
+      switch (key) {
+      case KEY_ARROW_DOWN:
+      case CONTROL('j'): {
+        // this move should not dirty cursor
+        int f = G.flags.cursor_dirty;
+        G.dropdown_buffer.move_y(0, 1);
+        G.flags.cursor_dirty = f;
+        break;}
 
-    search = G.search_buffer.lines[0];
-    G.search_failed = !buffer.find_and_move(search.str(), true);
+      case KEY_ARROW_UP:
+      case CONTROL('k'): {
+        // this move should not dirty cursor
+        int f = G.flags.cursor_dirty;
+        G.dropdown_buffer.move_y(0, -1);
+        G.flags.cursor_dirty = f;
+        break;}
+
+      default:
+        insert_default(G.bottom_pane, key);
+        break;
+      }
+    }
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
-      G.search_failed = !buffer.find_and_move(search.str(), true);
+      G.search_failed = !buffer.find_and_move(G.search_buffer[0].slice, true);
       if (G.search_failed) {
         buffer.move_to(0, G.search_begin_pos);
         status_message_set("'{}' not found", &G.search_buffer[0]);
@@ -1485,9 +1493,40 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     }
     break;
 
-  case MODE_INSERT:
-    insert_default(&G.main_pane, special_key, input, ctrl);
-    break;
+  case MODE_INSERT: {
+    int key = special_key ? special_key : input.ansi();
+    if (ctrl)
+      key |= KEY_CONTROL;
+    switch (key) {
+      case KEY_RETURN:
+        buffer.insert_newline();
+        break;
+
+      case KEY_TAB:
+        if (dropdown_autocomplete(buffer))
+          break;
+        insert_default(&G.main_pane, key);
+        break;
+
+      case CONTROL('j'): {
+        // this move should not dirty cursor
+        int f = G.flags.cursor_dirty;
+        G.dropdown_buffer.move_y(0, 1);
+        G.flags.cursor_dirty = f;
+        break;}
+
+      case CONTROL('k'): {
+        // this move should not dirty cursor
+        int f = G.flags.cursor_dirty;
+        G.dropdown_buffer.move_y(0, -1);
+        G.flags.cursor_dirty = f;
+        break;}
+
+      default:
+        insert_default(&G.main_pane, key);
+        break;
+    }
+    break;}
 
   case MODE_NORMAL:
     switch (key) {
@@ -1576,7 +1615,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     case 'n':
       G.search_term_background_color.reset();
-      if (!buffer.find_and_move(G.search_buffer[0].str(), false))
+      if (!buffer.find_and_move(G.search_buffer[0].slice, false))
         status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
@@ -1668,12 +1707,6 @@ static void handle_rendering(float dt) {
   // update search buffer identifier list
   if (G.mode == MODE_SEARCH)
     G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
-
-  // draw dropdown
-  if (G.mode == MODE_SEARCH)
-    render_dropdown(&G.search_pane);
-  else
-    render_dropdown(&G.main_pane);
 }
 
 Pos Buffer::to_visual_pos(Pos p) {
@@ -2684,7 +2717,7 @@ void Pane::render_as_dropdown() {
 
   // draw each line 
   for (int y = 0; y < at_most(b.lines.size, y_max); ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y].str());
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y].slice);
 
   // highlight the line you're on
   if (highlight_background_color) {
@@ -2820,10 +2853,19 @@ void Pane::render() {
     case PANETYPE_NULL:
       break;
     case PANETYPE_EDIT:
-      render_as_edit();
+      render_edit();
+      break;
+    case PANETYPE_FILESEARCH:
+      render_filesearch();
+      break;
+    case PANETYPE_TEXTSEARCH:
+      render_textsearch();
       break;
     case PANETYPE_MENU:
-      render_as_menu();
+      render_menu();
+      break;
+    case PANETYPE_STATUSMESSAGE:
+      render_single_line(Slice::create("status: "));
       break;
     case PANETYPE_DROPDOWN:
       render_as_dropdown();
@@ -2831,11 +2873,12 @@ void Pane::render() {
   }
 }
 
-void Pane::render_as_menu() {
+void Pane::render_single_line(Slice prefix) {
   Buffer &b = *buffer;
   // TODO: scrolling in x
-  Pos buf_offset = {this->menu.prefix.length, 0};
+  Pos buf_offset = {prefix.length, 0};
 
+  // render the editing line
   Canvas canvas;
   canvas.init(this->numchars_x(), 1);
   canvas.fill(*this->text_color, *this->background_color);
@@ -2843,31 +2886,86 @@ void Pane::render_as_menu() {
   canvas.margin = this->margin;
 
   // draw prefix
-  canvas.render_str({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, this->menu.prefix.str());
+  canvas.render_str({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, prefix);
 
   // draw buffer
-  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].str());
-
-  // highlight
-  if (this->highlight_background_color)
-    canvas.fill_background({0, 0, {-1, 1}}, *this->highlight_background_color);
+  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].slice);
 
   // draw marker
-  for (int i = 0; i < b.cursors.size; ++i) {
-    if (G.selected_pane == this)
-      canvas.fill_background({b.cursors[i].pos + buf_offset, {1, 1}}, G.marker_background_color.color);
-    else if (G.bottom_pane != this)
-      canvas.fill_background({b.cursors[i].pos + buf_offset, {1, 1}}, G.marker_inactive_color);
-  }
+  if (G.selected_pane == this)
+    canvas.fill_background({b.cursors[0].pos + buf_offset, {1, 1}}, G.marker_background_color.color);
+  else if (G.bottom_pane != this)
+    canvas.fill_background({b.cursors[0].pos + buf_offset, {1, 1}}, G.marker_inactive_color);
 
   canvas.render(this->bounds.p);
 
   util_free(canvas);
+}
+
+void Pane::render_menu_popup(View<Slice> options) {
+  Buffer &b = *buffer;
+  if (b.isempty())
+    return;
+
+  // since fuzzy matching is expensive, we only update we moved since last time
+  if (G.flags.cursor_dirty) {
+    menu.current_match = 0;
+    StackArray<FuzzyMatch, 15> matches;
+    int n = fuzzy_match(b.lines[0].slice, options, view(matches));
+
+    util_free(menu.suggestions);
+    for (int i = 0; i < n; ++i)
+      menu.suggestions.push(matches[i].str);
+  }
+  if (!menu.suggestions.size)
+    return;
+
+  // resize dropdown pane
+  int width = ARRAY_MAXVAL_BY(menu.suggestions, length);
+  int height = at_most(menu.suggestions.size, pixel2chary(G.win_height) - 10);
+  if (height <= 0)
+    return;
+
+  Canvas canvas;
+  canvas.init(width, height);
+  canvas.fill(*text_color, *background_color);
+  canvas.background = *this->background_color;
+  canvas.margin = this->margin;
+
+  // position this pane
+  Pos p = this->bounds.p;
+  p.y -= char2pixely(height) + margin;
+
+  for (int i = 0; i < menu.suggestions.size; ++i)
+    canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i]);
+
+  // highlight
+  canvas.fill_background({0, menu.current_match, {-1, 1}}, *this->highlight_background_color);
+
+  canvas.render(p);
+  util_free(canvas);
+
   render_quads();
   render_text();
 }
 
-void Pane::render_as_edit() {
+void Pane::render_filesearch() {
+  render_single_line(Slice::create("open: "));
+  render_menu_popup(VIEW(G.files, string.slice));
+}
+
+void Pane::render_textsearch() {
+  render_single_line(Slice::create("search: "));
+  render_menu_popup(VIEW(G.main_pane.buffer->identifiers, slice));
+  // render_dropdown(this);
+}
+
+void Pane::render_menu() {
+  render_single_line(Slice::create("menu: "));
+  render_menu_popup(VIEW(menu.options, name));
+}
+
+void Pane::render_edit() {
   Buffer &b = *buffer;
   // calc bounds 
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
@@ -2893,7 +2991,7 @@ void Pane::render_as_edit() {
 
   // draw each line 
   for (int y = 0, buf_y = buf_offset.y; buf_y < buf_y1; ++buf_y, ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y].str());
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y].slice);
 
   if (this->syntax_highlight)
     this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
@@ -2907,7 +3005,7 @@ void Pane::render_as_edit() {
   // if there is a search term, highlight that as well
   if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
     Pos pos = {0, buf_offset.y};
-    while (b.find(G.search_buffer.lines[0].str(), false, &pos) && pos.y < buf_y1)
+    while (b.find(G.search_buffer.lines[0].slice, false, &pos) && pos.y < buf_y1)
       canvas.fill_background({buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
   }
 
@@ -2926,6 +3024,8 @@ void Pane::render_as_edit() {
   util_free(canvas);
   render_quads();
   render_text();
+
+  render_dropdown(this);
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -3063,7 +3163,7 @@ void Canvas::render_str_v(Pos p, const Color *text_color, const Color *backgroun
     return;
   G.tmp_render_buffer.clear();
   G.tmp_render_buffer.appendv(fmt, args);
-  render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer.str());
+  render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer.slice);
 }
 
 void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
@@ -3207,9 +3307,9 @@ int main(int, const char *[])
   test();
 
   /* open a buffer */
-  Buffer *b = Buffer::from_file(Slice::create("./src/cmantic.cpp"));
-  G.buffers.push(b);
-  G.main_pane.buffer = b;
+  // Buffer *b = Buffer::from_file(Slice::create("./src/cmantic.cpp"));
+  // G.buffers.push(b);
+  // G.main_pane.buffer = b;
 
   for (;;) {
     static u32 ticks = SDL_GetTicks();
