@@ -10,6 +10,29 @@
   #include <sys/stat.h>
 #endif /* OS */
 
+#ifdef _MSC_VER
+  typedef __int8 i8;
+  typedef __int16 i16;
+  typedef __int32 i32;
+  typedef __int64 i64;
+  typedef unsigned __int8 u8;
+  typedef unsigned __int16 u16;
+  typedef unsigned __int32 u32;
+  typedef unsigned __int64 u64;
+#else
+  /* let's hope stdint has us covered */
+  #include <stdint.h>
+  typedef int8_t i8;
+  typedef int16_t i16;
+  typedef int32_t i32;
+  typedef int64_t i64;
+  typedef uint8_t u8;
+  typedef uint16_t u16;
+  typedef uint32_t u32;
+  typedef uint64_t u64;
+#endif
+
+
 struct Path;
 struct Slice;
 union String;
@@ -18,30 +41,18 @@ void util_free(Path &p);
 void util_free(StringBuffer &s);
 void util_free(String &s);
 void util_free(Slice &s);
-template<class T> struct Array;
+template<class T> union Array;
+template<class T> struct View;
+template<class T> union StrideView;
 template<class T> void util_free(Array<T> &);
 
+#define CONTAINEROF(ptr, type, member) (((type)*)((char*)ptr - offsetof(type, member)))
 #define CAST(type, val) (*(type*)(&(val)))
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
 #define foreach(a) for (auto it = a; it < (a)+ARRAY_LEN(a); ++it)
-#define findn_min_by(array, n, ptr, field) do { \
-      ptr = array; \
-      for (auto _it = array; _it < array + n; ++_it) { \
-        if (_it->field < ptr->field) { \
-          ptr = _it; \
-        } \
-      } \
-  } while (0)
-#define find_min_by(array, ptr, field) findn_min_by(array, ARRAY_LEN(array), ptr, field)
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
-#if 0
-static void Array<char> array_push_str(const char *str) {
-  for (; *str; ++str)
-    array_push(*a, *str);
-}
-#endif
 
 #define at_least(a,b) max((a),(b))
 #define at_most(a, b) min((a),(b))
@@ -102,37 +113,97 @@ void swap(T &a, T &b) {
 #endif
 
 template<class T>
-struct Array {
-  T *data;
-  int size,cap;
+struct View {
+  T *items;
+  int size;
+  int stride;
+
+  const T& operator[](int i) const {return *(T*)((char*)items + stride*i);}
+  T& operator[](int i) {return *(T*)((char*)items + stride*i);}
+
+  const T& get(int i) const {return (*this)[i];}
+  T& get(int i) {return (*this)[i];}
+
+  int min() {
+    assert(size);
+    int r = 0;
+    for (int i = 1; i < size; ++i)
+      if (get(i) < get(r))
+        r = i;
+    return r;
+  }
+
+  T maxval() {
+    assert(size);
+    T t = get(0);
+    for (int i = 1; i < size; ++i)
+      if (t < get(i))
+        t = get(i);
+    return t;
+  }
+};
+
+template<class T>
+View<T> view(T *items, int size, int stride) {
+  return {items, size, stride};
+}
+
+#define VIEW(array, field) view(&array.items[0].field, array.size, sizeof(*array.items))
+
+template<class T, int N>
+union StackArray {
+  struct {
+    T *items;
+    int size;
+    T buf[N];
+  };
+
+  StackArray() : items(buf), size(N) {}
+
+  const T& operator[](int i) const {return items[i];}
+  T& operator[](int i) {return items[i];}
+};
+
+template<class T, int N>
+View<T> view(StackArray<T, N> a) {
+  return {a.items, a.size, sizeof(T)};
+}
+
+template<class T>
+union Array {
+  struct {
+    T *items;
+    int size;
+    int cap;
+  };
 
   T* begin() {
-    return data;
+    return items;
   }
 
   T* end() {
-    return data + size;
+    return items + size;
   }
 
   const T* begin() const {
-    return data;
+    return items;
   }
 
   const T* end() const {
-    return data + size;
+    return items + size;
   }
 
-  T& operator[](int i) {return data[i];}
-  const T& operator[](int i) const {return data[i];}
-  operator T*() {return data;}
-  operator const T*() const {return data;}
+  T& operator[](int i) {return items[i];}
+  const T& operator[](int i) const {return items[i];}
+  operator T*() {return items;}
+  operator const T*() const {return items;}
 
   T& last() {
-    return data[size-1];
+    return items[size-1];
   }
 
   void zero() {
-    memset(data, 0, sizeof(T) * size);
+    memset(items, 0, sizeof(T) * size);
   }
 
   void operator+=(T val) {
@@ -141,7 +212,7 @@ struct Array {
 
   void push(T val) {
     pushn(1);
-    data[size-1] = val;
+    items[size-1] = val;
   }
 
   void insertz(int i) {
@@ -153,8 +224,8 @@ struct Array {
 
   void insert(int i, T value) {
     pushn(1);
-    memmove(data+i+1, data+i, (size-i)*sizeof(T));
-    data[i] = value;
+    memmove(items+i+1, items+i, (size-i)*sizeof(T));
+    items[i] = value;
   }
 
   void resize(int newsize) {
@@ -170,44 +241,44 @@ struct Array {
     size = oldsize;
   }
 
-  void push(T *data, int n) {
+  void push(T *items, int n) {
     pushn(n);
-    memmove(data+size-n, data, n*sizeof(T));
+    memmove(items+size-n, items, n*sizeof(T));
   }
 
   void remove(int i) {
-    data[i] = data[size-1];
+    items[i] = items[size-1];
     --size;
   }
 
   void remove_slown(int i, int n) {
-    memmove(data+i, data+i+n, (size-i-n)*sizeof(T));
+    memmove(items+i, items+i+n, (size-i-n)*sizeof(T));
     size -= n;
   }
 
   void remove_slow(int i) {
-    memmove(data+i, data+i+1, (size-i-1)*sizeof(T));
+    memmove(items+i, items+i+1, (size-i-1)*sizeof(T));
     --size;
   }
 
   void insertn(int i, int n) {
     pushn(n);
-    memmove(data+i+n, data+i, (size-i-n)*sizeof(T));
+    memmove(items+i+n, items+i, (size-i-n)*sizeof(T));
   }
 
   void push() {
     pushn(1);
-    data[size-1] = T();
+    items[size-1] = T();
   }
 
-  void inserta(int i, const T *data, int n) {
+  void inserta(int i, const T *items, int n) {
     pushn(n);
-    memmove(data+i+n, data+i, (size-i-n)*sizeof(T));
-    memcpy(data+i, data, n*sizeof(T));
+    memmove(items+i+n, items+i, (size-i-n)*sizeof(T));
+    memcpy(items+i, items, n*sizeof(T));
   }
 
   void copy_to(T *dest) {
-    memcpy(dest, data, size*sizeof(T));
+    memcpy(dest, items, size*sizeof(T));
   }
 
   T* pushn(int n) {
@@ -215,16 +286,16 @@ struct Array {
       int newcap = cap ? cap*2 : 1;
       while (newcap < size+n)
         newcap *= 2;
-      data = (T*)ARRAY_REALLOC(data, newcap * sizeof(T));
+      items = (T*)ARRAY_REALLOC(items, newcap * sizeof(T));
       cap = newcap;
     }
     size += n;
-    return data + size - n;
+    return items + size - n;
   }
 
-  void pusha(T *data, int n) {
+  void pusha(T *items, int n) {
     pushn(n);
-    memcpy(data+size-n, data, n*sizeof(T));
+    memcpy(items+size-n, items, n*sizeof(T));
   }
 
   void clear() {
@@ -233,17 +304,27 @@ struct Array {
 };
 
 template<class T>
+View<T> view(Array<T> a) {
+  return {a.items, a.size, sizeof(T)};
+}
+
+
+template<class T>
 void util_free(Array<T> &a) {
-  if (a.data) {
+  if (a.items) {
     for (int i = 0; i < a.size; ++i)
-      util_free(a.data[i]);
-    ::free(a.data);
+      util_free(a.items[i]);
+    ::free(a.items);
   }
-  a.data = 0;
+  a.items = 0;
   a.size = a.cap = 0;
 }
 
-#define ARRAY_FIND(a, ptr, expr) {for ((ptr) = (a).data; (ptr) < (a).data+(a).size; ++(ptr)) {if (expr) break;} if ((ptr) == (a).data+(a).size) {(ptr) = 0;}}
+
+#define ARRAY_FIND(a, ptr, expr) {for ((ptr) = (a).items; (ptr) < (a).items+(a).size; ++(ptr)) {if (expr) break;} if ((ptr) == (a).items+(a).size) {(ptr) = 0;}}
+#define ARRAY_MIN_BY(a, field) (VIEW(a, field).min())
+#define ARRAY_MAX_BY(a, field) (VIEW(a, field).max())
+#define ARRAY_MAXVAL_BY(a, field) VIEW(a, field).maxval()
 
 #endif
 

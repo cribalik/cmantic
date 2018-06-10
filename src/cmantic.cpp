@@ -1,6 +1,6 @@
 /*
  * TODO:
- *   Use PANETYPE_MENU.options instead of buffer.identifiers
+ *   implement Pane::render_as_menu to list fuzzy matches
  *   File tree
  *
  * Update identifiers as you type
@@ -87,7 +87,6 @@ enum Mode {
   MODE_DELETE,
   MODE_GOTO,
   MODE_SEARCH,
-  MODE_HIGHLIGHT,
   MODE_FILESEARCH,
   MODE_COUNT
 };
@@ -189,7 +188,7 @@ struct Buffer {
 
   #define GHOST_EOL -1
   #define GHOST_BOL -2
-  Array<Marker> markers;
+  Array<Marker> cursors;
   int modified;
 
   // methods
@@ -218,6 +217,7 @@ struct Buffer {
   bool find_and_move(char c, bool stay);
   bool find_and_move_r(StringBuffer s, bool stay);
   bool find_and_move_r(char c, bool stay);
+  bool find_start_of_identifier(Pos p, Pos *pout);
   void insert(Slice s);
   void remove_trailing_whitespace(int y);
   void pretty_range(int y0, int y1);
@@ -267,7 +267,7 @@ void util_free(Buffer &b) {
   util_free(b.filename);
   util_free(b.tokens);
   util_free(b.identifiers);
-  util_free(b.markers);
+  util_free(b.cursors);
 }
 
 struct v2 {
@@ -466,9 +466,6 @@ struct State {
   RotatingColor default_marker_background_color;
   PoppedColor bottom_pane_highlight;
 
-  /* highlighting flags */
-  bool highlight_number;
-
   /* editor state */
   Pane *center_pane;
   Pane *bottom_pane;
@@ -491,9 +488,9 @@ struct State {
 
   Mode mode;
 
-  /* dropdown state */
-  Pos dropdown_pos;
-  bool dropdown_visible;
+  struct {
+    bool cursor_dirty;
+  } flags;
 
   /* goto state */
   unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
@@ -707,37 +704,44 @@ static void menu_option_show_tab_type() {
     status_message_set("Tabs is %i spaces", G.center_pane->buffer->tab_type);
 }
 
-static struct {const char *name; void(*fun)();} menu_options[] = {
-  {"quit", menu_option_quit},
-  {"save", menu_option_save},
-  {"show_tab_type", menu_option_show_tab_type}
+static struct {MenuOption opt; void(*fun)();} menu_options[] = {
+  {
+    Slice::create("quit"),
+    Slice::create("Quit the program"),
+    menu_option_quit
+  },
+  {
+    Slice::create("save"),
+    Slice::create("Save file"),
+    menu_option_save
+  },
+  {
+    Slice::create("show_tab_type"),
+    Slice::create("Show if tab type is spaces or tab"),
+    menu_option_show_tab_type
+  }
 };
 
 static void mode_cleanup() {
+  G.flags.cursor_dirty = true;
+
   if (G.mode == MODE_FILESEARCH)
     G.filetree_buffer.empty();
-
-  G.dropdown_visible = false;
 }
 
 static void mode_search() {
   mode_cleanup();
 
-  G.center_pane->buffer->markers.size = 1;
+  G.center_pane->buffer->cursors.size = 1;
 
   G.mode = MODE_SEARCH;
   G.bottom_pane_highlight.reset();
   G.selected_pane = &G.search_pane;
-  G.search_begin_pos = G.center_pane->buffer->markers[0].pos;
+  G.search_begin_pos = G.center_pane->buffer->cursors[0].pos;
   G.search_failed = 0;
   G.bottom_pane = &G.search_pane;
   puts("Using searc pane");
   G.search_buffer.empty();
-}
-
-static void mode_highlight() {
-  mode_cleanup();
-  G.mode = MODE_HIGHLIGHT;
 }
 
 static void mode_filesearch() {
@@ -806,7 +810,7 @@ static int fuzzy_cmp(const void *aa, const void *bb) {
 }
 
 // returns number of found matches
-static int fuzzy_match(Slice string, Array<Slice> strings, FuzzyMatch result[], int max_results) {
+static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> result) {
   int num_results = 0;
 
   for (int i = 0; i < strings.size; ++i) {
@@ -845,22 +849,21 @@ static int fuzzy_match(Slice string, Array<Slice> strings, FuzzyMatch result[], 
 
     /* push match */
 
-    if (num_results < max_results) {
+    if (num_results < result.size) {
       result[num_results].str = identifier;
       result[num_results].points = points;
       ++num_results;
     } else {
       /* find worst match and replace */
-      FuzzyMatch *worst;
-      findn_min_by(result, max_results, worst, points);
-      if (points > worst->points) {
-        worst->str = identifier;
-        worst->points = points;
+      FuzzyMatch &worst = result[ARRAY_MIN_BY(result, points)];
+      if (points > worst.points) {
+        worst.str = identifier;
+        worst.points = points;
       }
     }
   }
 
-  qsort(result, num_results, sizeof(*result), fuzzy_cmp);
+  qsort(result.items, num_results, sizeof(result[0]), fuzzy_cmp);
   return num_results;
 }
 
@@ -876,47 +879,74 @@ static Pos char2pixel(int x, int y) {
   return {char2pixelx(x), char2pixely(y)};
 }
 
-static bool find_start_of_identifier(Buffer &b, Pos pos, Pos &pout) {
-  pout = pos;
-  b.advance_r(pout);
-  Utf8char c = b.getchar(pout);
+bool Buffer::find_start_of_identifier(Pos pos, Pos *pout) {
+  *pout = pos;
+  advance_r(*pout);
+  Utf8char c = getchar(*pout);
 
   if (!is_identifier_tail(c) && !is_identifier_head(c))
     return false;
 
-  while (is_identifier_tail(b.getchar(pout)))
-    if (b.advance_r(pout))
+  while (is_identifier_tail(getchar(*pout)))
+    if (advance_r(*pout))
       return true;
-  if (!is_identifier_head(b.getchar(pout)))
-    b.advance(pout);
-  if (pout.y != pos.y)
-    pout.y = pos.y,
-    pout.x = 0;
+  if (!is_identifier_head(getchar(*pout)))
+    advance(*pout);
+  if (pout->y != pos.y)
+    pout->y = pos.y,
+    pout->x = 0;
   return true;
 }
 
-static void dropdown_autocomplete(Buffer &b) {
-  if (!G.dropdown_visible || G.dropdown_buffer.isempty() || G.dropdown_buffer.markers.size > 1)
-    return;
+static bool dropdown_autocomplete(Buffer &b) {
+  if (G.dropdown_buffer.isempty() || G.dropdown_buffer.cursors.size > 1)
+    return false;
 
   Pos start;
-  if (!find_start_of_identifier(b, b.markers[0].pos, start))
-    return;
-  for (int i = b.markers[0].x - start.x; i; --i)
+  if (!b.find_start_of_identifier(b.cursors[0].pos, &start))
+    return false;
+  for (int i = b.cursors[0].x - start.x; i; --i)
     b.delete_char();
-  b.insert(G.dropdown_buffer[G.dropdown_buffer.markers[0].y].slice);
-  G.dropdown_visible = false;
+  b.insert(G.dropdown_buffer[G.dropdown_buffer.cursors[0].y].slice);
+  return true;
 }
 
-static void render_dropdown(Pane *active_pane) {
-  if (!G.dropdown_visible)
+static void render_dropdown(Pane *pane) {
+  Buffer &b = *pane->buffer;
+
+  // don't show dropdown unless in edit mode
+  if (pane->type == PANETYPE_EDIT && G.mode != MODE_INSERT)
     return;
 
-  // position pane
-  Pos p;
-  if (!find_start_of_identifier(*active_pane->buffer, active_pane->buffer->markers[0].pos, p))
+  // we have to be on an identifier
+  Pos identifier_start;
+  if (!b.find_start_of_identifier(b.cursors[0].pos, &identifier_start))
     return;
-  p = active_pane->buf2pixel(p);
+
+  // since fuzzy matching is expensive, we only update we moved since last time
+  if (G.flags.cursor_dirty) {
+    Slice identifier = b.slice(identifier_start, b.cursors[0].x - identifier_start.x);
+    StackArray<FuzzyMatch, DROPDOWN_SIZE> best_matches;
+    View<Slice> input = VIEW(b.identifiers, slice);
+    best_matches.size = fuzzy_match(identifier, input, view(best_matches));
+
+    G.dropdown_buffer.empty();
+    for (int i = 0; i < best_matches.size; ++i)
+      G.dropdown_buffer.push_line(best_matches[i].str);
+  }
+
+  if (G.dropdown_buffer.isempty())
+    return;
+
+  // resize dropdown pane
+  int max_width = ARRAY_MAXVAL_BY(G.dropdown_buffer.lines, length);
+
+  G.dropdown_pane.bounds.size =
+    char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
+  G.dropdown_pane.bounds.h = at_most(G.dropdown_pane.bounds.h, G.win_height - 10*G.line_height);
+
+  // position pane
+  Pos p = pane->buf2pixel(identifier_start);
   p.y += G.line_height;
   G.dropdown_pane.bounds.p = p;
 
@@ -926,37 +956,7 @@ static void render_dropdown(Pane *active_pane) {
 
   G.dropdown_pane.bounds.x = clamp(G.dropdown_pane.bounds.x, 0, G.win_width - G.dropdown_pane.bounds.w);
 
-  if (!G.dropdown_buffer.isempty())
-    G.dropdown_pane.render();
-}
-
-static void dropdown_update(Pane *pane) {
-  Buffer &b = *pane->buffer;
-  if (!find_start_of_identifier(b, b.markers[0].pos, G.dropdown_pos)) {
-    G.dropdown_visible = false;
-    return;
-  }
-
-  G.dropdown_visible = true;
-
-  Slice identifier = b.slice({G.dropdown_pos.x, b.markers[0].y}, b.markers[0].x - G.dropdown_pos.x);
-  FuzzyMatch best_matches[DROPDOWN_SIZE];
-  int num_best_matches = fuzzy_match(identifier, CAST(Array<Slice>, b.identifiers), best_matches, ARRAY_LEN(best_matches));
-
-  G.dropdown_buffer.empty();
-  for (int i = 0; i < num_best_matches; ++i) {
-    G.dropdown_buffer.push_line(best_matches[i].str);
-    // G.dropdown_buffer.lines.last() += best_matches[i].points;
-  }
-
-  // resize dropdown pane
-  int max_width = 0;
-  for (StringBuffer s : G.dropdown_buffer.lines)
-    max_width = max(max_width, s.length);
-
-  G.dropdown_pane.bounds.size =
-    char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
-  G.dropdown_pane.bounds.h = at_most(G.dropdown_pane.bounds.h, G.win_height - 10*G.line_height);
+  G.dropdown_pane.render();
 }
 
 #define CONTROL(c) ((c)|KEY_CONTROL)
@@ -973,7 +973,6 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
 
   if (!special_key && !ctrl) {
     b.insert_char(input);
-    dropdown_update(p);
     return;
   }
 
@@ -986,27 +985,28 @@ static void insert_default(Pane *p, SpecialKey special_key, Utf8char input, bool
       break;
 
     case KEY_TAB:
-      if (G.dropdown_visible)
-        dropdown_autocomplete(b);
-      else
-        b.insert_tab();
-      dropdown_update(p);
+      if (dropdown_autocomplete(b))
+        break;
+      b.insert_tab();
       break;
 
     case KEY_BACKSPACE:
       b.delete_char();
-      dropdown_update(p);
       break;
 
-    case CONTROL('j'):
-      puts("Moving down");
+    case CONTROL('j'): {
+      // this move should not dirty cursor
+      int f = G.flags.cursor_dirty;
       G.dropdown_buffer.move_y(0, 1);
-      break;
+      G.flags.cursor_dirty = f;
+      break;}
 
-    case CONTROL('k'):
-      puts("Moving up");
+    case CONTROL('k'): {
+      // this move should not dirty cursor
+      int f = G.flags.cursor_dirty;
       G.dropdown_buffer.move_y(0, -1);
-      break;
+      G.flags.cursor_dirty = f;
+      break;}
 
     default:
       break;
@@ -1319,7 +1319,7 @@ static void state_init() {
   G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.background_color = &COLOR_GREY;
   G.dropdown_pane.text_color = &COLOR_WHITE;
-  G.dropdown_pane.margin = 5;
+  G.dropdown_pane.margin = 10;
   G.dropdown_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
 
   // status message pane
@@ -1336,10 +1336,9 @@ static void state_init() {
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = &G.main_pane;
 
-  G.menu_buffer.identifiers = {};
-  G.menu_buffer.identifiers.pushn((int)ARRAY_LEN(menu_options));
+  G.menu_pane.menu.options.pushn((int)ARRAY_LEN(menu_options));
   for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
-    G.menu_buffer.identifiers[i] = String::create(menu_options[i].name);
+    G.menu_pane.menu.options[i] = menu_options[i].opt;
 
   filetree_init();
   status_message_set("Welcome!");
@@ -1350,6 +1349,7 @@ static Pos char2pixel(Pos p) {
 }
 
 static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
+
   // TODO: insert utf8 characters
   if (!input.is_ansi() && !special_key)
     return;
@@ -1361,7 +1361,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
   switch (G.mode) {
   case MODE_GOTO:
-    buffer.markers.size = 1;
+    buffer.cursors.size = 1;
     if (isdigit(key)) {
       G.goto_line_number *= 10;
       G.goto_line_number += input.ansi() - '0';
@@ -1384,16 +1384,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
   case MODE_COUNT:
     break;
 
-  case MODE_HIGHLIGHT:
-    switch (key) {
-      case 'n':
-        G.highlight_number = !G.highlight_number;
-        mode_normal(false);
-        break;
-    }
-    mode_normal(false);
-    break;
-
   case MODE_MENU:
     if (special_key == KEY_RETURN) {
       StringBuffer line;
@@ -1403,12 +1393,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         break;
       }
 
-      if (G.dropdown_visible)
-        dropdown_autocomplete(G.menu_buffer);
+      dropdown_autocomplete(G.menu_buffer);
 
       line = G.menu_buffer[0];
       foreach(menu_options) {
-        if (G.menu_buffer[0].str() == it->name) {
+        if (G.menu_buffer[0].str() == it->opt.name) {
           it->fun();
           goto done;
         }
@@ -1464,8 +1453,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     G.search_failed = !buffer.find_and_move(search.str(), true);
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
-      if (G.dropdown_visible)
-        G.search_failed = !buffer.find_and_move(search.str(), true);
+      G.search_failed = !buffer.find_and_move(search.str(), true);
       if (G.search_failed) {
         buffer.move_to(0, G.search_begin_pos);
         status_message_set("'{}' not found", &G.search_buffer[0]);
@@ -1491,18 +1479,17 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_INSERT:
-    puts("mode_insert");
     insert_default(&G.main_pane, special_key, input, ctrl);
     break;
 
   case MODE_NORMAL:
     switch (key) {
     case KEY_ESCAPE:
-      buffer.markers.size = 1;
+      buffer.cursors.size = 1;
       break;
     case '=':
-      for (int i = 0; i < buffer.markers.size; ++i) {
-        Pos pos = buffer.markers[i].pos;
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        Pos pos = buffer.cursors[i].pos;
         if (buffer.lines[pos.y].length == 0)
           break;
         buffer.modified = true;
@@ -1520,7 +1507,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         exit(1);
       break;
     case 'b': {
-      for (int i = 0; i < buffer.markers.size; ++i) {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
         if (buffer.advance_r(i))
           break;
         // if not in word, back to word
@@ -1537,7 +1524,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       break;}
     case 'w': {
-      for (int i = 0; i < buffer.markers.size; ++i) {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
         Utf8char c = buffer.getchar(i);
         if (is_identifier_tail(c) || is_identifier_head(c))
           while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
@@ -1559,19 +1546,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_insert();
       break;
     case 'j':
-      for (int i = 0; i < buffer.markers.size; ++i)
+      for (int i = 0; i < buffer.cursors.size; ++i)
         buffer.move_y(i, 1);
       break;
     case 'k':
-      for (int i = 0; i < buffer.markers.size; ++i)
+      for (int i = 0; i < buffer.cursors.size; ++i)
         buffer.move_y(i, -1);
       break;
     case 'h':
-      for (int i = 0; i < buffer.markers.size; ++i)
+      for (int i = 0; i < buffer.cursors.size; ++i)
         buffer.advance_r(i);
       break;
     case 'l':
-      for (int i = 0; i < buffer.markers.size; ++i)
+      for (int i = 0; i < buffer.cursors.size; ++i)
         buffer.advance(i);
       break;
     case 'L':
@@ -1587,8 +1574,8 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       /*jumplist_push(prev);*/
       break;
     case 'm': {
-      int i = buffer.markers.size;
-      buffer.markers.push(buffer.markers[i-1]);
+      int i = buffer.cursors.size;
+      buffer.cursors.push(buffer.cursors[i-1]);
       buffer.move_y(i, 1);
       break;}
     case 'N':
@@ -1605,9 +1592,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     case 'g':
       mode_goto();
-      break;
-    case 'v':
-      mode_highlight();
       break;
     case 'o':
       buffer.insert_newline_below();
@@ -1626,11 +1610,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_delete();
       break;
     case 'J':
-      for (int i = 0; i < buffer.markers.size; ++i)
+      for (int i = 0; i < buffer.cursors.size; ++i)
         buffer.move_y(i, G.center_pane->numchars_y()/2);
       break;
     case 'K':
-      for (int i = 0; i < buffer.markers.size; ++i)
+      for (int i = 0; i < buffer.cursors.size; ++i)
         buffer.move_y(i, -G.center_pane->numchars_y()/2);
       break;
     }
@@ -1641,11 +1625,11 @@ static void handle_rendering(float dt) {
   // boost marker when you move or change modes
   static Pos prev_pos;
   static Mode prev_mode;
-  if (prev_pos != G.center_pane->buffer->markers[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
+  if (prev_pos != G.center_pane->buffer->cursors[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
     G.marker_background_color.reset();
     G.highlight_background_color.reset();
   }
-  prev_pos = G.center_pane->buffer->markers[0].pos;
+  prev_pos = G.center_pane->buffer->cursors[0].pos;
   prev_mode = G.mode;
 
   // update colors
@@ -1674,10 +1658,13 @@ static void handle_rendering(float dt) {
   G.center_pane->render();
   G.bottom_pane->render();
 
-  /* draw dropdown ? */
-  G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
-  if (G.mode == MODE_SEARCH || G.mode == MODE_MENU || G.mode == MODE_FILESEARCH)
-    render_dropdown(G.bottom_pane);
+  // update search buffer identifier list
+  if (G.mode == MODE_SEARCH)
+    G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
+
+  // draw dropdown
+  if (G.mode == MODE_SEARCH)
+    render_dropdown(&G.search_pane);
   else
     render_dropdown(&G.main_pane);
 }
@@ -1688,17 +1675,20 @@ Pos Buffer::to_visual_pos(Pos p) {
 }
 
 void Buffer::move_to_y(int marker_idx, int y) {
+  G.flags.cursor_dirty = true;
   y = clamp(y, 0, lines.size-1);
-  markers[marker_idx].y = y;
+  cursors[marker_idx].y = y;
 }
 
 void Buffer::move_to_x(int marker_idx, int x) {
-  x = clamp(x, 0, lines[markers[marker_idx].y].length);
-  markers[marker_idx].x = x;
-  markers[marker_idx].ghost_x = lines[markers[marker_idx].y].visual_offset(x, G.tab_width);
+  G.flags.cursor_dirty = true;
+  x = clamp(x, 0, lines[cursors[marker_idx].y].length);
+  cursors[marker_idx].x = x;
+  cursors[marker_idx].ghost_x = lines[cursors[marker_idx].y].visual_offset(x, G.tab_width);
 }
 
 void Buffer::move_to(int marker_idx, int x, int y) {
+  G.flags.cursor_dirty = true;
   move_to_y(marker_idx, y);
   move_to_x(marker_idx, x);
 }
@@ -1709,8 +1699,12 @@ void Buffer::move_to(int marker_idx, Pos p) {
 }
 
 void Buffer::move_y(int marker_idx, int dy) {
-  Pos &pos = markers[marker_idx].pos;
-  int ghost_x = markers[marker_idx].ghost_x;
+  if (!dy)
+    return;
+  G.flags.cursor_dirty = true;
+
+  Pos &pos = cursors[marker_idx].pos;
+  int ghost_x = cursors[marker_idx].ghost_x;
 
   pos.y = clamp(pos.y + dy, 0, lines.size - 1);
 
@@ -1723,7 +1717,11 @@ void Buffer::move_y(int marker_idx, int dy) {
 }
 
 void Buffer::move_x(int marker_idx, int dx) {
-  Pos &pos = markers[marker_idx].pos;
+  if (!dx)
+    return;
+  G.flags.cursor_dirty = true;
+
+  Pos &pos = cursors[marker_idx].pos;
   if (dx > 0)
     for (; dx > 0; --dx)
       pos.x = lines[pos.y].next(pos.x);
@@ -1731,7 +1729,7 @@ void Buffer::move_x(int marker_idx, int dx) {
     for (; dx < 0; ++dx)
       pos.x = lines[pos.y].prev(pos.x);
   pos.x = clamp(pos.x, 0, lines[pos.y].length);
-  markers[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+  cursors[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
 }
 
 Buffer* Buffer::from_file(Slice filename) {
@@ -1741,7 +1739,7 @@ Buffer* Buffer::from_file(Slice filename) {
   if (!buffer)
     goto err;
   b = {};
-  b.markers.push({});
+  b.cursors.push({});
 
   b.filename = filename.copy();
   if (file_open(&f, b.filename.chars, "r"))
@@ -1809,7 +1807,7 @@ void Buffer::move(int marker_idx, int dx, int dy) {
 }
 
 void Buffer::update() {
-  for (int i = 0; i < markers.size; ++i)
+  for (int i = 0; i < cursors.size; ++i)
     move(i, 0, 0);
 }
 
@@ -1929,8 +1927,8 @@ bool Buffer::find(Slice s, bool stay, Pos *p) {
 }
 
 bool Buffer::find_and_move_r(char c, bool stay) {
-  markers.size = 1;
-  Pos p = markers[0].pos;
+  cursors.size = 1;
+  Pos p = cursors[0].pos;
   if (!find_r(c, stay, &p))
     return false;
   move_to(0, p);
@@ -1938,8 +1936,8 @@ bool Buffer::find_and_move_r(char c, bool stay) {
 }
 
 bool Buffer::find_and_move_r(StringBuffer s, bool stay) {
-  markers.size = 1;
-  Pos p = markers[0].pos;
+  cursors.size = 1;
+  Pos p = cursors[0].pos;
   if (!find_r(s, stay, &p))
     return false;
   move_to(0, p);
@@ -1947,8 +1945,8 @@ bool Buffer::find_and_move_r(StringBuffer s, bool stay) {
 }
 
 bool Buffer::find_and_move(char c, bool stay) {
-  markers.size = 1;
-  Pos p = markers[0].pos;
+  cursors.size = 1;
+  Pos p = cursors[0].pos;
   if (!find(c, stay, &p))
     return false;
   move_to(0, p);
@@ -1956,8 +1954,8 @@ bool Buffer::find_and_move(char c, bool stay) {
 }
 
 bool Buffer::find_and_move(Slice s, bool stay) {
-  markers.size = 1;
-  Pos p = markers[0].pos;
+  cursors.size = 1;
+  Pos p = cursors[0].pos;
   if (!find(s, stay, &p))
     return false;
   move_to(0, p);
@@ -1966,8 +1964,8 @@ bool Buffer::find_and_move(Slice s, bool stay) {
 
 void Buffer::insert(Slice s) {
   modified = 1;
-  for (int i = 0; i < markers.size; ++i) {
-    lines[markers[i].y].insert(markers[i].x, s);
+  for (int i = 0; i < cursors.size; ++i) {
+    lines[cursors[i].y].insert(cursors[i].x, s);
     move_x(i, s.length);
   }
 }
@@ -1980,8 +1978,8 @@ void Buffer::remove_trailing_whitespace(int y) {
   while (x >= 0 && isspace(getchar(x, y).ansi()))
     --x;
   lines[y].length = x+1;
-  for (int i = 0; i < markers.size; ++i) {
-    if (markers[i].y == y && markers[i].x > x+1)
+  for (int i = 0; i < cursors.size; ++i) {
+    if (cursors[i].y == y && cursors[i].x > x+1)
       move_to_x(i, x+1);
   }
 }
@@ -2003,8 +2001,8 @@ void Buffer::pretty(int y) {
 }
 
 void Buffer::insert_char(Utf8char ch) {
-  for (int i = 0; i < markers.size; ++i) {
-    Pos &pos = markers[i].pos;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos &pos = cursors[i].pos;
     modified = true;
     lines[pos.y].insert(pos.x, ch);
     move_x(i, 1);
@@ -2019,14 +2017,14 @@ void Buffer::delete_line_at(int y) {
   if (lines.size == 1)
     return;
   lines.remove_slow(y);
-  for (int i = 0; i < markers.size; ++i)
-    if (markers[i].y >= y)
+  for (int i = 0; i < cursors.size; ++i)
+    if (cursors[i].y >= y)
       move_y(i, -1);
 }
 
 void Buffer::delete_line() {
-  for (int i = 0; i < markers.size; ++i)
-    delete_line_at(markers[i].y);
+  for (int i = 0; i < cursors.size; ++i)
+    delete_line_at(cursors[i].y);
 }
 
 void Buffer::remove_range(Pos a, Pos b) {
@@ -2052,8 +2050,8 @@ void Buffer::remove_range(Pos a, Pos b) {
 
 void Buffer::delete_char() {
   modified = 1;
-  for (int i = 0; i < markers.size; ++i) {
-    Pos &pos = markers[i].pos;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos &pos = cursors[i].pos;
     if (pos.x == 0) {
       if (pos.y == 0)
         return;
@@ -2078,8 +2076,8 @@ void Buffer::insert_tab() {
   n = tab_type;
 
   modified = 1;
-  for (int i =0 ; i < markers.size; ++i) {
-    Pos pos = markers[i].pos;
+  for (int i =0 ; i < cursors.size; ++i) {
+    Pos pos = cursors[i].pos;
     if (n == 0) {
       lines[pos.y].insert(pos.x, '\t');
       move_x(i, 1);
@@ -2240,27 +2238,27 @@ void Buffer::push_line(Slice s) {
 void Buffer::insert_newline() {
   modified = 1;
 
-  for (int i = 0; i < markers.size; ++i) {
-    Pos &pos = markers[i].pos;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos &pos = cursors[i].pos;
     lines.insertz(pos.y+1);
 
-    // after we add a new line we have to push y of all markers below us
-    for (int j = 0; j < markers.size; ++j) {
+    // after we add a new line we have to push y of all cursors below us
+    for (int j = 0; j < cursors.size; ++j) {
       if (i == j) continue;
-      if (markers[j].pos.y == pos.y) {
-        markers[j].pos = {markers[j].pos.x - pos.x, markers[j].pos.y+1};
-        markers[j].ghost_x = markers[j].pos.x;
+      if (cursors[j].pos.y == pos.y) {
+        cursors[j].pos = {cursors[j].pos.x - pos.x, cursors[j].pos.y+1};
+        cursors[j].ghost_x = cursors[j].pos.x;
       }
-      else if (markers[j].pos.y > pos.y) {
-        ++markers[j].pos.y;
+      else if (cursors[j].pos.y > pos.y) {
+        ++cursors[j].pos.y;
       }
     }
 
     lines[pos.y+1] += lines[pos.y](pos.x, -1);
     lines[pos.y].length = pos.x;
 
-    ++markers[i].y;
-    markers[i].x = markers[i].ghost_x = 0;
+    ++cursors[i].y;
+    cursors[i].x = cursors[i].ghost_x = 0;
     move_x(i, autoindent(pos.y));
     // pretty(pos.y-1);
   }
@@ -2268,15 +2266,15 @@ void Buffer::insert_newline() {
 
 void Buffer::insert_newline_below() {
   modified = 1;
-  for (int i = 0; i < markers.size; ++i) {
-    Pos &pos = markers[i].pos;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos &pos = cursors[i].pos;
 
     lines.insertz(pos.y+1);
 
-    // after we add a new line we have to push y of all markers below us
-    for (int j = 0; j < markers.size; ++j)
-      if (markers[j].pos.y > pos.y)
-        ++markers[j].y;
+    // after we add a new line we have to push y of all cursors below us
+    for (int j = 0; j < cursors.size; ++j)
+      if (cursors[j].pos.y > pos.y)
+        ++cursors[j].y;
 
     move_y(i, 1);
     move_x(i, autoindent(pos.y));
@@ -2342,13 +2340,13 @@ void Buffer::guess_tab_type() {
 }
 
 void Buffer::goto_endline(int marker_idx) {
-  Pos pos = markers[marker_idx].pos;
+  Pos pos = cursors[marker_idx].pos;
   move_to_x(marker_idx, lines[pos.y].length);
-  markers[marker_idx].ghost_x = GHOST_EOL;
+  cursors[marker_idx].ghost_x = GHOST_EOL;
 }
 
 void Buffer::goto_endline() {
-  for (int i = 0; i < markers.size; ++i)
+  for (int i = 0; i < cursors.size; ++i)
     goto_endline(i);
 }
 
@@ -2364,10 +2362,10 @@ int Buffer::begin_of_line(int y) {
 void Buffer::goto_beginline() {
   int x;
 
-  for (int i = 0; i < markers.size; ++i) {
-    x = begin_of_line(markers[i].y);
+  for (int i = 0; i < cursors.size; ++i) {
+    x = begin_of_line(cursors[i].y);
     move_to_x(i, x);
-    markers[i].ghost_x = GHOST_BOL;
+    cursors[i].ghost_x = GHOST_BOL;
   }
 }
 
@@ -2376,9 +2374,9 @@ void Buffer::empty() {
 
   util_free(lines);
   lines.push();
-  if (!markers.size)
-    markers.push({});
-  markers.size = 1;
+  if (!cursors.size)
+    cursors.push({});
+  cursors.size = 1;
   move_to(0, 0, 0);
 }
 
@@ -2386,7 +2384,7 @@ void Buffer::truncate_to_n_lines(int n) {
   int i;
 
   modified = 1;
-  markers.size = 1;
+  cursors.size = 1;
   n = at_least(n, 1);
 
   if (n >= lines.size)
@@ -2395,7 +2393,7 @@ void Buffer::truncate_to_n_lines(int n) {
   for (i = n; i < lines.size; ++i)
     util_free(lines[i]);
   lines.size = n;
-  markers[0].y = at_most(markers[0].y, n-1);
+  cursors[0].y = at_most(cursors[0].y, n-1);
 }
 
 int Buffer::advance(int *x, int *y) const {
@@ -2418,11 +2416,11 @@ int Buffer::advance(Pos &p) const {
 }
 
 int Buffer::advance(int marker_idx) {
-  Pos &pos = markers[marker_idx].pos;
+  Pos &pos = cursors[marker_idx].pos;
   int err = advance(&pos.x, &pos.y);
   if (err)
     return err;
-  markers[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+  cursors[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
@@ -2442,11 +2440,11 @@ int Buffer::advance_r(Pos &p) const {
 }
 
 int Buffer::advance_r(int marker_idx) {
-  Pos &pos = markers[marker_idx].pos;
+  Pos &pos = cursors[marker_idx].pos;
   int err = advance_r(pos);
   if (err)
     return err;
-  markers[marker_idx].ghost_x = lines[markers[marker_idx].y].visual_offset(pos.x, G.tab_width);
+  cursors[marker_idx].ghost_x = lines[cursors[marker_idx].y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
@@ -2460,7 +2458,7 @@ Utf8char Buffer::getchar(Pos p) {
 }
 
 Utf8char Buffer::getchar(int marker_idx) {
-  Pos pos = markers[marker_idx].pos;
+  Pos pos = cursors[marker_idx].pos;
   return Utf8char::create(pos.x >= lines[pos.y].length ? '\n' : lines[pos.y][pos.x]);
 }
 
@@ -2683,8 +2681,8 @@ void Pane::render_as_dropdown() {
 
   // highlight the line you're on
   if (highlight_background_color) {
-    for (int i = 0; i < b.markers.size; ++i)
-      canvas.fill_background({0, b.markers[i].y, {-1, 1}}, *highlight_background_color);
+    for (int i = 0; i < b.cursors.size; ++i)
+      canvas.fill_background({0, b.cursors[i].y, {-1, 1}}, *highlight_background_color);
   }
 
   canvas.render(this->bounds.p);
@@ -2848,15 +2846,11 @@ void Pane::render_as_menu() {
     canvas.fill_background({0, 0, {-1, 1}}, *this->highlight_background_color);
 
   // draw marker
-  for (int i = 0; i < b.markers.size; ++i) {
-    Pos pos = b.markers[i].pos;
-    if (G.selected_pane == this) {
-      canvas.fill_background({pos + buf_offset, {1, 1}}, G.marker_background_color.color);
-      // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
-    } else if (G.bottom_pane != this) {
-      canvas.fill_background({pos + buf_offset, {1, 1}}, G.marker_inactive_color);
-      // canvas.invert_color(this->gutter_width + pos.x - buf_offset.x, b.pos.y - buf_offset.y);
-    }
+  for (int i = 0; i < b.cursors.size; ++i) {
+    if (G.selected_pane == this)
+      canvas.fill_background({b.cursors[i].pos + buf_offset, {1, 1}}, G.marker_background_color.color);
+    else if (G.bottom_pane != this)
+      canvas.fill_background({b.cursors[i].pos + buf_offset, {1, 1}}, G.marker_inactive_color);
   }
 
   canvas.render(this->bounds.p);
@@ -2899,8 +2893,8 @@ void Pane::render_as_edit() {
 
   // highlight the line you're on
   if (this->highlight_background_color) {
-    for (int i = 0; i < b.markers.size; ++i)
-      canvas.fill_background({0, buf2char(b.markers[i].pos).y, {-1, 1}}, *this->highlight_background_color);
+    for (int i = 0; i < b.cursors.size; ++i)
+      canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *this->highlight_background_color);
   }
 
   // if there is a search term, highlight that as well
@@ -2911,8 +2905,8 @@ void Pane::render_as_edit() {
   }
 
   // draw marker
-  for (int i = 0; i < b.markers.size; ++i) {
-    Pos pos = b.markers[i].pos;
+  for (int i = 0; i < b.cursors.size; ++i) {
+    Pos pos = b.cursors[i].pos;
     if (G.selected_pane == this)
       canvas.fill_background({buf2char(pos), {1, 1}}, G.marker_background_color.color);
     else if (G.bottom_pane != this)
@@ -2943,12 +2937,12 @@ Pos Pane::buf2char(Pos p) const {
 }
 
 int Pane::calc_top_visible_row() const {
-  return at_least(0, this->buffer->markers[0].y - this->numchars_y()/2);
+  return at_least(0, this->buffer->cursors[0].y - this->numchars_y()/2);
 }
 
 int Pane::calc_left_visible_column() const {
-  int x = this->buffer->markers[0].x;
-  x = this->buffer->lines[this->buffer->markers[0].y].visual_offset(x, G.tab_width);
+  int x = this->buffer->cursors[0].x;
+  x = this->buffer->lines[this->buffer->cursors[0].y].visual_offset(x, G.tab_width);
   x -= this->numchars_x()*6/7;
   return at_least(x, 0);
 }
@@ -3309,10 +3303,12 @@ int main(int, const char *[])
     // the quad and text buffers should be empty, but we flush them just to be safe
     render_quads();
     render_text();
-    // render_textatlas(0, 0, 200, 200);
 
     SDL_GL_SwapWindow(G.window);
+
+    if (G.flags.cursor_dirty)
+      puts("Cursor dirty");
+    G.flags.cursor_dirty = false;
   }
 }
-
 
