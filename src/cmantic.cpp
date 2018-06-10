@@ -174,7 +174,7 @@ union Marker {
   };
 };
 
-void util_free(Marker m) {}
+void util_free(Marker) {}
 
 struct Buffer {
   String filename;
@@ -1061,6 +1061,8 @@ static Keyword keywords[] = {
   {"true", KEYWORD_CONSTANT},
   {"false", KEYWORD_CONSTANT},
   {"NULL", KEYWORD_CONSTANT},
+  {"delete", KEYWORD_CONSTANT},
+  {"new", KEYWORD_CONSTANT},
 
   // types
 
@@ -1418,14 +1420,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     if (special_key == KEY_RETURN) {
       Slice filename = G.filetree_buffer[0].slice;
 
-      Buffer **b = 0;
-      ARRAY_FIND(G.buffers, b, (*b)->filename.slice == filename);
+      Buffer *b = 0;
+      for (Buffer *bb : G.buffers) {
+        if (filename == bb->filename.slice) {
+          b = bb;
+          break;
+        }
+      }
       if (b) {
         status_message_set("Switched to {}", &filename);
-        G.main_pane.buffer = *b;
+        G.main_pane.buffer = b;
       }
       else {
-        Buffer *b = Buffer::from_file(filename);
+        b = Buffer::from_file(filename);
         if (b) {
           G.buffers.push(b);
           G.main_pane.buffer = b;
@@ -2652,9 +2659,9 @@ void Canvas::fill(Utf8char c) {
     this->chars[i] = c;
 }
 
-void Canvas::fill(Color text, Color background) {
+void Canvas::fill(Color text, Color backgrnd) {
   for (int i = 0; i < w*h; ++i)
-    background_colors[i] = background;
+    background_colors[i] = backgrnd;
   for (int i = 0; i < w*h; ++i)
     text_colors[i] = text;
 }
@@ -2908,7 +2915,8 @@ void Pane::render_as_edit() {
   for (int i = 0; i < b.cursors.size; ++i) {
     Pos pos = b.cursors[i].pos;
     if (G.selected_pane == this)
-      canvas.fill_background({buf2char(pos), {1, 1}}, G.marker_background_color.color);
+      // canvas.fill_background({buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
+      canvas.fill_background({buf2char(pos), {1, 1}}, G.default_marker_background_color.color);
     else if (G.bottom_pane != this)
       canvas.fill_background({buf2char(pos), {1, 1}}, G.marker_inactive_color);
   }
@@ -3101,7 +3109,7 @@ void Canvas::render(Pos offset) {
   }
 
   // render base background
-  push_square_quad((float)offset.x, (float)offset.x+size.x, (float)offset.y, (float)offset.y+size.y, background);
+  push_square_quad((u16)offset.x, (u16)(offset.x+size.x), (u16)(offset.y), (u16)(offset.y+size.y), background);
   offset.x += margin;
   offset.y += margin;
 
@@ -3113,7 +3121,7 @@ void Canvas::render(Pos offset) {
       Pos p0 = char2pixel(x0,y) + offset;
       Pos p1 = char2pixel(x1,y+1) + offset;
       const Color c = background_colors[y*w + x0];
-      push_square_quad((float)p0.x, (float)p1.x, (float)p0.y, (float)p1.y, c);
+      push_square_quad((u16)p0.x, (u16)p1.x, (u16)p0.y, (u16)p1.y, c);
       x0 = x1;
     }
   }
