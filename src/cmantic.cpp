@@ -138,6 +138,9 @@ struct Pos {
     x += p.x;
     y += p.y;
   }
+  bool operator==(Pos p) {
+    return x == p.x && y == p.y;
+  }
 };
 
 static Pos operator+(Pos a, Pos b) {
@@ -163,7 +166,7 @@ static bool is_identifier_tail(Utf8char c) {
   return c.is_ansi() && is_identifier_tail(c.ansi());
 }
 
-union Marker {
+union Cursor {
   struct {
     int x,y;
   };
@@ -174,7 +177,7 @@ union Marker {
   };
 };
 
-void util_free(Marker) {}
+void util_free(Cursor) {}
 
 struct Buffer {
   String filename;
@@ -188,7 +191,7 @@ struct Buffer {
 
   #define GHOST_EOL -1
   #define GHOST_BOL -2
-  Array<Marker> cursors;
+  Array<Cursor> cursors;
   int modified;
 
   // methods
@@ -203,9 +206,11 @@ struct Buffer {
   Pos to_visual_pos(Pos p);
   void move_to_y(int marker_idx, int y);
   void move_to_x(int marker_idx, int x);
-  void move_to(int marker_idx, int x, int y);
-  void move_to(int marker_idx, Pos p);
+  void move_to(int x, int y);
+  void move_to(Pos p);
+  void move_y(int dy);
   void move_y(int marker_idx, int dy);
+  void move_x(int dx);
   void move_x(int marker_idx, int dx);
   void move(int marker_idx, int dx, int dy);
   void update();
@@ -231,6 +236,7 @@ struct Buffer {
   int getindent(int y);
   int indentdepth(int y, bool *has_statement);
   int autoindent(const int y);
+  void autoindent();
   int isempty();
   void push_line(const char *str);
   void push_line(Slice s);
@@ -246,11 +252,14 @@ struct Buffer {
   int advance(int *x, int *y) const;
   int advance(Pos &p) const;
   int advance(int marker_idx);
+  int advance();
   int advance_r(Pos &p) const;
+  int advance_r();
   int advance_r(int marker_idx);
   Utf8char getchar(Pos p);
   Utf8char getchar(int x, int y);
   Utf8char getchar(int marker_idx);
+  void deduplicate_cursors();
 
   struct TokenResult {
     int tok;
@@ -1350,10 +1359,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
     switch (key) {
       case 't':
-        buffer.move_to(0, 0, 0);
+        buffer.move_to(0, 0);
         break;
       case 'b':
-        buffer.move_to(0, 0, buffer.num_lines()-1);
+        buffer.move_to(0, buffer.num_lines()-1);
         break;
     }
     mode_normal(true);
@@ -1459,14 +1468,14 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
 
       // if escape, get from suggestions
-      if (special_key == KEY_ESCAPE) {
-        G.search_buffer[0].clear(),
+      if (special_key == KEY_ESCAPE && G.search_pane.menu.suggestions.size) {
+        G.search_buffer[0].clear();
         G.search_buffer[0] += G.search_pane.menu.suggestions[clamp(G.search_pane.menu.current_match, 0, G.search_pane.menu.suggestions.size-1)];
       }
 
       G.search_failed = !buffer.find_and_move(G.search_buffer[0].slice, true);
       if (G.search_failed) {
-        buffer.move_to(0, G.search_begin_pos);
+        buffer.move_to(G.search_begin_pos);
         status_message_set("'{}' not found", &G.search_buffer[0]);
         mode_normal(false);
       } else
@@ -1507,14 +1516,14 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       case CONTROL('j'): {
         // this move should not dirty cursor
         int f = G.flags.cursor_dirty;
-        G.dropdown_buffer.move_y(0, 1);
+        G.dropdown_buffer.move_y(1);
         G.flags.cursor_dirty = f;
         break;}
 
       case CONTROL('k'): {
         // this move should not dirty cursor
         int f = G.flags.cursor_dirty;
-        G.dropdown_buffer.move_y(0, -1);
+        G.dropdown_buffer.move_y(-1);
         G.flags.cursor_dirty = f;
         break;}
 
@@ -1530,13 +1539,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       buffer.cursors.size = 1;
       break;
     case '=':
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        Pos pos = buffer.cursors[i].pos;
-        if (buffer.lines[pos.y].length == 0)
-          break;
-        buffer.modified = true;
-        buffer.move_x(i, buffer.autoindent(pos.y));
-      }
+      buffer.autoindent();
       break;
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
@@ -1564,6 +1567,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
             break;
         buffer.advance(i);
       }
+      buffer.deduplicate_cursors();
       break;}
     case 'w': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
@@ -1576,6 +1580,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
           if (buffer.advance(i))
             break;
       }
+      buffer.deduplicate_cursors();
       break;}
     case 'q':
       // TODO: uncomment
@@ -1588,20 +1593,16 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_insert();
       break;
     case 'j':
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.move_y(i, 1);
+      buffer.move_y(1);
       break;
     case 'k':
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.move_y(i, -1);
+      buffer.move_y(-1);
       break;
     case 'h':
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.advance_r(i);
+      buffer.advance_r();
       break;
     case 'l':
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.advance(i);
+      buffer.advance();
       break;
     case 'L':
       buffer.goto_endline();
@@ -1619,6 +1620,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       int i = buffer.cursors.size;
       buffer.cursors.push(buffer.cursors[i-1]);
       buffer.move_y(i, 1);
+      buffer.deduplicate_cursors();
       break;}
     case 'N':
       G.search_term_background_color.reset();
@@ -1652,12 +1654,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_delete();
       break;
     case 'J':
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.move_y(i, G.center_pane->numchars_y()/2);
+      buffer.move_y(G.center_pane->numchars_y()/2);
       break;
     case 'K':
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.move_y(i, -G.center_pane->numchars_y()/2);
+      buffer.move_y(-G.center_pane->numchars_y()/2);
       break;
     }
   }
@@ -1712,26 +1712,29 @@ Pos Buffer::to_visual_pos(Pos p) {
 
 void Buffer::move_to_y(int marker_idx, int y) {
   G.flags.cursor_dirty = true;
+
   y = clamp(y, 0, lines.size-1);
   cursors[marker_idx].y = y;
 }
 
 void Buffer::move_to_x(int marker_idx, int x) {
   G.flags.cursor_dirty = true;
+
   x = clamp(x, 0, lines[cursors[marker_idx].y].length);
   cursors[marker_idx].x = x;
   cursors[marker_idx].ghost_x = lines[cursors[marker_idx].y].visual_offset(x, G.tab_width);
 }
 
-void Buffer::move_to(int marker_idx, int x, int y) {
-  G.flags.cursor_dirty = true;
-  move_to_y(marker_idx, y);
-  move_to_x(marker_idx, x);
+void Buffer::move_to(int x, int y) {
+  cursors.size = 1;
+  move_to_y(0, y);
+  move_to_x(0, x);
 }
 
-void Buffer::move_to(int marker_idx, Pos p) {
-  move_to_y(marker_idx, p.y);
-  move_to_x(marker_idx, p.x);
+void Buffer::move_to(Pos p) {
+  cursors.size = 1;
+  move_to_y(0, p.y);
+  move_to_x(0, p.x);
 }
 
 void Buffer::move_y(int marker_idx, int dy) {
@@ -1766,6 +1769,18 @@ void Buffer::move_x(int marker_idx, int dx) {
       pos.x = lines[pos.y].prev(pos.x);
   pos.x = clamp(pos.x, 0, lines[pos.y].length);
   cursors[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+}
+
+void Buffer::move_x(int dx) {
+  for (int i = 0; i < cursors.size; ++i)
+    move_x(i, dx);
+  deduplicate_cursors();
+}
+
+void Buffer::move_y(int dy) {
+  for (int i = 0; i < cursors.size; ++i)
+    move_y(i, dy);
+  deduplicate_cursors();
 }
 
 Buffer* Buffer::from_file(Slice filename) {
@@ -1840,6 +1855,14 @@ void Buffer::move(int marker_idx, int dx, int dy) {
     move_y(marker_idx, dy);
   if (dx)
     move_x(marker_idx, dx);
+}
+
+void Buffer::deduplicate_cursors() {
+  for (int i = 0; i < cursors.size; ++i)
+  for (int j = 0; j < cursors.size; ++j)
+    if (i != j && cursors[i].pos == cursors[j].pos)
+      cursors[j] = cursors[--cursors.size],
+      --j;
 }
 
 void Buffer::update() {
@@ -1967,7 +1990,7 @@ bool Buffer::find_and_move_r(char c, bool stay) {
   Pos p = cursors[0].pos;
   if (!find_r(c, stay, &p))
     return false;
-  move_to(0, p);
+  move_to(p);
   return true;
 }
 
@@ -1976,7 +1999,7 @@ bool Buffer::find_and_move_r(StringBuffer s, bool stay) {
   Pos p = cursors[0].pos;
   if (!find_r(s, stay, &p))
     return false;
-  move_to(0, p);
+  move_to(p);
   return true;
 }
 
@@ -1985,7 +2008,7 @@ bool Buffer::find_and_move(char c, bool stay) {
   Pos p = cursors[0].pos;
   if (!find(c, stay, &p))
     return false;
-  move_to(0, p);
+  move_to(p);
   return true;
 }
 
@@ -1994,16 +2017,15 @@ bool Buffer::find_and_move(Slice s, bool stay) {
   Pos p = cursors[0].pos;
   if (!find(s, stay, &p))
     return false;
-  move_to(0, p);
+  move_to(p);
   return true;
 }
 
 void Buffer::insert(Slice s) {
   modified = 1;
-  for (int i = 0; i < cursors.size; ++i) {
+  for (int i = 0; i < cursors.size; ++i)
     lines[cursors[i].y].insert(cursors[i].x, s);
-    move_x(i, s.length);
-  }
+  move_x(s.length);
 }
 
 void Buffer::remove_trailing_whitespace(int y) {
@@ -2014,10 +2036,7 @@ void Buffer::remove_trailing_whitespace(int y) {
   while (x >= 0 && isspace(getchar(x, y).ansi()))
     --x;
   lines[y].length = x+1;
-  for (int i = 0; i < cursors.size; ++i) {
-    if (cursors[i].y == y && cursors[i].x > x+1)
-      move_to_x(i, x+1);
-  }
+  goto_endline();
 }
 
 void Buffer::pretty_range(int y0, int y1) {
@@ -2041,10 +2060,10 @@ void Buffer::insert_char(Utf8char ch) {
     Pos &pos = cursors[i].pos;
     modified = true;
     lines[pos.y].insert(pos.x, ch);
-    move_x(i, 1);
-    if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
-      move_x(i, autoindent(pos.y));
   }
+  move_x(1);
+  if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
+    autoindent();
 }
 
 void Buffer::delete_line_at(int y) {
@@ -2186,6 +2205,19 @@ int Buffer::indentdepth(int y, bool *has_statement) {
     first = false;
   }
   return depth;
+}
+
+void Buffer::autoindent() {
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos pos = cursors[i].pos;
+    if (lines[pos.y].length == 0)
+      break;
+    modified = true;
+    int diff = autoindent(pos.y);
+    for (int j = 0; j < cursors.size; ++j)
+      if (cursors[j].y == pos.y)
+        move_x(i, diff);
+  }
 }
 
 int Buffer::autoindent(const int y) {
@@ -2413,7 +2445,7 @@ void Buffer::empty() {
   if (!cursors.size)
     cursors.push({});
   cursors.size = 1;
-  move_to(0, 0, 0);
+  move_to(0, 0);
 }
 
 void Buffer::truncate_to_n_lines(int n) {
@@ -2473,6 +2505,22 @@ int Buffer::advance_r(Pos &p) const {
     p.x = lines[p.y].length;
   }
   return 0;
+}
+
+int Buffer::advance() {
+  int r = 1;
+  for (int i = 0; i < cursors.size; ++i)
+    r &= advance(i);
+  deduplicate_cursors();
+  return r;
+}
+
+int Buffer::advance_r() {
+  int r = 1;
+  for (int i = 0; i < cursors.size; ++i)
+    r &= advance_r(i);
+  deduplicate_cursors();
+  return r;
 }
 
 int Buffer::advance_r(int marker_idx) {
@@ -3412,6 +3460,7 @@ int main(int, const char *[])
     if (G.flags.cursor_dirty)
       puts("Cursor dirty");
     G.flags.cursor_dirty = false;
+    printf("num cursors: %i\n", G.main_pane.buffer->cursors.size);
   }
 }
 
