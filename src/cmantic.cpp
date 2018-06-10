@@ -1395,7 +1395,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         break;
       }
 
-      dropdown_autocomplete(G.menu_buffer);
+      // dropdown_autocomplete(G.menu_buffer);
 
       line = G.menu_buffer[0];
       foreach(menu_options) {
