@@ -1,5 +1,6 @@
 /*
  * TODO:
+ *    Merge cursors that have the same position
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -1267,7 +1268,7 @@ static void state_init() {
   G.search_pane.syntax_highlight = true;
   G.search_pane.background_color = &G.bottom_pane_highlight.color;
   G.search_pane.text_color = &G.default_text_color;
-  G.search_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.search_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
   G.search_pane.margin = 5;
 
   // menu pane
@@ -1441,33 +1442,28 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_SEARCH: {
-    if (special_key == KEY_ESCAPE)
-      dropdown_autocomplete(G.search_buffer);
-    else {
-      switch (key) {
-      case KEY_ARROW_DOWN:
-      case CONTROL('j'): {
-        // this move should not dirty cursor
-        int f = G.flags.cursor_dirty;
-        G.dropdown_buffer.move_y(0, 1);
-        G.flags.cursor_dirty = f;
-        break;}
-
-      case KEY_ARROW_UP:
-      case CONTROL('k'): {
-        // this move should not dirty cursor
-        int f = G.flags.cursor_dirty;
-        G.dropdown_buffer.move_y(0, -1);
-        G.flags.cursor_dirty = f;
-        break;}
-
-      default:
-        insert_default(G.bottom_pane, key);
-        break;
-      }
+    switch (key) {
+    case KEY_ARROW_DOWN:
+    case CONTROL('j'):
+      G.search_pane.menu.current_match = clamp(G.search_pane.menu.current_match+1, 0, G.search_pane.menu.suggestions.size-1);
+      break;
+    case KEY_ARROW_UP:
+    case CONTROL('k'):
+      G.search_pane.menu.current_match = clamp(G.search_pane.menu.current_match-1, 0, G.search_pane.menu.suggestions.size-1);
+      break;
+    default:
+      insert_default(G.bottom_pane, key);
+      break;
     }
 
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
+
+      // if escape, get from suggestions
+      if (special_key == KEY_ESCAPE) {
+        G.search_buffer[0].clear(),
+        G.search_buffer[0] += G.search_pane.menu.suggestions[clamp(G.search_pane.menu.current_match, 0, G.search_pane.menu.suggestions.size-1)];
+      }
+
       G.search_failed = !buffer.find_and_move(G.search_buffer[0].slice, true);
       if (G.search_failed) {
         buffer.move_to(0, G.search_begin_pos);
@@ -2957,7 +2953,6 @@ void Pane::render_filesearch() {
 void Pane::render_textsearch() {
   render_single_line(Slice::create("search: "));
   render_menu_popup(VIEW(G.main_pane.buffer->identifiers, slice));
-  // render_dropdown(this);
 }
 
 void Pane::render_menu() {
