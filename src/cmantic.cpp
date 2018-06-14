@@ -178,8 +178,12 @@ union Cursor {
 
 void util_free(Cursor) {}
 
+const char * const ENDLINE_WINDOWS = "\r\n";
+const char * const ENDLINE_UNIX = "\n";
+
 struct Buffer {
   String filename;
+  const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
 
   Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
@@ -192,6 +196,7 @@ struct Buffer {
   #define GHOST_BOL -2
   Array<Cursor> cursors;
   int modified;
+
 
   // methods
 
@@ -670,6 +675,8 @@ static void save_buffer(Buffer *b) {
 
   printf("Opened file %s\n", b->filename.chars);
 
+  const int endline_len = strlen(b->endline_string);
+
   /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
   for (i = 0; i < b->num_lines(); ++i) {
     unsigned int num_to_write = b->lines[i].length;
@@ -680,8 +687,8 @@ static void save_buffer(Buffer *b) {
     }
 
     // endline
-    if (i != b->num_lines()-1) {
-      if (file_write(f, "\n", 1)) {
+    if (i < b->num_lines()-1) {
+      if (file_write(f, b->endline_string, endline_len)) {
         status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
         goto err;
       }
@@ -1427,7 +1434,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         if (b) {
           G.buffers.push(b);
           G.main_pane.buffer = b;
-          status_message_set("Loaded file {}", &filename);
+          status_message_set("Loaded file {} (%s)", &filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
           status_message_set("Failed to load file {}", &filename);
         }
@@ -1790,51 +1797,56 @@ Buffer* Buffer::from_file(Slice filename) {
   if (!buffer)
     goto err;
   b = {};
+  b.endline_string = ENDLINE_UNIX;
   b.cursors.push({});
 
   b.filename = filename.copy();
-  if (file_open(&f, b.filename.chars, "r"))
+  if (file_open(&f, b.filename.chars, "rb"))
     goto err;
 
-  /* get line count */
-  {
-    int num_lines = 0;
-    for (char c; (c = (char)fgetc(f)), !feof(f);)
-      num_lines += c == '\n';
-    if (ferror(f))
-      goto err;
+  // get line count
+  int num_lines = 0;
+  for (char c; (c = (char)fgetc(f)), !feof(f);)
+    num_lines += c == '\n';
+  if (ferror(f))
+    goto err;
+  fseek(f, 0, SEEK_SET);
 
-    printf("Number of lines: %i\n", num_lines)
-    IF_DEBUG(status_message_set("File has %i rows", num_lines));
+  printf("Number of lines: %i\n", num_lines);
 
-    if (num_lines > 0) {
-      b.lines.resize(num_lines+1);
-      b.lines.zero();
+  // read content
+  if (num_lines > 0) {
+    b.lines.resize(num_lines+1);
+    b.lines.zero();
 
-      char c = 0;
-      fseek(f, 0, SEEK_SET);
-      for (int i = 0; i <= num_lines; ++i) {
-        while (1) {
-          c = (char)fgetc(f);
-          if (feof(f)) {
-            if (ferror(f))
-              goto err;
-            goto last_line;
-          }
-          if (c == '\r') c = (char)fgetc(f);
-          if (c == '\n') break;
-          b[i] += c;
+    char c = 0;
+    for (int i = 0; i <= num_lines; ++i) {
+      while (1) {
+        c = (char)fgetc(f);
+        if (feof(f)) {
+          if (ferror(f))
+            goto err;
+          goto last_line;
         }
+        if (c == '\r') {
+          c = (char)fgetc(f);
+          b.endline_string = ENDLINE_WINDOWS;
+        }
+        if (c == '\n')
+          break;
+        b[i] += c;
       }
-      last_line:;
-      assert(feof(f));
-    } else {
-      b.lines.push();
     }
+    last_line:;
+    assert(feof(f));
+  } else {
+    b.lines.push();
   }
 
+  // token type
   tokenize(b);
 
+  // guess tab type
   b.guess_tab_type();
 
   fclose(f);
