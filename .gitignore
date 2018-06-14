@@ -10,3 +10,4 @@ include
 *.suo
 *.lnk
 .vs
+3party/*.h
