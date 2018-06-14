@@ -679,10 +679,12 @@ static void save_buffer(Buffer *b) {
       goto err;
     }
 
-    /* TODO: windows endlines option */
-    if (file_write(f, "\n", 1)) {
-      status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
-      goto err;
+    // endline
+    if (i != b->num_lines()-1) {
+      if (file_write(f, "\n", 1)) {
+        status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
+        goto err;
+      }
     }
   }
 
@@ -985,7 +987,7 @@ static void insert_default(Pane *p, int key) {
   }
 
   if (key >= 0 && key <= 125) {
-    b.insert_char(Utf8char::create(key));
+    b.insert_char(Utf8char::create((char)key));
     return;
   }
 
@@ -1498,7 +1500,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_INSERT: {
-    int key = special_key ? special_key : input.ansi();
     if (ctrl)
       key |= KEY_CONTROL;
     switch (key) {
@@ -3459,7 +3460,6 @@ int main(int, const char *[])
     if (G.flags.cursor_dirty)
       puts("Cursor dirty");
     G.flags.cursor_dirty = false;
-    printf("num cursors: %i\n", G.main_pane.buffer->cursors.size);
   }
 }
 
