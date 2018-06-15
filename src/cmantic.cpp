@@ -113,7 +113,7 @@ enum Token {
 };
 
 struct TokenInfo {
-  int token;
+  Token token;
   int x;
 };
 
@@ -185,6 +185,12 @@ void util_free(Cursor) {}
 const char * const ENDLINE_WINDOWS = "\r\n";
 const char * const ENDLINE_UNIX = "\n";
 
+struct TokenResult {
+  int tok;
+  Pos a;
+  Pos b;
+};
+
 struct Buffer {
   String filename;
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
@@ -214,6 +220,7 @@ struct Buffer {
   Pos to_visual_pos(Pos p);
   void move_to_y(int marker_idx, int y);
   void move_to_x(int marker_idx, int x);
+  void move_to(int marker_idx, Pos p);
   void move_to(int x, int y);
   void move_to(Pos p);
   void move_y(int dy);
@@ -269,11 +276,6 @@ struct Buffer {
   Utf8char getchar(int marker_idx);
   void deduplicate_cursors();
 
-  struct TokenResult {
-    int tok;
-    Pos a;
-    Pos b;
-  };
   TokenResult token_read(Pos *p, int y_end);
 
   static Buffer* from_file(Slice filename);
@@ -376,7 +378,6 @@ struct Pane {
 
     // PANETYPE_MENU
     struct {
-      Array<MenuOption> options;
       int current_match;
       Array<Slice> suggestions;
     } menu;
@@ -400,6 +401,13 @@ struct Pane {
   void render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
+
+  Slice* menu_get_selection() {
+    if (!menu.suggestions.size)
+      return 0;
+    int i = clamp(menu.current_match, 0, menu.suggestions.size);
+    return &menu.suggestions[i];
+  };
 
   int numchars_x() const;
   int numchars_y() const;
@@ -602,7 +610,7 @@ static void tokenize(Buffer &b) {
 
     /* number */
     else if (isdigit(row[x])) {
-      b.tokens[y].push({x, TOKEN_NUMBER});
+      b.tokens[y].push({TOKEN_NUMBER, x});
       for (; x < rowsize && isdigit(row[x]); ++x);
       if (b.getchar(x, y) == '.')
         for (; x < rowsize && isdigit(row[x]); ++x);
@@ -610,7 +618,7 @@ static void tokenize(Buffer &b) {
 
     /* single char token */
     else {
-      b.tokens[y].push({x, row[x]});
+      b.tokens[y].push({(Token)row[x], x});
       if (b.advance(&x, &y))
         return;
     }
@@ -1012,8 +1020,6 @@ static void insert_default(Pane *p, int key) {
     case KEY_BACKSPACE:
       b.delete_char();
       break;
-
-
   }
 
 }
@@ -1150,6 +1156,7 @@ static Keyword keywords[] = {
 
   {"#include", KEYWORD_MACRO},
   {"#define", KEYWORD_MACRO},
+  {"#undef", KEYWORD_MACRO},
   {"#ifdef", KEYWORD_MACRO},
   {"#ifndef", KEYWORD_MACRO},
   {"#endif", KEYWORD_MACRO},
@@ -1337,16 +1344,40 @@ static void state_init() {
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = &G.main_pane;
 
-  G.menu_pane.menu.options.pushn((int)ARRAY_LEN(menu_options));
-  for (int i = 0; i < (int)ARRAY_LEN(menu_options); ++i)
-    G.menu_pane.menu.options[i] = menu_options[i].opt;
-
   filetree_init();
   status_message_set("Welcome!");
 }
 
 static Pos char2pixel(Pos p) {
   return char2pixel(p.x, p.y);
+}
+
+static void handle_menu_insert(int key, Pane &p) {
+    switch (key) {
+    case KEY_ARROW_DOWN:
+    case CONTROL('j'):
+      p.menu.current_match = clamp(p.menu.current_match+1, 0, p.menu.suggestions.size-1);
+      break;
+    case KEY_ARROW_UP:
+    case CONTROL('k'):
+      p.menu.current_match = clamp(p.menu.current_match-1, 0, p.menu.suggestions.size-1);
+      break;
+    case KEY_TAB: {
+      Slice *s = p.menu_get_selection();
+      if (s) {
+        p.buffer->empty();
+        p.buffer->insert(*s);
+      } else {
+        p.buffer->insert_tab();
+      }
+      break;}
+
+
+      // fallthrough
+    default:
+      insert_default(&p, key);
+      break;
+  }
 }
 
 static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
@@ -1411,18 +1442,20 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     else if (special_key == KEY_ESCAPE)
       mode_normal(true);
     else
-      insert_default(&G.menu_pane, key);
+      handle_menu_insert(key, G.menu_pane);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
   case MODE_FILESEARCH:
     if (special_key == KEY_RETURN) {
-      Slice filename;
-      int c = G.filetree_pane.menu.current_match;
-      if (G.filetree_pane.menu.suggestions.size && c >= 0 && c < G.filetree_pane.menu.suggestions.size)
-        filename = G.filetree_pane.menu.suggestions[c];
-      else
-        filename = G.filetree_buffer[0].slice;
+      Slice* opt = G.filetree_pane.menu_get_selection();
+      if (!opt) {
+        status_message_set("\"{}\": No such file", &G.filetree_buffer[0].slice);
+        mode_normal(false);
+        break;
+      }
+
+      Slice filename = *opt;
 
       Buffer *b = 0;
       for (Buffer *bb : G.buffers) {
@@ -1449,42 +1482,21 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_normal(false);
       break;
     }
-    switch (key) {
-    case KEY_ARROW_DOWN:
-    case CONTROL('j'):
-      G.filetree_pane.menu.current_match = clamp(G.filetree_pane.menu.current_match+1, 0, G.filetree_pane.menu.suggestions.size-1);
-      break;
-    case KEY_ARROW_UP:
-    case CONTROL('k'):
-      G.filetree_pane.menu.current_match = clamp(G.filetree_pane.menu.current_match-1, 0, G.filetree_pane.menu.suggestions.size-1);
-      break;
-    default:
-      insert_default(G.bottom_pane, key);
-      break;
-    }
+
+    handle_menu_insert(key, G.filetree_pane);
     break;
 
   case MODE_SEARCH: {
-    switch (key) {
-    case KEY_ARROW_DOWN:
-    case CONTROL('j'):
-      G.search_pane.menu.current_match = clamp(G.search_pane.menu.current_match+1, 0, G.search_pane.menu.suggestions.size-1);
-      break;
-    case KEY_ARROW_UP:
-    case CONTROL('k'):
-      G.search_pane.menu.current_match = clamp(G.search_pane.menu.current_match-1, 0, G.search_pane.menu.suggestions.size-1);
-      break;
-    default:
-      insert_default(G.bottom_pane, key);
-      break;
-    }
-
+    handle_menu_insert(key, G.search_pane);
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
 
       // if escape, get from suggestions
-      if (special_key == KEY_ESCAPE && G.search_pane.menu.suggestions.size) {
-        G.search_buffer[0].clear();
-        G.search_buffer[0] += G.search_pane.menu.suggestions[clamp(G.search_pane.menu.current_match, 0, G.search_pane.menu.suggestions.size-1)];
+      if (special_key == KEY_ESCAPE) {
+        Slice* opt = G.search_pane.menu_get_selection();
+        if (opt) {
+          G.search_buffer[0].clear();
+          G.search_buffer[0] += *opt;
+        }
       }
 
       G.search_failed = !buffer.find_and_move(G.search_buffer[0].slice, true);
@@ -1656,7 +1668,31 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case '{':
       buffer.find_and_move_r('{', false);
       break;
-    case '}':
+    case '}': {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        Pos p = buffer.cursors[i].pos;
+        int depth = 0;
+        if (buffer.getchar(p) == '}') {
+          puts("already on }");
+          buffer.advance(p);
+        }
+        while (1) {
+          TokenResult t = buffer.token_read(&p, buffer.lines.size);
+          if (!t.tok)
+            break;
+          if (t.tok == '{') 
+            ++depth;
+          if (t.tok == '}') {
+            --depth;
+            if (depth <= 0) {
+              buffer.move_to(i, t.a);
+              break;
+            }
+          }
+        }
+      }
+      buffer.deduplicate_cursors();
+      break;}
       buffer.find_and_move('}', false);
       break;
     case ':':
@@ -1747,6 +1783,12 @@ void Buffer::move_to(Pos p) {
   cursors.size = 1;
   move_to_y(0, p.y);
   move_to_x(0, p.x);
+}
+
+// NOTE: you must call deduplicate_cursors after this
+void Buffer::move_to(int marker_idx, Pos p) {
+  move_to_y(marker_idx, p.y);
+  move_to_x(marker_idx, p.x);
 }
 
 void Buffer::move_y(int marker_idx, int dy) {
@@ -2090,15 +2132,16 @@ void Buffer::delete_line_at(int y) {
   if (lines.size == 1)
     return;
   lines.remove_slow(y);
-  // for (int i = 0; i < cursors.size; ++i)
-  //   if (cursors[i].y >= y)
-  //     move_y(i, -1);
+  for (int i = 0; i < cursors.size; ++i)
+    if (cursors[i].y > y)
+      move_y(i, -1);
 }
 
 void Buffer::delete_line() {
   for (int i = 0; i < cursors.size; ++i) {
     delete_line_at(cursors[i].y);
   }
+  deduplicate_cursors();
 }
 
 void Buffer::remove_range(Pos a, Pos b) {
@@ -2565,7 +2608,7 @@ Utf8char Buffer::getchar(int marker_idx) {
   return Utf8char::create(pos.x >= lines[pos.y].length ? '\n' : lines[pos.y][pos.x]);
 }
 
-Buffer::TokenResult Buffer::token_read(Pos *p, int y_end) {
+TokenResult Buffer::token_read(Pos *p, int y_end) {
   TokenResult result = {};
   int x,y;
   x = p->x, y = p->y;
@@ -2861,9 +2904,19 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         // TODO: @utf8
         if (identifier != "return") {
           Pos p = pos;
-          auto t2 = b.token_read(&p, y1);
-          if (t2.tok == TOKEN_IDENTIFIER && b.token_read(&p, y1).tok == '(')
-            render_highlight(t2.a, t2.b, G.identifier_color);
+          Pos colon_chain_start = prev;
+          TokenResult t2;
+          bool colon = false;
+          while (t2 = b.token_read(&p, y1), t2.tok == ':')
+            colon = true;
+          if (t2.tok == TOKEN_IDENTIFIER && b.token_read(&p, y1).tok == '(') {
+            if (colon) {
+              render_highlight(colon_chain_start, t2.b, G.identifier_color);
+            }
+            else {
+              render_highlight(t2.a, t2.b, G.identifier_color);
+            }
+          }
         }
       } break;
 
@@ -2993,7 +3046,7 @@ void Pane::render_textsearch() {
 
 void Pane::render_menu() {
   render_single_line(Slice::create("menu: "));
-  render_menu_popup(VIEW(menu.options, name));
+  render_menu_popup(VIEW_FROM_ARRAY(menu_options, opt.name));
 }
 
 void Pane::render_edit() {

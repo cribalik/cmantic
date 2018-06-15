@@ -149,6 +149,7 @@ View<T> view(T *items, int size, int stride) {
 }
 
 #define VIEW(array, field) view(&array.items[0].field, array.size, sizeof(*array.items))
+#define VIEW_FROM_ARRAY(array, field) view(&array[0].field, ARRAY_LEN(array), sizeof(*array))
 
 template<class T, int N>
 union StackArray {
