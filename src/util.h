@@ -666,9 +666,15 @@ void util_free(Slice &) {}
 static bool operator==(Slice a, Slice b) {
   return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
 }
+static bool operator!=(Slice a, Slice b) {
+  return !(a == b);
+}
 static bool operator==(Slice a, const char *str) {
   int l = strlen(str);
   return a.length == l && !memcmp(a.chars, str, l);
+}
+static bool operator!=(Slice a, const char *str) {
+  return !(a == str);
 }
 
 // A string that owns its data

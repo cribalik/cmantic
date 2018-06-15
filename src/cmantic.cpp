@@ -108,7 +108,7 @@ enum Token {
   TOKEN_BLOCK_COMMENT       = -7,
   TOKEN_BLOCK_COMMENT_BEGIN = -8,
   TOKEN_BLOCK_COMMENT_END   = -9,
-  TOKEN_LINE_COMMENT_BEGIN  = -10,
+  TOKEN_LINE_COMMENT  = -10,
   TOKEN_OPERATOR            = -11,
 };
 
@@ -136,6 +136,10 @@ struct Pos {
   void operator+=(Pos p) {
     x += p.x;
     y += p.y;
+  }
+  void operator-=(Pos p) {
+    x -= p.x;
+    y -= p.y;
   }
   bool operator==(Pos p) {
     return x == p.x && y == p.y;
@@ -313,6 +317,7 @@ struct Canvas {
   Color background;
   int margin;
   bool draw_shadow;
+  Pos offset;
 
   void render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
   void render(Pos offset);
@@ -633,6 +638,7 @@ static const Slice operators[] = {
   {(char*)"+", 1},
   {(char*)"-", 1},
   {(char*)"*", 1},
+  {(char*)"/", 1},
   {(char*)"&", 1},
   {(char*)"%", 1},
   {(char*)"=", 1},
@@ -1496,7 +1502,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     switch (key) {
       case 'd':
         buffer.delete_line();
-        buffer.update();
         mode_normal(true);
         break;
 
@@ -1792,6 +1797,7 @@ void Buffer::move_y(int dy) {
 
 Buffer* Buffer::from_file(Slice filename) {
   FILE* f = 0;
+  int num_lines = 0;
   Buffer *buffer = (Buffer*)malloc(sizeof(Buffer));
   Buffer &b = *buffer;
   if (!buffer)
@@ -1805,7 +1811,7 @@ Buffer* Buffer::from_file(Slice filename) {
     goto err;
 
   // get line count
-  int num_lines = 0;
+  num_lines = 0;
   for (char c; (c = (char)fgetc(f)), !feof(f);)
     num_lines += c == '\n';
   if (ferror(f))
@@ -2084,14 +2090,15 @@ void Buffer::delete_line_at(int y) {
   if (lines.size == 1)
     return;
   lines.remove_slow(y);
-  for (int i = 0; i < cursors.size; ++i)
-    if (cursors[i].y >= y)
-      move_y(i, -1);
+  // for (int i = 0; i < cursors.size; ++i)
+  //   if (cursors[i].y >= y)
+  //     move_y(i, -1);
 }
 
 void Buffer::delete_line() {
-  for (int i = 0; i < cursors.size; ++i)
+  for (int i = 0; i < cursors.size; ++i) {
     delete_line_at(cursors[i].y);
+  }
 }
 
 void Buffer::remove_range(Pos a, Pos b) {
@@ -2638,10 +2645,10 @@ Buffer::TokenResult Buffer::token_read(Pos *p, int y_end) {
 
     /* line comment */
     if (c == '/' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-      result.tok = TOKEN_LINE_COMMENT_BEGIN;
+      result.tok = TOKEN_LINE_COMMENT;
       result.a = {x, y};
-      result.b = {x+1, y};
-      x += 2;
+      result.b = {lines[y].length-1, y};
+      x = lines[y].length;
       goto done;
     }
 
@@ -2789,6 +2796,9 @@ void Pane::render_as_dropdown() {
 }
 
 void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
+  canvas.offset = {x0, y0};
+  #define render_highlight(prev, next, color) canvas.fill_textcolor({b.to_visual_pos(prev), b.to_visual_pos(next)}, Rect{0, 0, -1, -1}, color);
+
   Buffer &b = *this->buffer;
   // syntax @highlighting
   Pos pos = {0, y0};
@@ -2798,110 +2808,76 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
     prev = t.a;
     next = t.b;
 
-    check_token:
-
-    bool do_render = false;
-
-    Color highlighted_text_color = {};
-
     if (t.tok == TOKEN_NULL)
       break;
     switch (t.tok) {
 
       case TOKEN_NUMBER:
-        do_render = true;
-        highlighted_text_color = G.number_color;
+        render_highlight(prev, next, G.number_color);
         break;
 
       case TOKEN_BLOCK_COMMENT_BEGIN:
-        do_render = 1;
-        highlighted_text_color = G.comment_color;
         next = {b.lines[y1-1].length, y1-1};
+        render_highlight(prev, next, G.comment_color);
         break;
 
       case TOKEN_BLOCK_COMMENT:
-        do_render = 1;
-        highlighted_text_color = G.comment_color;
+        render_highlight(prev, next, G.comment_color);
         break;
 
       case TOKEN_BLOCK_COMMENT_END:
-        do_render = 1;
-        highlighted_text_color = G.comment_color;
         prev = {x0, y0};
+        render_highlight(prev, next, G.comment_color);
         break;
 
-      case TOKEN_LINE_COMMENT_BEGIN:
-        do_render = true;
-        // just fast forward to the end of the line, no need to parse it
-        pos = {0, prev.y+1};
-        next = {b.lines[prev.y].length-1, prev.y};
-        highlighted_text_color = G.comment_color;
+      case TOKEN_LINE_COMMENT:
+        render_highlight(prev, next, G.comment_color);
         break;
 
       case TOKEN_STRING:
-        do_render = true;
-        highlighted_text_color = G.string_color;
+        render_highlight(prev, next, G.string_color);
         break;
 
       case TOKEN_STRING_BEGIN:
-        do_render = true;
-        highlighted_text_color = G.string_color;
+        render_highlight(prev, next, G.string_color);
         break;
 
       case TOKEN_OPERATOR:
-        do_render = true;
-        highlighted_text_color = G.operator_color;
+        render_highlight(prev, next, G.operator_color);
         break;
 
       case TOKEN_IDENTIFIER: {
         // check for keywords
+        Slice identifier = b[prev.y](prev.x, next.x+1);
         for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-          if (b[prev.y](prev.x, next.x+1) == keywords[i].name) {
-            highlighted_text_color = keyword_colors[keywords[i].type];
-            goto done;
+          if (identifier == keywords[i].name) {
+            render_highlight(prev, next, keyword_colors[keywords[i].type]);
+            break;
           }
         }
 
-        // otherwise check for functions
-        // we assume something not indented and followed by a '(' is a function
+        // check for functions
+        // we assume <identifier> <identifier>( is a function declaration
         // TODO: @utf8
-        if (b.getchar(0, prev.y).isspace())
-          break;
-        t = b.token_read(&pos, y1);
-        if (t.tok != '(') {
-          prev = t.a;
-          next = t.b;
-          goto check_token;
+        if (identifier != "return") {
+          Pos p = pos;
+          auto t2 = b.token_read(&p, y1);
+          if (t2.tok == TOKEN_IDENTIFIER && b.token_read(&p, y1).tok == '(')
+            render_highlight(t2.a, t2.b, G.identifier_color);
         }
-        highlighted_text_color = G.identifier_color;
-
-        done:
-        do_render = true;
       } break;
 
       case '#':
-        do_render = true;
-        highlighted_text_color = keyword_colors[KEYWORD_MACRO];
+        render_highlight(prev, next, keyword_colors[KEYWORD_MACRO]);
         break;
 
       default:
         break;
     }
-    if (do_render) {
-      prev = b.to_visual_pos(prev);
-      next = b.to_visual_pos(next);
-
-      prev.x -= x0;
-      prev.y -= y0;
-      next.x -= x0;
-      next.y -= y0;
-
-      canvas.fill_textcolor({prev, next}, Rect{0, 0, -1, -1}, highlighted_text_color);
-    }
-
     if (pos.y > y1)
       break;
   }
+  canvas.offset = {};
 }
 
 void Pane::render() {
@@ -3114,6 +3090,8 @@ int Pane::calc_left_visible_column() const {
 void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
   Pos a = range.a;
   Pos b = range.b;
+  a -= offset;
+  b -= offset;
   if (bounds.w == -1)
     bounds.w = w - bounds.x;
   if (bounds.h == -1)
@@ -3148,6 +3126,8 @@ void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
 
 // w,h: use -1 to say it goes to the end
 void Canvas::fill_textcolor(Rect r, Color c) {
+  r.x -= offset.x;
+  r.y -= offset.y;
   if (r.w == -1)
     r.w = this->w - r.x;
   if (r.h == -1)
@@ -3164,6 +3144,8 @@ void Canvas::fill_textcolor(Rect r, Color c) {
 
 // w,h: use -1 to say it goes to the end
 void Canvas::fill_background(Rect r, Color c) {
+  r.x -= offset.x;
+  r.y -= offset.y;
   if (r.w == -1)
     r.w = this->w - r.x;
   if (r.h == -1)
@@ -3181,6 +3163,8 @@ void Canvas::fill_background(Rect r, Color c) {
 void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
   if (!s.length)
     return;
+
+  p = p + offset;
 
   if (xclip1 == -1)
     xclip1 = this->w;
