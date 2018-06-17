@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * Fix memory leak occuring between frames
  * Undo
  * Retokenize on edit
  * Goto definition
