@@ -383,13 +383,13 @@ struct MenuOption {
 
 struct Pane {
   PaneType type;
+  Buffer *buffer; // TODO: move to panetype specific stuff
 
   Rect bounds;
   const Color *background_color;
-  const Color *highlight_background_color;
+  const Color *active_highlight_background_color;
+  const Color *inactive_highlight_background_color;
   const Color *text_color;
-  bool syntax_highlight;
-  Buffer *buffer; // TODO: move to PANETYPE_EDIT specific data
   int _gutter_width;
 
   // visual settings
@@ -442,6 +442,17 @@ struct Pane {
   Pos slot2global(Pos p) const;
   Pos buf2char(Pos p) const;
   Pos buf2pixel(Pos p) const;
+
+  static void init_edit(Pane &p, Buffer *b, Color *background_color, Color *text_color, Color *active_highlight_background_color, Color *inactive_highlight_background_color) {
+    p = {};
+    p.type = PANETYPE_EDIT;
+    p.buffer = b;
+    p.background_color = background_color;
+    p.text_color = text_color;
+    p.active_highlight_background_color = active_highlight_background_color;
+    p.inactive_highlight_background_color = inactive_highlight_background_color;
+  }
+
 };
 
 struct PoppedColor {
@@ -505,22 +516,23 @@ struct State {
   Color string_color;
   Color operator_color;
   Color default_keyword_color;
+  Color inactive_highlight_background_color;
   Color identifier_color;
   Color default_search_term_text_color;
   Color search_term_text_color;
   Color marker_inactive_color;
   PoppedColor marker_background_color;
   PoppedColor search_term_background_color;
-  PoppedColor highlight_background_color;
+  PoppedColor active_highlight_background_color;
   RotatingColor default_marker_background_color;
   PoppedColor bottom_pane_highlight;
 
   /* editor state */
-  Pane *center_pane;
+  Array<Pane*> editing_panes;
   Pane *bottom_pane;
-  Pane *selected_pane;
+  Pane *selected_pane; // the pane that the marker currently is on, could be everything from editing pane, to menu pane, to filesearch pane
+  Pane *editing_pane; // the pane that is currently being edited on, regardless if you happen to be in filesearch or menu
 
-  Pane main_pane;
   Pane search_pane;
   Buffer search_buffer;
   Pane menu_pane;
@@ -804,7 +816,8 @@ static void save_buffer(Buffer *b) {
 }
 
 static void menu_option_save() {
-  save_buffer(G.center_pane->buffer);
+  if (G.selected_pane)
+  save_buffer(G.editing_pane->buffer);
 }
 
 static void menu_option_quit() {
@@ -812,10 +825,10 @@ static void menu_option_quit() {
 }
 
 static void menu_option_show_tab_type() {
-  if (G.center_pane->buffer->tab_type == 0)
-    status_message_set("Tabs is \\t");
+  if (G.editing_pane->buffer->tab_type == 0)
+    status_message_set("Using tabs");
   else
-    status_message_set("Tabs is %i spaces", G.center_pane->buffer->tab_type);
+    status_message_set("Tabs is %i spaces", G.editing_pane->buffer->tab_type);
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -846,22 +859,24 @@ static void mode_cleanup() {
 static void mode_search() {
   mode_cleanup();
 
-  G.center_pane->buffer->cursors.size = 1;
+  G.editing_pane->buffer->cursors.size = 1;
 
   G.mode = MODE_SEARCH;
   G.bottom_pane_highlight.reset();
   G.selected_pane = &G.search_pane;
-  G.search_begin_pos = G.center_pane->buffer->cursors[0].pos;
+  G.search_begin_pos = G.editing_pane->buffer->cursors[0].pos;
   G.search_failed = 0;
   G.bottom_pane = &G.search_pane;
-  puts("Using searc pane");
   G.search_buffer.empty();
 }
 
 static void mode_filesearch() {
   mode_cleanup();
   G.mode = MODE_FILESEARCH;
+  G.bottom_pane_highlight.reset();
+  G.selected_pane = &G.filetree_pane;
   G.bottom_pane = &G.filetree_pane;
+  G.filetree_buffer.empty();
 }
 
 static void mode_goto() {
@@ -886,7 +901,7 @@ static void mode_normal(bool set_message) {
 
   G.mode = MODE_NORMAL;
   G.bottom_pane = &G.status_message_pane;
-  G.selected_pane = &G.main_pane;
+  G.selected_pane = G.editing_pane;
 
   if (set_message)
     status_message_set("normal");
@@ -1322,6 +1337,7 @@ static void state_init() {
   G.identifier_color = COLOR_GREEN;
   G.default_search_term_text_color = G.search_term_text_color = COLOR_WHITE;
   G.marker_inactive_color = COLOR_LIGHT_GREY;
+  G.inactive_highlight_background_color = Color::blend(G.default_background_color, COLOR_WHITE, 0.1f);
 
   keyword_colors[KEYWORD_NONE]        = {};
   keyword_colors[KEYWORD_CONTROL]     = COLOR_DARK_BLUE;
@@ -1332,19 +1348,19 @@ static void state_init() {
   keyword_colors[KEYWORD_MACRO]       = COLOR_DEEP_ORANGE;
   keyword_colors[KEYWORD_CONSTANT]    = G.number_color;
 
-  G.highlight_background_color.base_color = G.default_background_color;
-  G.highlight_background_color.popped_color = COLOR_WHITE;
-  G.highlight_background_color.speed = 1.0f;
-  G.highlight_background_color.cooldown = 1.0f;
-  G.highlight_background_color.min = 0.1f;
-  G.highlight_background_color.max = 0.18f;
+  G.active_highlight_background_color.base_color = G.default_background_color;
+  G.active_highlight_background_color.popped_color = COLOR_WHITE;
+  G.active_highlight_background_color.speed = 1.0f;
+  G.active_highlight_background_color.cooldown = 1.0f;
+  G.active_highlight_background_color.min = 0.1f;
+  G.active_highlight_background_color.max = 0.18f;
 
   G.bottom_pane_highlight.base_color = G.default_background_color;
   G.bottom_pane_highlight.popped_color = COLOR_WHITE;
   G.bottom_pane_highlight.speed = 1.3f;
   G.bottom_pane_highlight.cooldown = 0.4f;
-  G.bottom_pane_highlight.min = 0.0f;
-  G.bottom_pane_highlight.max = 0.1f;
+  G.bottom_pane_highlight.min = 0.05f;
+  G.bottom_pane_highlight.max = 0.15f;
 
   G.default_marker_background_color.speed = 0.2f;
   G.default_marker_background_color.saturation = 0.8f;
@@ -1368,41 +1384,34 @@ static void state_init() {
   // @panes
 
   G.null_buffer.empty();
-  G.main_pane.type = PANETYPE_EDIT;
-  G.main_pane.buffer = &G.null_buffer;
-  G.main_pane.syntax_highlight = true;
-  G.main_pane.background_color = &G.default_background_color;
-  G.main_pane.text_color = &G.default_text_color;
-  G.main_pane.highlight_background_color = &G.highlight_background_color.color;
+  Pane *main_pane = new Pane{};
+  Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
 
   // search pane
   G.search_buffer.empty();
   G.search_pane.type = PANETYPE_TEXTSEARCH;
   G.search_pane.buffer = &G.search_buffer;
-  G.search_pane.syntax_highlight = true;
   G.search_pane.background_color = &G.bottom_pane_highlight.color;
   G.search_pane.text_color = &G.default_text_color;
-  G.search_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.search_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
   G.search_pane.margin = 5;
 
   // menu pane
   G.menu_buffer.empty();
   G.menu_pane.type = PANETYPE_MENU;
   G.menu_pane.buffer = &G.menu_buffer;
-  G.menu_pane.syntax_highlight = true;
   G.menu_pane.background_color = &G.bottom_pane_highlight.color;
   G.menu_pane.text_color = &G.default_text_color;
-  G.menu_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.menu_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
   G.menu_pane.margin = 5;
 
   // file tree pane
   G.filetree_buffer.empty();
   G.filetree_pane.type = PANETYPE_FILESEARCH;
   G.filetree_pane.buffer = &G.filetree_buffer;
-  G.filetree_pane.syntax_highlight = false;
-  G.filetree_pane.background_color = &COLOR_GREY;
+  G.filetree_pane.background_color = &G.bottom_pane_highlight.color;
   G.filetree_pane.text_color = &G.default_text_color;
-  G.filetree_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.filetree_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
   G.filetree_pane.margin = 5;
 
   // dropdown pane
@@ -1411,22 +1420,24 @@ static void state_init() {
   G.dropdown_pane.buffer = &G.dropdown_buffer;
   G.dropdown_pane.background_color = &COLOR_GREY;
   G.dropdown_pane.text_color = &COLOR_WHITE;
-  G.dropdown_pane.margin = 10;
-  G.dropdown_pane.highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.dropdown_pane.margin = 5;
+  G.dropdown_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
 
   // status message pane
   G.status_message_buffer.empty();
   G.status_message_pane.type = PANETYPE_STATUSMESSAGE;
   G.status_message_pane.buffer = &G.status_message_buffer;
-  G.status_message_pane.syntax_highlight = true;
   G.status_message_pane.background_color = &G.bottom_pane_highlight.color;
   G.status_message_pane.text_color = &G.default_text_color;
-  G.status_message_pane.highlight_background_color = &G.highlight_background_color.color;
+  G.status_message_pane.active_highlight_background_color = &G.active_highlight_background_color.color;
   G.status_message_pane.margin = 5;
 
-  G.center_pane = &G.main_pane;
+  G.editing_pane = main_pane;
   G.bottom_pane = &G.status_message_pane;
-  G.selected_pane = &G.main_pane;
+  G.selected_pane = main_pane;
+  G.editing_pane = main_pane;
+
+  G.editing_panes += main_pane;
 
   filetree_init();
   status_message_set("Welcome!");
@@ -1470,7 +1481,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
   if (!input.is_ansi() && !special_key)
     return;
 
-  Buffer &buffer = *G.center_pane->buffer;
+  Buffer &buffer = *G.editing_pane->buffer;
   int key = special_key ? special_key : input.ansi();
   if (ctrl)
     key |= KEY_CONTROL;
@@ -1550,13 +1561,13 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       if (b) {
         status_message_set("Switched to {}", &filename);
-        G.main_pane.buffer = b;
+        G.editing_pane->buffer = b;
       }
       else {
         b = Buffer::from_file(filename);
         if (b) {
           G.buffers.push(b);
-          G.main_pane.buffer = b;
+          G.editing_pane->buffer = b;
           status_message_set("Loaded file {} (%s)", &filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
           status_message_set("Failed to load file {}", &filename);
@@ -1618,7 +1629,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       case KEY_TAB:
         if (dropdown_autocomplete(buffer))
           break;
-        insert_default(&G.main_pane, key);
+        insert_default(G.editing_pane, key);
         break;
 
       case CONTROL('j'): {
@@ -1636,7 +1647,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         break;}
 
       default:
-        insert_default(&G.main_pane, key);
+        insert_default(G.editing_pane, key);
         break;
     }
     break;}
@@ -1691,10 +1702,9 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       buffer.deduplicate_cursors();
       break;}
     case 'q':
-      // TODO: uncomment
-      // if (buffer.modified)
-        // status_message_set("You have unsaved changes. If you really want to exit, use :quit");
-      // else
+      if (buffer.modified)
+        status_message_set("You have unsaved changes. If you really want to exit, use :quit");
+      else
         exit(0);
       break;
     case 'i':
@@ -1736,6 +1746,31 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
+    case CONTROL('w'): {
+      Pane *p = new Pane{};
+      Pane::init_edit(*p, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+      G.editing_panes += p;
+      break;}
+    case CONTROL('l'): {
+      int i;
+      for (i = 0; i < G.editing_panes.size; ++i)
+        if (G.editing_panes[i] == G.editing_pane)
+          break;
+      printf("%i\n", i);
+      i = (i+1)%G.editing_panes.size;
+      printf("%i\n", i);
+      G.editing_pane = G.editing_panes[i];
+      G.selected_pane = G.editing_pane;
+      break;}
+    case CONTROL('h'): {
+      int i;
+      for (i = 0; i < G.editing_panes.size; ++i)
+        if (G.editing_panes[i] == G.editing_pane)
+          break;
+      i = (i-1+G.editing_panes.size)%G.editing_panes.size;
+      G.editing_pane = G.editing_panes[i];
+      G.selected_pane = G.editing_pane;
+      break;}
     case ' ':
       mode_search();
       break;
@@ -1779,10 +1814,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_delete();
       break;
     case 'J':
-      buffer.move_y(G.center_pane->numchars_y()/2);
+      buffer.move_y(G.editing_pane->numchars_y()/2);
       break;
     case 'K':
-      buffer.move_y(-G.center_pane->numchars_y()/2);
+      buffer.move_y(-G.editing_pane->numchars_y()/2);
       break;
     }
   }
@@ -1792,16 +1827,16 @@ static void handle_rendering(float dt) {
   // boost marker when you move or change modes
   static Pos prev_pos;
   static Mode prev_mode;
-  if (prev_pos != G.center_pane->buffer->cursors[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
+  if (prev_pos != G.editing_pane->buffer->cursors[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
     G.marker_background_color.reset();
-    G.highlight_background_color.reset();
+    G.active_highlight_background_color.reset();
   }
-  prev_pos = G.center_pane->buffer->cursors[0].pos;
+  prev_pos = G.editing_pane->buffer->cursors[0].pos;
   prev_mode = G.mode;
 
   // update colors
   G.marker_background_color.tick(dt);
-  G.highlight_background_color.tick(dt);
+  G.active_highlight_background_color.tick(dt);
   G.bottom_pane_highlight.tick(dt);
   G.search_term_background_color.tick(dt);
 
@@ -1819,15 +1854,23 @@ static void handle_rendering(float dt) {
   // reflow panes
   G.bottom_pane->margin = 3;
   G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
-  G.center_pane->bounds = {0, 0, G.win_width, G.win_height - G.bottom_pane->bounds.h};
-  G.bottom_pane->bounds = {0, G.center_pane->bounds.y + G.center_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
-  G.center_pane->render();
+  int x = 0;
+  for (Pane *p : G.editing_panes) {
+    const int w = G.win_width / G.editing_panes.size;
+    const int h = G.win_height - G.bottom_pane->bounds.h;
+    p->bounds = {x, 0, w, h};
+    x += w;
+  }
+  G.bottom_pane->bounds = {0, G.editing_pane->bounds.y + G.editing_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
+
+  for (Pane *p : G.editing_panes)
+    p->render();
   G.bottom_pane->render();
 
   // update search buffer identifier list
   if (G.mode == MODE_SEARCH)
-    G.search_buffer.identifiers = G.center_pane->buffer->identifiers;
+    G.search_buffer.identifiers = G.editing_pane->buffer->identifiers;
 }
 
 Pos Buffer::to_visual_pos(Pos p) {
@@ -2911,9 +2954,9 @@ void Pane::render_as_dropdown() {
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y].slice);
 
   // highlight the line you're on
-  if (highlight_background_color) {
+  if (active_highlight_background_color) {
     for (int i = 0; i < b.cursors.size; ++i)
-      canvas.fill_background({0, b.cursors[i].y, {-1, 1}}, *highlight_background_color);
+      canvas.fill_background({0, b.cursors[i].y, {-1, 1}}, *active_highlight_background_color);
   }
 
   canvas.render(this->bounds.p);
@@ -3116,7 +3159,7 @@ void Pane::render_menu_popup(View<Slice> options) {
     canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i]);
 
   // highlight
-  canvas.fill_background({0, menu.current_match, {-1, 1}}, *this->highlight_background_color);
+  canvas.fill_background({0, menu.current_match, {-1, 1}}, *this->active_highlight_background_color);
 
   canvas.render(p);
   util_free(canvas);
@@ -3132,7 +3175,7 @@ void Pane::render_filesearch() {
 
 void Pane::render_textsearch() {
   render_single_line(Slice::create("search: "));
-  render_menu_popup(VIEW(G.main_pane.buffer->identifiers, slice));
+  render_menu_popup(VIEW(G.editing_pane->buffer->identifiers, slice));
 }
 
 void Pane::render_menu() {
@@ -3153,7 +3196,10 @@ void Pane::render_edit() {
     gutter.init(_gutter_width, this->numchars_y());
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
-      gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
+      if (line < b.lines.size)
+        gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
+      else
+        gutter.render_str({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, Slice::create(" ~"));
     gutter.render(this->bounds.p);
     util_free(gutter);
   }
@@ -3168,17 +3214,16 @@ void Pane::render_edit() {
   for (int y = 0, buf_y = buf_offset.y; buf_y < buf_y1; ++buf_y, ++y)
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y].slice);
 
-  if (this->syntax_highlight)
-    this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
+  this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
 
   // highlight the line you're on
-  if (this->highlight_background_color) {
+  const Color *highlight_background_color = G.editing_pane == this ? this->active_highlight_background_color : this->inactive_highlight_background_color;
+  if (highlight_background_color)
     for (int i = 0; i < b.cursors.size; ++i)
-      canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *this->highlight_background_color);
-  }
+      canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *highlight_background_color);
 
   // if there is a search term, highlight that as well
-  if (G.selected_pane == this && G.search_buffer.lines[0].length > 0) {
+  if (G.search_buffer.lines[0].length > 0) {
     Pos pos = {0, buf_offset.y};
     while (b.find(G.search_buffer.lines[0].slice, false, &pos) && pos.y < buf_y1)
       canvas.fill_background({buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
