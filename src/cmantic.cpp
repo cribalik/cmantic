@@ -333,67 +333,63 @@ struct Buffer {
   //
   enum UndoActionType {
     ACTIONTYPE_INSERT_SLICE,
-    ACTIONTYPE_DELETE_N,
+    ACTIONTYPE_DELETE,
     ACTIONTYPE_CURSOR_REMOVE,
     ACTIONTYPE_CURSOR_MOVE,
   };
-  union UndoAction {
+  struct UndoAction {
     UndoActionType type;
+    union {
+      // ACTIONTYPE_INSERT_SLICE
+      struct {
+        String s;
+      } is;
 
-    // ACTIONTYPE_INSERT_SLICE
-    struct {
-      UndoActionType type;
-      String s;
+      // ACTIONTYPE_INSERT_CHAR
+      struct {
+        Utf8char c;
+      } ic;
+
+      // ACTIONTYPE_DELETE
+      struct {
+        String s;
+      } rm;
+
+      // ACTIONTYPE_CURSOR_REMOVE
+      struct {
+        Cursor cursor;
+      } cr;
+
+      // ACTIONTYPE_CURSOR_MOVE
+      struct {
+        int marker_idx;
+        Pos from;
+        Pos to;
+      } cm;
     };
 
-    // ACTIONTYPE_INSERT_CHAR
-    struct {
-      UndoActionType type;
-      Utf8char c;
-    };
-
-    // ACTIONTYPE_DELETE_N
-    struct {
-      UndoActionType type;
-      int marker_idx;
-      int num_chars;
-    };
-
-    // ACTIONTYPE_CURSOR_REMOVE
-    struct {
-      UndoActionType type;
-      Cursor cursor;
-    };
-
-    // ACTIONTYPE_CURSOR_MOVE
-    struct {
-      UndoActionType type;
-      int marker_idx;
-      Pos from;
-      Pos to;
-    };
 
     static UndoAction cursor_remove(Cursor cursor) {
       UndoAction a;
       a.type = ACTIONTYPE_CURSOR_REMOVE;
-      a.cursor = cursor;
+      a.cr = {cursor};
       return a;
     }
 
     static UndoAction delete_range(Buffer &b, Range r) {
       UndoAction a;
-      a.type = ACTIONTYPE_INSERT_SLICE;
+      a.type = ACTIONTYPE_DELETE;
       // turn range into a string with endlines in it
       // TODO: We could probably do some compression on this
       if (r.a.y == r.b.y) {
         if (r.b.x == b.lines[r.a.y].length) {
           StringBuffer s = {};
-          s += String::create(b.lines[r.a.y](r.a.x, r.b.x));
+          s += b.lines[r.a.y](r.a.x, r.b.x);
           s += '\n';
-          a.s = s.string;
+          a.rm = {s.string};
         }
         else
-          a.s = String::create(b.lines[r.a.y](r.a.x, r.b.x));
+          a.rm = {String::create(b.lines[r.a.y](r.a.x, r.b.x))};
       }
       else {
         // first row
@@ -405,7 +401,7 @@ struct Buffer {
           s += '\n';
         }
         s += b.lines[r.b.y](0, r.b.x+1);
-        a.s = s.string;
+        a.rm = {s.string};
       }
       return a;
     }
@@ -413,23 +409,21 @@ struct Buffer {
     static UndoAction cursor_move(int marker_idx, Pos from, Pos to) {
       UndoAction a;
       a.type = ACTIONTYPE_CURSOR_MOVE;
-      a.marker_idx = marker_idx;
-      a.from = from;
-      a.to = to;
+      a.cm = {marker_idx, from, to};
       return a;
     }
 
     static UndoAction insert_slice(Slice s) {
       UndoAction a;
       a.type = ACTIONTYPE_INSERT_SLICE;
-      a.s = String::create(s);
+      a.is = {String::create(s)};
       return a;
     }
 
     static UndoAction insert_char(Utf8char c) {
       UndoAction a;
       a.type = ACTIONTYPE_INSERT_SLICE;
-      a.c = c;
+      a.ic = {c};
       return a;
     }
   };
@@ -777,12 +771,13 @@ static void tokenize(Buffer &b) {
     Slice line = b.lines[y].slice;
 
     // endline
+    char c;
     if (x >= b.lines[y].length) {
       tokens += {TOKEN_EOL, x, y};
       ++y, x = 0;
       goto token_done;
     }
-    char c = line[x];
+    c = line[x];
 
     // whitespace
     if (isspace(c)) {
