@@ -1,5 +1,8 @@
 /*
  * TODO:
+ * Undo
+ * Retokenize on edit
+ * Goto definition
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -7,8 +10,6 @@
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
- * Undo
- * Goto definition
  * Folding
  * Multiuser editing
  * Pane stack
@@ -210,6 +211,7 @@ struct TokenResult {
   int tok;
   Pos a;
   Pos b;
+  Slice operator_str;
 };
 
 struct Buffer {
@@ -597,6 +599,7 @@ static const Slice operators[] = {
   {(char*)"<<", 2},
   {(char*)">>", 2},
   {(char*)"++", 2},
+  {(char*)"::", 2},
   {(char*)"--", 2},
   {(char*)"+", 1},
   {(char*)"-", 1},
@@ -605,6 +608,7 @@ static const Slice operators[] = {
   {(char*)"&", 1},
   {(char*)"%", 1},
   {(char*)"=", 1},
+  {(char*)":", 1},
   {(char*)"<", 1},
   {(char*)">", 1},
 };
@@ -1264,7 +1268,6 @@ static void _filetree_fill(Path &path) {
   if (!File::list_files(path, &files))
     goto err;
 
-  #if 1
   for (StringBuffer f : files) {
     path.push(f);
     if (File::filetype(path) == FILETYPE_DIR)
@@ -1274,7 +1277,6 @@ static void _filetree_fill(Path &path) {
     }
     path.pop();
   }
-  #endif
 
   err:
   util_free(files);
@@ -1314,7 +1316,7 @@ static void state_init() {
   G.default_gutter_background_color = G.default_background_color;
   G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
-  G.operator_color =                        COLOR_RED;
+  G.operator_color =                        COLOR_WHITE; // COLOR_RED;
   G.comment_color = COLOR_BLUEGREY;
   G.identifier_color = COLOR_GREEN;
   G.default_search_term_text_color = G.search_term_text_color = COLOR_WHITE;
@@ -2836,6 +2838,7 @@ TokenResult Buffer::token_read(Pos *p, int y_end) {
         result.tok = TOKEN_OPERATOR;
         result.a = {x,y};
         result.b = {x+operators[i].length-1, y};
+        result.operator_str = lines[y](x, x + operators[i].length);
         x += operators[i].length;
         goto done;
       }
@@ -2981,23 +2984,29 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         }
 
         // check for functions
-        // we assume <identifier> <identifier>( is a function declaration
+        // we assume "<identifier> [<identifier><operators>]* <identifier>(" is a function declaration
         // TODO: @utf8
         if (identifier != "return") {
           Pos p = pos;
-          Pos colon_chain_start = prev;
-          TokenResult t2;
-          bool colon = false;
-          while (t2 = b.token_read(&p, y1), t2.tok == ':')
-            colon = true;
-          if (t2.tok == TOKEN_IDENTIFIER && b.token_read(&p, y1).tok == '(') {
-            if (colon) {
-              render_highlight(colon_chain_start, t2.b, G.identifier_color);
-            }
-            else {
-              render_highlight(t2.a, t2.b, G.identifier_color);
-            }
+          t = b.token_read(&p, y1);
+          while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
+            t = b.token_read(&p, y1);
+          if (t.tok != TOKEN_IDENTIFIER)
+            break;
+          Pos fun_start = t.a;
+          Pos fun_end = t.b;
+          t = b.token_read(&p, y1);
+
+          if (t.tok == TOKEN_OPERATOR && t.operator_str == "::") {
+            t = b.token_read(&p, y1);
+            if (t.tok != TOKEN_IDENTIFIER)
+              break;
+            fun_end = t.b;
+            t = b.token_read(&p, y1);
           }
+
+          if (t.tok == '(')
+            render_highlight(fun_start, fun_end, G.identifier_color);
         }
       } break;
 
@@ -3478,11 +3487,6 @@ int main(int, const char *[])
   state_init();
 
   test();
-
-  /* open a buffer */
-  // Buffer *b = Buffer::from_file(Slice::create("./src/cmantic.cpp"));
-  // G.buffers.push(b);
-  // G.main_pane.buffer = b;
 
   for (;;) {
     static u32 ticks = SDL_GetTicks();
