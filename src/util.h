@@ -732,6 +732,7 @@ union StringBuffer {
     int length;
     int cap;
   };
+  String string;
   Slice slice;
 
   void resize(int l) {
