@@ -272,6 +272,14 @@ union Array {
     items[size-1] = T();
   }
 
+  template<class U>
+  T* find(const U& u) {
+    for (int i = 0; i < size; ++i)
+      if (items[i] == u)
+        return items + i;
+    return 0;
+  }
+
   void inserta(int i, const T *items, int n) {
     pushn(n);
     memmove(items+i+n, items+i, (size-i-n)*sizeof(T));
@@ -703,6 +711,13 @@ union String {
 
   STRING_METHODS_DECLARATION;
 };
+
+static bool operator==(String a, String b) {
+  return a.slice == b.slice;
+}
+static bool operator==(String a, Slice b) {
+  return a.slice == b;
+}
 
 void util_free(String &s) {
   if (s.chars)

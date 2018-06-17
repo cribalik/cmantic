@@ -108,25 +108,10 @@ enum Token {
   TOKEN_BLOCK_COMMENT       = -7,
   TOKEN_BLOCK_COMMENT_BEGIN = -8,
   TOKEN_BLOCK_COMMENT_END   = -9,
-  TOKEN_LINE_COMMENT  = -10,
+  TOKEN_LINE_COMMENT        = -10,
   TOKEN_OPERATOR            = -11,
+  TOKEN_EOF                 = -12,
 };
-
-struct TokenInfo {
-  Token token;
-  int x;
-};
-
-void util_free(TokenInfo) {}
-
-static int calc_num_chars(int i) {
-  int result = 0;
-  while (i > 0) {
-    ++result;
-    i /= 10;
-  }
-  return result;
-}
 
 struct Pos {
   int x,y;
@@ -144,14 +129,50 @@ struct Pos {
   bool operator==(Pos p) {
     return x == p.x && y == p.y;
   }
+  bool operator<(Pos p) {
+    if (y == p.y)
+      return x < p.x;
+    return y < p.y;
+  }
+  bool operator<=(Pos p) {
+    if (y == p.y)
+      return x <= p.x;
+    return y <= p.y;
+  }
 };
+
+struct TokenInfo {
+  Token token;
+  Pos a;
+  Pos b;
+};
+
+void util_free(TokenInfo) {}
+
+static int calc_num_chars(int i) {
+  int result = 0;
+  while (i > 0) {
+    ++result;
+    i /= 10;
+  }
+  return result;
+}
 
 static Pos operator+(Pos a, Pos b) {
   return {a.x+b.x, a.y+b.y};
 }
 
-#define IS_NUMBER_HEAD(c) (isdigit(c))
-#define IS_NUMBER_TAIL(c) (isdigit(c) || ((c) >= 'A' && (c) <= 'F') || ((c) >= 'a' && (c) <= 'f') || (c) == 'x')
+static bool is_number_head(char c) {
+  return isdigit(c);
+}
+
+static bool is_number_tail(char c) {
+  return isdigit(c) || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f') || c == 'x';
+}
+
+static bool is_number_modifier(char c) {
+  return c == 'u' || c == 'l' || c == 'L' || c == 'f';
+}
 
 static bool is_identifier_head(char c) {
   return isalpha(c) || c == '_' || c == '#';
@@ -199,7 +220,7 @@ struct Buffer {
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
   /* parser stuff */
-  Array<Array<TokenInfo>> tokens;
+  Array<TokenInfo> tokens;
   Array<String> identifiers;
 
   #define GHOST_EOL -1
@@ -276,6 +297,7 @@ struct Buffer {
   Utf8char getchar(int marker_idx);
   void deduplicate_cursors();
 
+  TokenInfo* token_find(Pos p);
   TokenResult token_read(Pos *p, int y_end);
 
   static Buffer* from_file(Slice filename);
@@ -562,73 +584,6 @@ static void status_message_set(const char *fmt, ...) {
   G.status_message_buffer[0].appendv(fmt, args);
 }
 
-/****** @TOKENIZER ******/
-
-static void tokenize(Buffer &b) {
-  static StringBuffer identifier_buffer;
-  int x = 0, y = 0;
-
-  /* reset old tokens */
-  for (int i = 0; i < b.tokens.size; ++i)
-    util_free(b.tokens[i]);
-  b.tokens.resize(b.lines.size);
-  for (int i = 0; i < b.tokens.size; ++i)
-    b.tokens[i] = {};
-
-  for (;;) {
-    /* whitespace */
-    // TODO: @utf8
-    while (b.getchar(x, y).isspace())
-      if (b.advance(&x, &y))
-        return;
-
-    /* TODO: how do we handle comments ? */
-
-    /* identifier */
-    char *row = b.lines[y].chars;
-    int rowsize = b.lines[y].length;
-    if (is_identifier_head(row[x])) {
-      identifier_buffer.length = 0;
-      /* TODO: predefined keywords */
-      b.tokens[y].push({TOKEN_IDENTIFIER, x});
-
-      identifier_buffer += row[x];
-      for (++x; x < rowsize; ++x) {
-        if (!is_identifier_tail(row[x]))
-          break;
-        identifier_buffer += row[x];
-      }
-      /* check if identifier already exists */
-      for (int i = 0; i < b.identifiers.size; ++i)
-        if (identifier_buffer.slice == b.identifiers[i].slice)
-          goto identifier_done;
-
-      b.identifiers.push(identifier_buffer.copy());
-
-      identifier_done:;
-    }
-
-    /* number */
-    else if (isdigit(row[x])) {
-      b.tokens[y].push({TOKEN_NUMBER, x});
-      for (; x < rowsize && isdigit(row[x]); ++x);
-      if (b.getchar(x, y) == '.')
-        for (; x < rowsize && isdigit(row[x]); ++x);
-    }
-
-    /* single char token */
-    else {
-      b.tokens[y].push({(Token)row[x], x});
-      if (b.advance(&x, &y))
-        return;
-    }
-
-    if (x == rowsize)
-      if (b.advance(&x, &y))
-        return;
-  }
-}
-
 // MUST BE REVERSE SIZE ORDER
 static const Slice operators[] = {
   {(char*)"===", 3},
@@ -653,6 +608,132 @@ static const Slice operators[] = {
   {(char*)"<", 1},
   {(char*)">", 1},
 };
+
+/****** @TOKENIZER ******/
+
+static void tokenize(Buffer &b) {
+  Array<TokenInfo> tokens = b.tokens;
+  util_free(tokens);
+  int x = 0;
+  int y = 0;
+
+  for (;;) {
+    #define NEXT(n) (x += n, c = line[x])
+    if (y >= b.lines.size)
+      break;
+    Slice line = b.lines[y].slice;
+
+    // endline
+    if (x >= b.lines[y].length) {
+      tokens += {TOKEN_EOL, x, y};
+      ++y, x = 0;
+      goto token_done;
+    }
+    char c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT(1);
+      goto token_done;
+    }
+
+    // identifier
+    if (is_identifier_head(c)) {
+      tokens += {TOKEN_IDENTIFIER, x, y};
+      int identifier_start = x;
+      NEXT(1);
+      while (is_identifier_tail(c))
+        NEXT(1);
+      Slice identifier = line(identifier_start, x);
+      // check if identifier is already added
+      String *s = b.identifiers.find(identifier);
+      if (!s)
+        b.identifiers += String::create(identifier);
+      goto token_done;
+    }
+
+    // block comment
+    if (line.begins_with(x, "/*")) {
+      tokens += {TOKEN_BLOCK_COMMENT, x, y};
+      NEXT(2);
+      // goto matching end block
+      for (;;) {
+        // EOF
+        if (y >= b.lines.size)
+          goto token_done;
+        // EOL
+        if (x >= line.length) {
+          ++y;
+          line = b.lines[y].slice;
+          x = 0;
+          continue;
+        }
+        // End block
+        if (line.begins_with(x, "*/")) {
+          NEXT(2);
+          break;
+        }
+        NEXT(1);
+      }
+      goto token_done;
+    }
+
+    // line comment
+    if (line.begins_with(x, "//")) {
+      tokens += {TOKEN_LINE_COMMENT, x, y};
+      x = line.length;
+      goto token_done;
+    }
+
+    // number
+    if (is_number_head(c)) {
+      tokens += {TOKEN_NUMBER, x, y};
+      NEXT(1);
+      while (is_number_tail(c))
+        NEXT(1);
+      if (line[x] == '.' && x+1 < line.length && isdigit(line[x+1])) {
+        NEXT(2);
+        while (isdigit(c)) NEXT(1);
+      }
+      while (is_number_modifier(c))
+        NEXT(1);
+      goto token_done;
+    }
+
+    // string
+    if (c == '"' || c == '\'') {
+      tokens += {TOKEN_STRING, x, y};
+      const char str_char = c;
+      NEXT(1);
+      while (x < line.length && c != str_char)
+        NEXT(1);
+      if (x < line.length)
+        NEXT(1);
+      goto token_done;
+    }
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(operators); ++i) {
+      if (line.begins_with(x, operators[i])) {
+        tokens += {TOKEN_OPERATOR, x, y};
+        NEXT(operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    tokens += {(Token)c, x, y};
+    NEXT(1);
+
+    token_done:;
+    tokens.last().b = {x, y};
+    #undef NEXT
+  }
+
+  tokens += {TOKEN_EOF, 0, b.lines.size, 0, b.lines.size};
+
+  b.tokens = tokens;
+}
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
   #ifdef OS_WINDOWS
@@ -1672,20 +1753,15 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         Pos p = buffer.cursors[i].pos;
         int depth = 0;
-        if (buffer.getchar(p) == '}') {
-          puts("already on }");
+        if (buffer.getchar(p) == '}')
           buffer.advance(p);
-        }
-        while (1) {
-          TokenResult t = buffer.token_read(&p, buffer.lines.size);
-          if (!t.tok)
-            break;
-          if (t.tok == '{') 
+        for (TokenInfo *t = buffer.token_find(p); t < buffer.tokens.end(); ++t) {
+          if (t->token == '{') 
             ++depth;
-          if (t.tok == '}') {
+          if (t->token == '}') {
             --depth;
             if (depth <= 0) {
-              buffer.move_to(i, t.a);
+              buffer.move_to(i, t->a);
               break;
             }
           }
@@ -1693,8 +1769,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       buffer.deduplicate_cursors();
       break;}
-      buffer.find_and_move('}', false);
-      break;
     case ':':
       mode_menu();
       break;
@@ -2608,6 +2682,13 @@ Utf8char Buffer::getchar(int marker_idx) {
   return Utf8char::create(pos.x >= lines[pos.y].length ? '\n' : lines[pos.y][pos.x]);
 }
 
+TokenInfo* Buffer::token_find(Pos p) {
+  for (int i = 1; i < tokens.size; ++i)
+    if (tokens[i-1].a <= p && p < tokens[i].a)
+      return &tokens[i];
+  return tokens.end();
+}
+
 TokenResult Buffer::token_read(Pos *p, int y_end) {
   TokenResult result = {};
   int x,y;
@@ -2696,13 +2777,13 @@ TokenResult Buffer::token_read(Pos *p, int y_end) {
     }
 
     /* number */
-    if (IS_NUMBER_HEAD(c)) {
+    if (is_number_head(c)) {
       result.tok = TOKEN_NUMBER;
       result.a = {x, y};
       while (x < lines[y].length) {
         result.b = {x, y};
         c = lines[y][++x];
-        if (!IS_NUMBER_TAIL(c))
+        if (!is_number_tail(c))
           break;
       }
       if (x == lines[y].length)
@@ -3265,7 +3346,7 @@ void Canvas::render_strf(Pos p, const Color *text_color, const Color *background
   va_end(args);
 }
 
-void Canvas::render(Pos offset) {
+void Canvas::render(Pos pos) {
   #if 0
   printf("PRINTING SCREEN\n\n");
   for (int i = 0; i < h; ++i) {
@@ -3287,31 +3368,31 @@ void Canvas::render(Pos offset) {
 
     // right side
     push_quad(
-      {(u16)(offset.x + size.x),                 (u16)(offset.y + shadow_offset),          shadow_color},
-      {(u16)(offset.x + size.x),                 (u16)(offset.y + size.y),                 shadow_color},
-      {(u16)(offset.x + size.x + shadow_offset), (u16)(offset.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(offset.x + size.x + shadow_offset), (u16)(offset.y + shadow_offset),          shadow_color2});
+      {(u16)(pos.x + size.x),                 (u16)(pos.y + shadow_offset),          shadow_color},
+      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color},
+      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + shadow_offset),          shadow_color2});
 
     // bottom side
     push_quad(
-      {(u16)(offset.x + shadow_offset),          (u16)(offset.y + size.y),                 shadow_color},
-      {(u16)(offset.x + shadow_offset),          (u16)(offset.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(offset.x + size.x + shadow_offset), (u16)(offset.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(offset.x + size.x),                 (u16)(offset.y + size.y),                 shadow_color});
+      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y),                 shadow_color},
+      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color});
   }
 
   // render base background
-  push_square_quad((u16)offset.x, (u16)(offset.x+size.x), (u16)(offset.y), (u16)(offset.y+size.y), background);
-  offset.x += margin;
-  offset.y += margin;
+  push_square_quad((u16)pos.x, (u16)(pos.x+size.x), (u16)(pos.y), (u16)(pos.y+size.y), background);
+  pos.x += margin;
+  pos.y += margin;
 
   // render background
   for (int y = 0; y < h; ++y) {
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
       if (x1 < w && background_colors[y*w + x1] == background_colors[y*w + x0])
         continue;
-      Pos p0 = char2pixel(x0,y) + offset;
-      Pos p1 = char2pixel(x1,y+1) + offset;
+      Pos p0 = char2pixel(x0,y) + pos;
+      Pos p1 = char2pixel(x1,y+1) + pos;
       const Color c = background_colors[y*w + x0];
       push_square_quad((u16)p0.x, (u16)p1.x, (u16)p0.y, (u16)p1.y, c);
       x0 = x1;
@@ -3323,11 +3404,11 @@ void Canvas::render(Pos offset) {
   for (int row = 0; row < h; ++row) {
     G.tmp_render_buffer.clear();
     G.tmp_render_buffer.append(&chars[row*w], w);
-    int y = char2pixely(row+1) + text_offset_y + offset.y;
+    int y = char2pixely(row+1) + text_offset_y + pos.y;
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
       if (x1 < w && text_colors[row*w + x1] == text_colors[row*w + x0])
         continue;
-      int x = char2pixelx(x0) + offset.x;
+      int x = char2pixelx(x0) + pos.x;
       push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, text_colors[row*w + x0]);
       x0 = x1;
     }
@@ -3506,8 +3587,6 @@ int main(int, const char *[])
 
     SDL_GL_SwapWindow(G.window);
 
-    if (G.flags.cursor_dirty)
-      puts("Cursor dirty");
     G.flags.cursor_dirty = false;
   }
 }
