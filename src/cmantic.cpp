@@ -393,7 +393,7 @@ struct Buffer {
           s += b.lines[r.a.y].slice;
           s += '\n';
         }
-        s += b.lines[r.b.y](0, r.b.x+1);
+        s += b.lines[r.b.y](0, r.b.x);
         a.rm = {s.string};
       }
       return a;

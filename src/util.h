@@ -253,7 +253,7 @@ union Array {
   }
 
   void remove_slown(int i, int n) {
-    for (int j = 0; i < n; ++j)
+    for (int j = 0; j < n; ++j)
       util_free(items[i+j]);
     memmove(items+i, items+i+n, (size-i-n)*sizeof(T));
     size -= n;
