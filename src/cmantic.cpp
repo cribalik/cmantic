@@ -1388,6 +1388,7 @@ static Keyword keywords[] = {
   {"#elif", KEYWORD_MACRO},
   {"#else", KEYWORD_MACRO},
   {"#if", KEYWORD_MACRO},
+  {"#error", KEYWORD_MACRO},
 
   // flow control
 
@@ -1675,11 +1676,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
 
       Slice filename = *opt;
+      // TODO: selections should have metadata baked in, and not hack it like this (what if there are miultiple files with the same name?)
+      for (Path p : G.files) {
+        if (filename == p.name()) {
+          filename = p.string.slice;
+          break;
+        }
+      }
 
       Buffer *b = 0;
       for (Buffer *bb : G.buffers) {
         if (filename == bb->filename.slice) {
           b = bb;
+          filename = bb->filename.slice;
           break;
         }
       }
@@ -2462,9 +2471,8 @@ void Buffer::remove_range(Pos a, Pos b) {
   else {
     // append end of b onto a
     lines[a.y].length = a.x;
-    if (b.y < lines.size) {
+    if (b.y < lines.size)
       lines[a.y] += lines[b.y](b.x, -1);
-    }
     // delete lines a+1 to and including b
     lines.remove_slown(a.y+1, b.y - a.y);
   }
@@ -3360,7 +3368,14 @@ void Pane::render_menu_popup(View<Slice> options) {
 
 void Pane::render_filesearch() {
   render_single_line(Slice::create("open: "));
-  render_menu_popup(VIEW(G.files, string.slice));
+  Array<Slice> filenames = {};
+  if (G.flags.cursor_dirty) {
+    filenames.resize(G.files.size);
+    for (Path p : G.files)
+      filenames += p.name();
+  }
+  render_menu_popup(view(filenames));
+  util_free(filenames);
 }
 
 void Pane::render_textsearch() {

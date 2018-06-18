@@ -1078,6 +1078,13 @@ struct Path {
       return string(x+1, -1);
     return string.slice;
   }
+
+  static Slice name(Slice path) {
+    int x;
+    if (path.find_r(separator, &x))
+      return path(x+1, -1);
+    return path;
+  }
 };
 
 void util_free(Path &p) {
