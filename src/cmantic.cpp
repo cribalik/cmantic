@@ -382,14 +382,7 @@ struct Buffer {
       // turn range into a string with endlines in it
       // TODO: We could probably do some compression on this
       if (r.a.y == r.b.y) {
-        if (r.b.x == b.lines[r.a.y].length) {
-          StringBuffer s = {};
-          s += b.lines[r.a.y](r.a.x, r.b.x);
-          s += '\n';
-          a.rm = {s.string};
-        }
-        else
-          a.rm = {String::create(b.lines[r.a.y](r.a.x, r.b.x))};
+        a.rm = {String::create(b.lines[r.a.y](r.a.x, r.b.x))};
       }
       else {
         // first row
@@ -2439,54 +2432,41 @@ void Buffer::delete_line() {
 
 void Buffer::remove_range(Pos a, Pos b) {
   modified = true;
-  if (a.y > b.y || (a.y == b.y && a.x > b.x))
+  if (b < a)
     swap(a, b);
+
+  if (b.x == lines[b.y].length) {
+    ++b.y;
+    b.x = 0;
+  }
 
   printf("{%i %i} {%i %i}\n", a.x, a.y, b.x, b.y);
   undo_actions += UndoAction::delete_range(*this, {a,b});
 
-  // All cursors that are in range should be moved to beginning of range
-  for (Cursor &c : cursors)
-    if ((a <= c.pos && c.pos <= b) || (b.x == lines[b.y].length && c.y == b.y+1 && c.x == 0))
+  // All cursors that are inside range should be moved to beginning of range
+  for (Cursor &c : cursors) {
+    if (a <= c.pos && c.pos <= b)
       c.pos = a;
-  // All cursors that are on the same row as b, but after b should move to the left
-  for (Cursor &c : cursors)
-    if (c.y == b.y && c.x > b.x) {
-      if (a.y == b.y)
-        c.x -= b.x - a.x + 1;
-      else
-        c.x -= b.x;
-    }
-  // All cursors after b.y should move up
-  if (b.y > a.y) {
-    for (Cursor &c : cursors) {
-      if (c.y > b.y)
-        c.y -= b.y-a.y;
+    // If lines were deleted, all cursors below b.y should move up
+    else if (b.y > a.y && c.y > b.y)
+      c.y -= b.y-a.y;
+    // All cursors that are on the same row as b, but after b should be merged onto line a
+    else if (c.y == b.y && c.x > b.x) {
+      c.y = a.y;
+      c.x = a.x + c.x - b.x - 1;
     }
   }
 
-  if (a.y == b.y) {
-    if (b.x == lines[a.y].length) {
-      lines[a.y].length = a.x;
-
-      // should we remove the line?
-      if (a.y+1 < lines.size) {
-        lines[a.y] += lines[a.y+1];
-        lines.remove_slow(a.y+1);
-      }
-    }
-    else
-      lines[a.y].remove(a.x, b.x-a.x+1);
-    return;
-  }
+  if (a.y == b.y)
+    lines[a.y].remove(a.x, b.x-a.x+1);
   else {
-    if (b.x == lines[b.y].length) {
-      lines.remove_slown(a.y, b.y - a.y + 1);
+    // append end of b onto a
+    lines[a.y].length = a.x;
+    if (b.y < lines.size) {
+      lines[a.y] += lines[b.y](b.x, -1);
     }
-    else {
-      lines.remove_slown(a.y, b.y - a.y);
-      lines[b.y].remove(0, b.x+1);
-    }
+    // delete lines a+1 to and including b
+    lines.remove_slown(a.y+1, b.y - a.y);
   }
   deduplicate_cursors();
 }
