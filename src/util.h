@@ -203,6 +203,11 @@ union Array {
     return items[size-1];
   }
 
+  Array<T> copy_shallow() {
+    a.resize(size);
+    memcpy(a.items, items, a.size * sizeof(T));
+  }
+
   void zero() {
     memset(items, 0, sizeof(T) * size);
   }
@@ -235,10 +240,10 @@ union Array {
     size = newsize;
   }
 
-  void reserve(int size) {
+  void reserve(int l) {
     int oldsize = size;
-    if (size > size)
-      pushn(size-size);
+    if (l > size)
+      pushn(l-size);
     size = oldsize;
   }
 
@@ -253,6 +258,8 @@ union Array {
   }
 
   void remove_slown(int i, int n) {
+    if (!n)
+      return;
     for (int j = 0; j < n; ++j)
       util_free(items[i+j]);
     memmove(items+i, items+i+n, (size-i-n)*sizeof(T));
