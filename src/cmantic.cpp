@@ -1995,7 +1995,6 @@ Pos Buffer::to_visual_pos(Pos p) {
 void Buffer::move_to_y(int marker_idx, int y) {
   G.flags.cursor_dirty = true;
 
-  const Pos prev_pos = cursors[marker_idx].pos;
   y = clamp(y, 0, lines.size-1);
   cursors[marker_idx].y = y;
 }
@@ -2003,7 +2002,6 @@ void Buffer::move_to_y(int marker_idx, int y) {
 void Buffer::move_to_x(int marker_idx, int x) {
   G.flags.cursor_dirty = true;
 
-  const Pos prev_pos = cursors[marker_idx].pos;
   x = clamp(x, 0, lines[cursors[marker_idx].y].length);
   cursors[marker_idx].x = x;
   cursors[marker_idx].ghost_x = lines[cursors[marker_idx].y].visual_offset(x, G.tab_width);
@@ -2037,8 +2035,6 @@ void Buffer::move_y(int marker_idx, int dy) {
 
   G.flags.cursor_dirty = true;
 
-  const Pos prev_pos = cursors[marker_idx].pos;
-
   Pos &pos = cursors[marker_idx].pos;
   int ghost_x = cursors[marker_idx].ghost_x;
 
@@ -2056,8 +2052,6 @@ void Buffer::move_x(int marker_idx, int dx) {
   if (!dx)
     return;
   G.flags.cursor_dirty = true;
-
-  const Pos prev_pos = cursors[marker_idx].pos;
 
   Pos &pos = cursors[marker_idx].pos;
   if (dx > 0)

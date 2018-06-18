@@ -204,8 +204,10 @@ union Array {
   }
 
   Array<T> copy_shallow() {
+    Array<T> a = {};
     a.resize(size);
     memcpy(a.items, items, a.size * sizeof(T));
+    return a;
   }
 
   void zero() {
