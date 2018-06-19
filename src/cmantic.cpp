@@ -1147,9 +1147,11 @@ static bool dropdown_autocomplete(Buffer &b) {
   Pos start;
   if (!b.find_start_of_identifier(b.cursors[0].pos, &start))
     return false;
+  b.action_begin();
   for (int i = b.cursors[0].x - start.x; i; --i)
     b.delete_char();
   b.insert(G.dropdown_buffer[G.dropdown_buffer.cursors[0].y].slice);
+  b.action_end();
   return true;
 }
 
@@ -2383,7 +2385,7 @@ void Buffer::remove_range(Pos a, Pos b) {
     // All cursors that are on the same row as b, but after b should be merged onto line a
     else if (c.y == b.y && c.x >= b.x) {
       c.y = a.y;
-      c.x = a.x + c.x - b.x;
+      c.x = a.x + c.x - b.x - 1;
     }
   }
 
@@ -2636,7 +2638,6 @@ void Buffer::insert(const Pos a, Slice s) {
 
 void Buffer::insert(Slice s) {
   action_begin();
-  modified = true;
 
   for (int i = 0; i < cursors.size; ++i)
     insert(cursors[i].pos, s);
