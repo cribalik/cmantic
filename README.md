@@ -1,5 +1,5 @@
 # cmantic
-Terminal text editor mainly for C
+Cross-platform text editor mainly for C/C++, with features like fuzzy autocomplete, multiple cursors, and more.
 
 ![cmantic screenshot](https://raw.githubusercontent.com/cribalik/cmantic/master/screenshot.png)
 
