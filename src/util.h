@@ -230,6 +230,11 @@ union Array {
       insert(i, T());
   }
 
+  void insertz(int i, int n) {
+    insertn(i, n);
+    memset(items+i, 0, sizeof(T)*n);
+  }
+
   void insert(int i, T value) {
     pushn(1);
     memmove(items+i+1, items+i, (size-i)*sizeof(T));
@@ -543,7 +548,7 @@ struct Slice {
 
   static int prev(const char *chars, int i) {
     for (--i;; --i) {
-      if (i < 0)
+      if (i <= 0)
         return 0;
       if (is_utf8_trail(chars[i]))
         continue;
@@ -769,12 +774,22 @@ union StringBuffer {
   }
 
   void insert(int i, const char *str, int n) {
+    if (i == length) {
+      append(str, n);
+      return;
+    }
+
     extend(n);
     memmove(chars+i+n, chars+i, length-i-n);
     memcpy(chars+i, str, n);
   }
 
   void insert(int i, char c, int n) {
+    if (i == length) {
+      append(c, n);
+      return;
+    }
+
     extend(n);
     memmove(chars+i+n, chars+i, length-i-n);
     for (int j = i; j < i+n; ++j)
@@ -782,6 +797,11 @@ union StringBuffer {
   }
 
   void insert(int i, char c) {
+    if (i == length) {
+      append(c);
+      return;
+    }
+
     extend(1);
     memmove(chars+i+1, chars+i, length-i-1);
     chars[i] = c;
@@ -833,6 +853,12 @@ union StringBuffer {
 
   void append(StringBuffer s) {
     this->append(TO_STR(s));
+  }
+
+  void append(char c, int n) {
+    extend(n);
+    for (int i = length-n; i < length; ++i)
+      chars[i] = c;
   }
 
   void append(const char *str, int n) {

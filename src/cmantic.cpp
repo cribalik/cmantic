@@ -289,15 +289,15 @@ struct Buffer {
   void insert(Utf8char ch);
   void delete_line_at(int y);
   void delete_line();
+  void delete_line(int y);
   void remove_range(Pos a, Pos b);
   void delete_char();
   void insert_tab();
   int getindent(int y);
   int indentdepth(int y, bool *has_statement);
-  int autoindent(const int y);
+  void autoindent(const int y);
   void autoindent();
   int isempty();
-  void push_line(const char *str);
   void push_line(Slice s);
   void insert_newline();
   void insert_newline_below();
@@ -415,6 +415,7 @@ struct Buffer {
       // record marker position
       undo_actions += UndoAction::cursor_snapshot(cursors);
       undo_action_groups += undo_action_groups.size;
+      deduplicate_cursors();
     }
   }
 
@@ -556,7 +557,6 @@ struct Pane {
     p.active_highlight_background_color = active_highlight_background_color;
     p.inactive_highlight_background_color = inactive_highlight_background_color;
   }
-
 };
 
 struct PoppedColor {
@@ -1175,6 +1175,7 @@ static void render_dropdown(Pane *pane) {
     G.dropdown_buffer.empty();
     for (int i = 0; i < best_matches.size; ++i)
       G.dropdown_buffer.push_line(best_matches[i].str);
+    G.dropdown_buffer.cursors[0] = {};
   }
 
   if (G.dropdown_buffer.isempty())
@@ -1870,9 +1871,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
           break;
-      printf("%i\n", i);
       i = (i+1)%G.editing_panes.size;
-      printf("%i\n", i);
       G.editing_pane = G.editing_panes[i];
       G.selected_pane = G.editing_pane;
       break;}
@@ -2021,12 +2020,8 @@ void Buffer::move_to(Pos p) {
 
 // NOTE: you must call deduplicate_cursors after this
 void Buffer::move_to(int marker_idx, Pos p) {
-  action_begin();
-
   move_to_y(marker_idx, p.y);
   move_to_x(marker_idx, p.x);
-
-  action_end();
 }
 
 void Buffer::move_y(int marker_idx, int dy) {
@@ -2065,11 +2060,9 @@ void Buffer::move_x(int marker_idx, int dx) {
 }
 
 void Buffer::move_x(int dx) {
-  action_begin();
   for (int i = 0; i < cursors.size; ++i)
     move_x(i, dx);
   deduplicate_cursors();
-  action_end();
 }
 
 void Buffer::move_y(int dy) {
@@ -2100,8 +2093,6 @@ Buffer* Buffer::from_file(Slice filename) {
   if (ferror(f))
     goto err;
   fseek(f, 0, SEEK_SET);
-
-  printf("Number of lines: %i\n", num_lines);
 
   // read content
   if (num_lines > 0) {
@@ -2323,30 +2314,6 @@ bool Buffer::find_and_move(Slice s, bool stay) {
   return true;
 }
 
-void Buffer::insert(Pos p, Slice s) {
-  action_begin();
-  modified = true;
-
-  undo_actions += UndoAction::insert_slice(p, s);
-  lines[p.y].insert(p.x, s);
-  // move cursors
-  for (int i = 0; i < cursors.size; ++i)
-    if (cursors[i].y == p.y && cursors[i].x >= p.x)
-      cursors[i].x += s.length;
-
-  action_end();
-}
-
-void Buffer::insert(Slice s) {
-  action_begin();
-  modified = true;
-
-  for (int i = 0; i < cursors.size; ++i)
-    insert(cursors[i].pos, s);
-
-  action_end();
-}
-
 void Buffer::remove_trailing_whitespace(int y) {
   int x = lines[y].length - 1;
   if (!getchar(x,y).isspace())
@@ -2380,57 +2347,6 @@ void Buffer::pretty(int y) {
   pretty_range(y, y+1);
 }
 
-void Buffer::insert(Pos pos, Utf8char ch) {
-  action_begin();
-
-  // TODO: handle '\n'
-  ...
-  #if 0
-  for (int i = 0; i < cursors.size; ++i) {
-    Pos &pos = cursors[i].pos;
-    lines.insertz(pos.y+1);
-
-    // after we add a new line we have to push y of all cursors below us
-    for (int j = 0; j < cursors.size; ++j) {
-      if (i == j) continue;
-      if (cursors[j].pos.y == pos.y) {
-        cursors[j].pos = {cursors[j].pos.x - pos.x, cursors[j].pos.y+1};
-        cursors[j].ghost_x = cursors[j].pos.x;
-      }
-      else if (cursors[j].pos.y > pos.y) {
-        ++cursors[j].pos.y;
-      }
-    }
-
-    lines[pos.y+1] += lines[pos.y](pos.x, -1);
-    lines[pos.y].length = pos.x;
-
-    ++cursors[i].y;
-    cursors[i].x = cursors[i].ghost_x = 0;
-    move_x(i, autoindent(pos.y));
-    // pretty(pos.y-1);
-  }
-  #endif
-
-  // TODO: @utf8
-  char c = ch.ansi();
-  insert(Slice{&c, 1});
-
-  if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
-    autoindent(pos.y);
-
-  action_end();
-}
-
-void Buffer::insert(Utf8char ch) {
-  action_begin();
-
-  for (int i = 0; i < cursors.size; ++i)
-    insert(cursors[i].pos, ch);
-
-  action_end();
-}
-
 void Buffer::delete_line(int y) {
   remove_range({0, y}, {lines[y].length, y});
 }
@@ -2439,12 +2355,12 @@ void Buffer::delete_line() {
   action_begin();
   for (Cursor c : cursors)
     delete_line(c.y);
-  deduplicate_cursors();
   action_end();
 }
 
 void Buffer::remove_range(Pos a, Pos b) {
   action_begin();
+  G.flags.cursor_dirty = true;
   modified = true;
 
   if (b < a)
@@ -2455,7 +2371,6 @@ void Buffer::remove_range(Pos a, Pos b) {
     b.x = 0;
   }
 
-  printf("{%i %i} {%i %i}\n", a.x, a.y, b.x, b.y);
   undo_actions += UndoAction::delete_range(*this, {a,b});
 
   for (Cursor &c : cursors) {
@@ -2466,9 +2381,9 @@ void Buffer::remove_range(Pos a, Pos b) {
     else if (b.y > a.y && c.y > b.y)
       c.y -= b.y-a.y;
     // All cursors that are on the same row as b, but after b should be merged onto line a
-    else if (c.y == b.y && c.x > b.x) {
+    else if (c.y == b.y && c.x >= b.x) {
       c.y = a.y;
-      c.x = a.x + c.x - b.x - 1;
+      c.x = a.x + c.x - b.x;
     }
   }
 
@@ -2485,7 +2400,6 @@ void Buffer::remove_range(Pos a, Pos b) {
   for (Cursor &c : cursors)
 	  if (c.y >= lines.size)
 		  c.y = lines.size - 1;
-  deduplicate_cursors();
 
   action_end();
 }
@@ -2507,19 +2421,6 @@ void Buffer::delete_char() {
       remove_range(pos, pos);
     }
   }
-
-  action_end();
-}
-
-void Buffer::insert_tab() {
-  action_begin();
-  modified = true;
-
-  if (tab_type == 0)
-    insert('\t');
-  else
-    for (int i = 0; i < tab_type; ++i)
-      insert(' ');
 
   action_end();
 }
@@ -2587,22 +2488,15 @@ int Buffer::indentdepth(int y, bool *has_statement) {
 
 void Buffer::autoindent() {
   action_begin();
+  modified = true;
 
-  for (int i = 0; i < cursors.size; ++i) {
-    Pos pos = cursors[i].pos;
-    if (lines[pos.y].length == 0)
-      break;
-    modified = true;
-    int diff = autoindent(pos.y);
-    for (int j = 0; j < cursors.size; ++j)
-      if (cursors[j].y == pos.y)
-        move_x(i, diff);
-  }
+  for (Cursor c : cursors)
+    autoindent(c.y);
 
   action_end();
 }
 
-int Buffer::autoindent(const int y) {
+void Buffer::autoindent(const int y) {
   action_begin();
 
   const char tab_char = tab_type ? ' ' : '\t';
@@ -2616,77 +2510,171 @@ int Buffer::autoindent(const int y) {
   // skip empty lines
   while (y_above >= 0 && lines[y_above].length == 0)
     --y_above;
-  if (y_above == 0) {
-    diff = -getindent(y);
-    goto done;
-  } else {
-    bool above_is_statement;
-    const int above_depth = indentdepth(y_above, &above_is_statement);
-    const bool above_is_indenting = (above_depth > 0 || above_is_statement);
-    const int above_indent = getindent(y_above);
-    int target_indent = above_indent;
-    if (above_is_indenting)
-      ++target_indent;
 
-    bool this_is_statement;
-    int this_depth = indentdepth(y, &this_is_statement);
-    bool this_is_deintenting = this_depth < 0 && !this_is_statement;
-    if (this_is_deintenting)
-      --target_indent;
+  bool above_is_statement;
+  const int above_depth = indentdepth(y_above, &above_is_statement);
+  const bool above_is_indenting = (above_depth > 0 || above_is_statement);
+  const int above_indent = getindent(y_above);
+  int target_indent = above_indent;
+  if (above_is_indenting)
+    ++target_indent;
 
-    // fix special case of
-    // if (...)
-    //   if (...)
-    //     some_thing_not_if
-    // this_line
-    if (!above_is_indenting && above_depth == 0) {
-      for (int yy = y_above-1; yy >= 0; --yy) {
-        bool is_statement;
-        const int indent = indentdepth(yy, &is_statement);
-        if (is_statement && indent == 0)
-          --target_indent;
-        else
-          break;
-      }
+  bool this_is_statement;
+  int this_depth = indentdepth(y, &this_is_statement);
+  bool this_is_deintenting = this_depth < 0 && !this_is_statement;
+  if (this_is_deintenting)
+    --target_indent;
+
+  // fix special case of
+  // if (...)
+  //   if (...)
+  //     some_thing_not_if
+  // this_line
+  if (!above_is_indenting && above_depth == 0) {
+    for (int yy = y_above-1; yy >= 0; --yy) {
+      bool is_statement;
+      const int indent = indentdepth(yy, &is_statement);
+      if (is_statement && indent == 0)
+        --target_indent;
+      else
+        break;
     }
-
-    diff = tab_size * (target_indent - current_indent);
   }
 
-  done:
+  diff = tab_size * (target_indent - current_indent);
+
   if (diff < -current_indent*tab_size)
     diff = -current_indent*tab_size;
+
   if (diff < 0)
-    remove_range({0,y}, {at_most(current_indent*tab_size, -diff), y});
-    // lines[y].remove(0, at_most(current_indent*tab_size, -diff));
+    remove_range({0, y}, {-diff - 1, y});
   if (diff > 0)
     for (int i = 0; i < diff; ++i)
-      insert({0, y}, tab_char);
-      // lines[y].insert(0, tab_char, diff);
+      insert(Pos{0, y}, Utf8char::create(tab_char));
 
   action_end();
-  return diff;
 }
 
 int Buffer::isempty() {
   return lines.size == 1 && lines[0].length == 0;
 }
 
-void Buffer::push_line(const char *str) {
-  modified = true;
-  int y = lines.size;
-  if (!isempty())
-    lines.push();
-  else
-    y = 0;
-  lines[y] += str;
-}
-
 void Buffer::push_line(Slice s) {
   action_begin();
 
-  insert({lines[lines.size-1].length, lines.size-1}, '\n');
+  if (lines.size > 1 || lines[0].length > 0)
+    insert({lines[lines.size-1].length, lines.size-1}, Utf8char::create('\n'));
   insert({0, lines.size-1}, s);
+
+  action_end();
+}
+
+void Buffer::insert(const Pos a, Slice s) {
+  action_begin();
+  G.flags.cursor_dirty = true;
+  modified = true;
+
+  undo_actions += UndoAction::insert_slice(a, s);
+
+  int num_lines = 0;
+  int last_endline = 0;
+  for (int i = 0; i < s.length; ++i) {
+    if (s[i] == '\n') {
+      last_endline = i;
+      ++num_lines;
+    }
+  }
+  const Pos b = {s.length - 1 - last_endline, a.y + num_lines};
+
+  if (num_lines == 0) {
+    lines[a.y].insert(a.x, s);
+    // move cursors
+    for (Cursor &c : cursors)
+      if (c.y == a.y && c.x >= a.x)
+        c.x += s.length;
+  }
+  else {
+    lines.insertz(a.y+1, num_lines);
+    // construct last line
+    lines[b.y] += s(last_endline+1, -1);
+    lines[b.y] += lines[a.y](a.x, -1);
+
+    // resize first line
+    lines[a.y].length = a.x;
+
+    // first line
+    int ai = 0, bi;
+    s.find('\n', &bi);
+    lines[a.y] += s(0, bi);
+    ++bi;
+    ai = bi;
+
+    // all lines in between
+    int y = a.y+1;
+    while (s.find(ai, '\n', &bi)) {
+      lines[y++] += s(ai, bi);
+      ++bi;
+      ai = bi;
+    }
+
+    for (Cursor &c : cursors) {
+      if (c.y == a.y && c.x >= a.x) {
+        c.y += num_lines;
+        c.x = b.x + c.x - a.x;
+      }
+      else if (c.y > a.y) {
+        c.y += num_lines;
+      }
+    }
+
+    for (int i = a.y+1; i <= b.y; ++i)
+      autoindent(i);
+  }
+
+  action_end();
+}
+
+void Buffer::insert(Slice s) {
+  action_begin();
+  modified = true;
+
+  for (int i = 0; i < cursors.size; ++i)
+    insert(cursors[i].pos, s);
+
+  action_end();
+}
+
+void Buffer::insert(Pos pos, Utf8char ch) {
+  action_begin();
+
+  // TODO: @utf8
+  char c = ch.ansi();
+  insert(pos, Slice{&c, 1});
+
+  if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
+    autoindent(pos.y);
+
+  action_end();
+}
+
+void Buffer::insert(Utf8char ch) {
+  action_begin();
+
+  for (int i = 0; i < cursors.size; ++i)
+    insert(cursors[i].pos, ch);
+
+  action_end();
+}
+
+void Buffer::insert_tab() {
+  action_begin();
+  modified = true;
+
+  if (tab_type == 0)
+    insert(Utf8char::create('\t'));
+  else
+    for (int i = 0; i < tab_type; ++i)
+      insert(Utf8char::create(' '));
 
   action_end();
 }
@@ -2695,7 +2683,7 @@ void Buffer::insert_newline() {
   action_begin();
 
   for (Cursor c : cursors)
-    insert(c.pos, '\n');
+    insert(c.pos, Utf8char::create('\n'));
 
   action_end();
 }
@@ -2703,10 +2691,9 @@ void Buffer::insert_newline() {
 void Buffer::insert_newline_below() {
   action_begin();
 
-  for (int i = 0; i < cursors.size; ++i) {
-    cursors[i].x = lines[cursors[i].y].length;
-    insert(cursors[i].pos, '\n');
-    autoindent(cursors[i].pos);
+  for (Cursor &c : cursors) {
+    c.x = lines[c.y].length;
+    insert(c.pos, Utf8char::create('\n'));
   }
 
   action_end();
@@ -2800,9 +2787,15 @@ void Buffer::goto_beginline() {
 
 void Buffer::empty() {
   action_begin();
+  G.flags.cursor_dirty = true;
   modified = true;
 
+  if (!cursors.size)
+    cursors += {};
+
   collapse_cursors();
+  if (lines.size == 0)
+    lines += {};
   while (lines.size > 1)
     delete_line(0);
   if (lines[0].length > 0)
