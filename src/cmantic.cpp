@@ -1,7 +1,7 @@
 /*
  * TODO:
+ * Redo
  * Fix memory leak occuring between frames
- * Undo
  * Retokenize on edit
  * Goto definition
  *
@@ -54,8 +54,8 @@
   #include <stdarg.h>
   #include <assert.h>
 
-#include "graphics.h"
-#include "util.h"
+#include "graphics.hpp"
+#include "util.hpp"
 
 // @debug
   #if 0
@@ -232,6 +232,56 @@ struct TokenResult {
   Slice operator_str;
 };
 
+struct Buffer;
+
+// Undo functionality:
+//
+// Every call on the buffer that mutates it will add that action to the undo/redo list.
+// But sometimes you want a series of actions to be grouped together for undo/redo.
+// To do that you can call action_group_begin() and action_group_end() before and after your actions
+//
+// Example:
+//
+// buffer.action_group_begin();
+// .. call methods on buffer that mutate it
+// buffer.action_group_end();
+//
+enum UndoActionType {
+  ACTIONTYPE_INSERT,
+  ACTIONTYPE_DELETE,
+  ACTIONTYPE_CURSOR_SNAPSHOT,
+  ACTIONTYPE_GROUP_BEGIN,
+};
+struct UndoAction {
+  UndoActionType type;
+  union {
+    // ACTIONTYPE_INSERT
+    struct {
+      Pos a;
+      Pos b;
+      String s;
+    } is;
+
+    // ACTIONTYPE_DELETE
+    struct {
+      Pos a;
+      Pos b;
+      String s;
+    } rm;
+
+    // ACTIONTYPE_CURSOR_SNAPSHOT
+    struct {
+      Array<Cursor> cursors;
+    } cc;
+  };
+
+  static UndoAction delete_range(Buffer &b, Range r);
+  static UndoAction cursor_snapshot(Array<Cursor> cursors);
+  static UndoAction insert_slice(Pos a, Pos b, Slice s);
+};
+
+static void util_free(UndoAction a);
+
 struct Buffer {
 
   String filename;
@@ -320,6 +370,7 @@ struct Buffer {
   void deduplicate_cursors();
   void collapse_cursors();
 
+
   // Undo functionality:
   //
   // Every call on the buffer that mutates it will add that action to the undo/redo list.
@@ -332,78 +383,29 @@ struct Buffer {
   // .. call methods on buffer that mutate it
   // buffer.action_group_end();
   //
-  enum UndoActionType {
-    ACTIONTYPE_INSERT,
-    ACTIONTYPE_DELETE,
-    ACTIONTYPE_CURSOR_SNAPSHOT,
-  };
-  struct UndoAction {
-    UndoActionType type;
-    union {
-      // ACTIONTYPE_INSERT
-      struct {
-        Pos p;
-        String s;
-      } is;
+  // TODO: Use a fixed buffer (circular queue) of undo actions
+  bool undo_disabled;
+  Array<UndoAction> _undo_actions;
+  int next_undo_action;
 
-      // ACTIONTYPE_DELETE
-      struct {
-        Pos p;
-        String s;
-      } rm;
+  void push_undo_action(UndoAction a) {
+    if (undo_disabled)
+      return;
 
-      // ACTIONTYPE_CURSOR_SNAPSHOT
-      struct {
-        Array<Cursor> cursors;
-      } cc;
-    };
-
-    static UndoAction delete_range(Buffer &b, Range r) {
-      UndoAction a;
-      a.type = ACTIONTYPE_DELETE;
-      // turn range into a string with endlines in it
-      // TODO: We could probably do some compression on this
-      if (r.a.y == r.b.y) {
-        a.rm = {r.a, String::create(b.lines[r.a.y](r.a.x, r.b.x))};
-      }
-      else {
-        // first row
-        StringBuffer s = {};
-        s += b.lines[r.a.y](r.a.x, -1);
-        s += '\n';
-        for (int y = r.a.y+1; y < r.b.y; ++y) {
-          s += b.lines[r.a.y].slice;
-          s += '\n';
-        }
-        s += b.lines[r.b.y](0, r.b.x);
-        a.rm = {r.a, s.string};
-      }
-      return a;
+    // free actions after next_undo_action
+    for (int i = next_undo_action; i < _undo_actions.size; ++i) {
+      util_free(_undo_actions[i]);
     }
-
-    static UndoAction cursor_snapshot(Array<Cursor> cursors) {
-      UndoAction a;
-      a.type = ACTIONTYPE_CURSOR_SNAPSHOT;
-      a.cc = {cursors.copy_shallow()};
-      return a;
-    }
-
-    static UndoAction insert_slice(Pos p, Slice s) {
-      UndoAction a;
-      a.type = ACTIONTYPE_INSERT;
-      a.is = {p, String::create(s)};
-      return a;
-    }
-  };
-
-  // TODO: USe a fixed buffer of undo actions
-  Array<int> undo_action_groups;
-  Array<UndoAction> undo_actions;
+    _undo_actions.size = next_undo_action;
+    _undo_actions += a;
+    ++next_undo_action;
+  }
 
   int _action_group_depth;
   void action_begin() {
     if (_action_group_depth == 0) {
-      undo_actions += UndoAction::cursor_snapshot(cursors);
+      push_undo_action({ACTIONTYPE_GROUP_BEGIN});
+      push_undo_action(UndoAction::cursor_snapshot(cursors));
     }
     // TODO: check if anything actually happened between begin and end
     ++_action_group_depth;
@@ -411,12 +413,35 @@ struct Buffer {
 
   void action_end() {
     --_action_group_depth;
-    if (_action_group_depth == 0) {
-      // record marker position
-      undo_actions += UndoAction::cursor_snapshot(cursors);
-      undo_action_groups += undo_action_groups.size;
-      deduplicate_cursors();
+  }
+
+  void undo() {
+    if (!next_undo_action)
+      return;
+    printf("next_undo_action 1: %i\n", next_undo_action);
+
+    undo_disabled = true;
+    for (; _undo_actions[next_undo_action-1].type != ACTIONTYPE_GROUP_BEGIN; --next_undo_action) {
+      UndoAction a = _undo_actions[next_undo_action-1];
+      switch (a.type) {
+        case ACTIONTYPE_INSERT:
+          remove_range(a.is.a, a.is.b);
+          break;
+        case ACTIONTYPE_DELETE:
+          insert(a.rm.a, a.rm.s.slice);
+          break;
+        case ACTIONTYPE_CURSOR_SNAPSHOT:
+          util_free(cursors);
+          cursors = a.cc.cursors.copy_shallow();
+          break;
+        case ACTIONTYPE_GROUP_BEGIN:
+          break;
+      }
     }
+    --next_undo_action;
+    printf("next_undo_action 2: %i\n", next_undo_action);
+    printf("cursors: %i\n", cursors.size);
+    undo_disabled = false;
   }
 
   // Tokenization
@@ -428,13 +453,68 @@ struct Buffer {
   static Buffer* from_file(Slice filename);
 };
 
+static void util_free(UndoAction a) {
+  switch (a.type) {
+    case ACTIONTYPE_INSERT:
+      util_free(a.is.s);
+      break;
+    case ACTIONTYPE_DELETE:
+      util_free(a.rm.s);
+      break;
+    case ACTIONTYPE_CURSOR_SNAPSHOT:
+      util_free(a.cc.cursors);
+      break;
+    case ACTIONTYPE_GROUP_BEGIN:
+      break;
+  }
+}
+
 void util_free(Buffer &b) {
   util_free(b.lines);
   util_free(b.filename);
   util_free(b.tokens);
   util_free(b.identifiers);
   util_free(b.cursors);
+  util_free(b._undo_actions);
 }
+
+UndoAction UndoAction::delete_range(Buffer &b, Range r) {
+  UndoAction a;
+  a.type = ACTIONTYPE_DELETE;
+  // turn range into a string with endlines in it
+  // TODO: We could probably do some compression on this
+  if (r.a.y == r.b.y) {
+    a.rm = {r.a, r.b, String::create(b.lines[r.a.y](r.a.x, r.b.x))};
+  }
+  else {
+    // first row
+    StringBuffer s = {};
+    s += b.lines[r.a.y](r.a.x, -1);
+    s += '\n';
+    for (int y = r.a.y+1; y < r.b.y; ++y) {
+      s += b.lines[r.a.y].slice;
+      s += '\n';
+    }
+    s += b.lines[r.b.y](0, r.b.x);
+    a.rm = {r.a, r.b, s.string};
+  }
+  return a;
+}
+
+UndoAction UndoAction::cursor_snapshot(Array<Cursor> cursors) {
+  UndoAction a;
+  a.type = ACTIONTYPE_CURSOR_SNAPSHOT;
+  a.cc = {cursors.copy_shallow()};
+  return a;
+}
+
+UndoAction UndoAction::insert_slice(Pos a, Pos b, Slice s) {
+  UndoAction act;
+  act.type = ACTIONTYPE_INSERT;
+  act.is = {a, b, String::create(s)};
+  return act;
+}
+
 
 struct v2 {
   int x;
@@ -959,6 +1039,9 @@ static void mode_cleanup() {
 
   if (G.mode == MODE_FILESEARCH)
     G.filetree_buffer.empty();
+
+  if (G.mode == MODE_INSERT)
+    G.editing_pane->buffer->action_end();
 }
 
 static void mode_search() {
@@ -1018,6 +1101,9 @@ static void mode_insert() {
 
   G.mode = MODE_INSERT;
   G.bottom_pane = &G.status_message_pane;
+
+  G.editing_pane->buffer->action_begin();
+
   status_message_set("insert");
 }
 
@@ -1896,8 +1982,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_goto();
       break;
     case 'o':
+      buffer.action_begin();
       buffer.insert_newline_below();
       mode_insert();
+      buffer.action_end();
       break;
     case '{':
       buffer.find_and_move_r('{', false);
@@ -1933,6 +2021,12 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     case 'K':
       buffer.move_y(-G.editing_pane->numchars_y()/2);
+      break;
+    case CONTROL('z'):
+      buffer.undo();
+      break;
+    case CONTROL('Z'):
+      // buffer.redo();
       break;
     }
   }
@@ -2368,12 +2462,12 @@ void Buffer::remove_range(Pos a, Pos b) {
   if (b < a)
     swap(a, b);
 
+  push_undo_action(UndoAction::delete_range(*this, {a,b}));
+
   if (b.x == lines[b.y].length) {
     ++b.y;
     b.x = 0;
   }
-
-  undo_actions += UndoAction::delete_range(*this, {a,b});
 
   for (Cursor &c : cursors) {
     // All cursors that are inside range should be moved to beginning of range
@@ -2576,8 +2670,6 @@ void Buffer::insert(const Pos a, Slice s) {
   G.flags.cursor_dirty = true;
   modified = true;
 
-  undo_actions += UndoAction::insert_slice(a, s);
-
   int num_lines = 0;
   int last_endline = 0;
   for (int i = 0; i < s.length; ++i) {
@@ -2586,7 +2678,13 @@ void Buffer::insert(const Pos a, Slice s) {
       ++num_lines;
     }
   }
-  const Pos b = {s.length - 1 - last_endline, a.y + num_lines};
+  Pos b;
+  if (num_lines > 0)
+    b = {s.length - 1 - last_endline, a.y + num_lines};
+  else
+    b = {a.x + s.length - 1, a.y};
+
+  push_undo_action(UndoAction::insert_slice(a, b, s));
 
   if (num_lines == 0) {
     lines[a.y].insert(a.x, s);
@@ -2787,12 +2885,13 @@ void Buffer::goto_beginline() {
 }
 
 void Buffer::empty() {
-  action_begin();
   G.flags.cursor_dirty = true;
   modified = true;
 
   if (!cursors.size)
     cursors += {};
+
+  action_begin();
 
   collapse_cursors();
   if (lines.size == 0)
