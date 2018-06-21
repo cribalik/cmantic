@@ -251,6 +251,7 @@ enum UndoActionType {
   ACTIONTYPE_DELETE,
   ACTIONTYPE_CURSOR_SNAPSHOT,
   ACTIONTYPE_GROUP_BEGIN,
+  ACTIONTYPE_GROUP_END,
 };
 struct UndoAction {
   UndoActionType type;
@@ -413,21 +414,30 @@ struct Buffer {
 
   void action_end() {
     --_action_group_depth;
+    if (_action_group_depth == 0) {
+      push_undo_action(UndoAction::cursor_snapshot(cursors));
+      push_undo_action({ACTIONTYPE_GROUP_END});
+    }
   }
 
   void undo() {
     if (!next_undo_action)
       return;
-    printf("next_undo_action 1: %i\n", next_undo_action);
 
     undo_disabled = true;
-    for (; _undo_actions[next_undo_action-1].type != ACTIONTYPE_GROUP_BEGIN; --next_undo_action) {
-      UndoAction a = _undo_actions[next_undo_action-1];
+    --next_undo_action;
+    assert(_undo_actions[next_undo_action].type == ACTIONTYPE_GROUP_END);
+    --next_undo_action;
+    for (; _undo_actions[next_undo_action].type != ACTIONTYPE_GROUP_BEGIN; --next_undo_action) {
+      UndoAction a = _undo_actions[next_undo_action];
+      printf("undo action: %i\n", a.type);
       switch (a.type) {
         case ACTIONTYPE_INSERT:
+          printf("Removing {%i %i}, {%i %i}\n", a.is.a.x, a.is.a.y, a.is.b.x, a.is.b.y);
           remove_range(a.is.a, a.is.b);
           break;
         case ACTIONTYPE_DELETE:
+          printf("Inserting '%.*s' at {%i %i}\n", a.rm.s.slice.length, a.rm.s.slice.chars, a.rm.a.x, a.rm.a.y);
           insert(a.rm.a, a.rm.s.slice);
           break;
         case ACTIONTYPE_CURSOR_SNAPSHOT:
@@ -435,12 +445,43 @@ struct Buffer {
           cursors = a.cc.cursors.copy_shallow();
           break;
         case ACTIONTYPE_GROUP_BEGIN:
+        case ACTIONTYPE_GROUP_END:
           break;
       }
     }
-    --next_undo_action;
-    printf("next_undo_action 2: %i\n", next_undo_action);
     printf("cursors: %i\n", cursors.size);
+    undo_disabled = false;
+  }
+
+  void redo() {
+    if (next_undo_action == _undo_actions.size)
+      return;
+
+    undo_disabled = true;
+    assert(_undo_actions[next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
+    ++next_undo_action;
+    for (; _undo_actions[next_undo_action].type != ACTIONTYPE_GROUP_END; ++next_undo_action) {
+      UndoAction a = _undo_actions[next_undo_action];
+      printf("redo action: %i\n", a.type);
+      switch (a.type) {
+        case ACTIONTYPE_INSERT:
+          printf("Inserting '%s' at {%i %i}\n", a.is.s.slice.chars, a.is.a.x, a.is.a.y);
+          insert(a.is.a, a.is.s.slice);
+          break;
+        case ACTIONTYPE_DELETE:
+          printf("Removing {%i %i}, {%i %i}\n", a.rm.a.x, a.rm.a.y, a.rm.b.x, a.rm.b.y);
+          remove_range(a.rm.a, a.rm.b);
+          break;
+        case ACTIONTYPE_CURSOR_SNAPSHOT:
+          util_free(cursors);
+          cursors = a.cc.cursors.copy_shallow();
+          break;
+        case ACTIONTYPE_GROUP_BEGIN:
+        case ACTIONTYPE_GROUP_END:
+          break;
+      }
+    }
+    ++next_undo_action;
     undo_disabled = false;
   }
 
@@ -465,6 +506,7 @@ static void util_free(UndoAction a) {
       util_free(a.cc.cursors);
       break;
     case ACTIONTYPE_GROUP_BEGIN:
+    case ACTIONTYPE_GROUP_END:
       break;
   }
 }
@@ -483,9 +525,8 @@ UndoAction UndoAction::delete_range(Buffer &b, Range r) {
   a.type = ACTIONTYPE_DELETE;
   // turn range into a string with endlines in it
   // TODO: We could probably do some compression on this
-  if (r.a.y == r.b.y) {
+  if (r.a.y == r.b.y)
     a.rm = {r.a, r.b, String::create(b.lines[r.a.y](r.a.x, r.b.x))};
-  }
   else {
     // first row
     StringBuffer s = {};
@@ -495,7 +536,8 @@ UndoAction UndoAction::delete_range(Buffer &b, Range r) {
       s += b.lines[r.a.y].slice;
       s += '\n';
     }
-    s += b.lines[r.b.y](0, r.b.x);
+    if (r.b.x)
+      s += b.lines[r.b.y](0, r.b.x);
     a.rm = {r.a, r.b, s.string};
   }
   return a;
@@ -2026,7 +2068,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       buffer.undo();
       break;
     case CONTROL('Z'):
-      // buffer.redo();
+      buffer.redo();
       break;
     }
   }
@@ -2419,7 +2461,7 @@ void Buffer::remove_trailing_whitespace(int y) {
   // TODO: @utf8
   while (x >= 0 && getchar(x, y).isspace())
     --x;
-  remove_range({x, y}, {lines[y].length-1, y});
+  remove_range({x, y}, {lines[y].length, y});
   goto_endline();
 
   action_end();
@@ -2444,7 +2486,7 @@ void Buffer::pretty(int y) {
 }
 
 void Buffer::delete_line(int y) {
-  remove_range({0, y}, {lines[y].length, y});
+  remove_range({0, y}, {0, y+1});
 }
 
 void Buffer::delete_line() {
@@ -2455,19 +2497,14 @@ void Buffer::delete_line() {
 }
 
 void Buffer::remove_range(Pos a, Pos b) {
+  if (b <= a)
+    return;
+
   action_begin();
   G.flags.cursor_dirty = true;
   modified = true;
 
-  if (b < a)
-    swap(a, b);
-
   push_undo_action(UndoAction::delete_range(*this, {a,b}));
-
-  if (b.x == lines[b.y].length) {
-    ++b.y;
-    b.x = 0;
-  }
 
   for (Cursor &c : cursors) {
     // All cursors that are inside range should be moved to beginning of range
@@ -2477,14 +2514,14 @@ void Buffer::remove_range(Pos a, Pos b) {
     else if (b.y > a.y && c.y > b.y)
       c.y -= b.y-a.y;
     // All cursors that are on the same row as b, but after b should be merged onto line a
-    else if (c.y == b.y && c.x >= b.x) {
+    else if (c.y == b.y && c.x >= b.x-1) {
       c.y = a.y;
-      c.x = a.x + c.x - b.x - 1;
+      c.x = a.x + c.x - b.x;
     }
   }
 
   if (a.y == b.y)
-    lines[a.y].remove(a.x, b.x-a.x+1);
+    lines[a.y].remove(a.x, b.x-a.x);
   else {
     // append end of b onto a
     lines[a.y].length = a.x;
@@ -2510,11 +2547,12 @@ void Buffer::delete_char() {
     if (pos.x == 0) {
       if (pos.y == 0)
         return;
-      remove_range({lines[pos.y-1].length, pos.y-1}, {lines[pos.y-1].length, pos.y-1});
+      remove_range({lines[pos.y-1].length, pos.y-1}, {0, pos.y});
     }
     else {
-      advance_r(pos);
-      remove_range(pos, pos);
+      Pos p = pos;
+      advance_r(p);
+      remove_range(p, pos);
     }
   }
 
@@ -2643,7 +2681,7 @@ void Buffer::autoindent(const int y) {
     diff = -current_indent*tab_size;
 
   if (diff < 0)
-    remove_range({0, y}, {-diff - 1, y});
+    remove_range({0, y}, {-diff, y});
   if (diff > 0)
     for (int i = 0; i < diff; ++i)
       insert(Pos{0, y}, Utf8char::create(tab_char));
@@ -2666,6 +2704,9 @@ void Buffer::push_line(Slice s) {
 }
 
 void Buffer::insert(const Pos a, Slice s) {
+  if (!s.length)
+    return;
+
   action_begin();
   G.flags.cursor_dirty = true;
   modified = true;
@@ -2678,11 +2719,15 @@ void Buffer::insert(const Pos a, Slice s) {
       ++num_lines;
     }
   }
+
   Pos b;
   if (num_lines > 0)
-    b = {s.length - 1 - last_endline, a.y + num_lines};
+    b = {s.length - last_endline - 1, a.y + num_lines};
   else
-    b = {a.x + s.length - 1, a.y};
+    b = {a.x + s.length, a.y};
+
+  if (this == G.editing_pane->buffer)
+    printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   push_undo_action(UndoAction::insert_slice(a, b, s));
 
@@ -2899,7 +2944,7 @@ void Buffer::empty() {
   while (lines.size > 1)
     delete_line(0);
   if (lines[0].length > 0)
-    remove_range({0, 0}, {lines[0].length - 1, 0});
+    remove_range({0, 0}, {lines[0].length, 0});
 
   cursors[0] = {};
 
