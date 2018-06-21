@@ -1868,7 +1868,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       key |= KEY_CONTROL;
     switch (key) {
       case KEY_RETURN:
+        buffer.action_begin();
         buffer.insert_newline();
+        buffer.autoindent();
+        buffer.action_end();
         break;
 
       case KEY_TAB:
@@ -2026,6 +2029,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case 'o':
       buffer.action_begin();
       buffer.insert_newline_below();
+      buffer.autoindent();
       mode_insert();
       buffer.action_end();
       break;
@@ -2771,9 +2775,6 @@ void Buffer::insert(const Pos a, Slice s) {
         c.y += num_lines;
       }
     }
-
-    for (int i = a.y+1; i <= b.y; ++i)
-      autoindent(i);
   }
 
   action_end();
