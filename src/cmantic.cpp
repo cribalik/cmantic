@@ -1,6 +1,8 @@
 /*
  * TODO:
- * Redo
+ * Copy/paste
+ * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
+ * Size limit on undo/redo
  * Fix memory leak occuring between frames
  * Retokenize on edit
  * Goto definition
@@ -3461,7 +3463,7 @@ void Pane::render_menu_popup(View<Slice> options) {
   Pos p = this->bounds.p;
   p.y -= char2pixely(height) + margin;
 
-  for (int i = 0; i < menu.suggestions.size; ++i)
+  for (int i = 0; i < at_most(menu.suggestions.size, height); ++i)
     canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i]);
 
   // highlight
@@ -3768,7 +3770,7 @@ void Canvas::render(Pos pos) {
   }
 
   // render text
-  const int text_offset_y = (int)(-G.font_height*4.0f/15.0f); // TODO: get this from truetype?
+  const int text_offset_y = (int)(-G.font_height*3.3f/15.0f); // TODO: get this from truetype?
   for (int row = 0; row < h; ++row) {
     G.tmp_render_buffer.clear();
     G.tmp_render_buffer.append(&chars[row*w], w);
