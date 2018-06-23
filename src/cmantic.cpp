@@ -218,8 +218,13 @@ union Cursor {
   struct {
     Pos pos;
     /* if going from a longer line to a shorter line, remember where we were before clamping to row length. a value of -1 means always go to end of line */
+    #define GHOST_EOL -1
+    #define GHOST_BOL -2
     int ghost_x;
   };
+  bool operator==(Cursor c) {
+    return c.pos == pos && c.ghost_x == ghost_x;
+  }
 };
 
 void util_free(Cursor) {}
@@ -283,10 +288,9 @@ struct UndoAction {
   static UndoAction insert_slice(Pos a, Pos b, Slice s);
 };
 
-static void util_free(UndoAction a);
+static void util_free(UndoAction &a);
 
 struct Buffer {
-
   String filename;
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
 
@@ -297,11 +301,10 @@ struct Buffer {
   Array<TokenInfo> tokens;
   Array<String> identifiers;
 
-  #define GHOST_EOL -1
-  #define GHOST_BOL -2
   Array<Cursor> cursors;
-  bool modified;
-
+  bool modified() {
+    return _next_undo_action > 0;
+  }
 
   // methods
 
@@ -376,7 +379,7 @@ struct Buffer {
 
   // Undo functionality:
   //
-  // Every call on the buffer that mutates it will add that action to the undo/redo list.
+  // Every action on the buffer that mutates it (basically insert/delete) will add that action to the undo/redo list.
   // But sometimes you want a series of actions to be grouped together for undo/redo.
   // To do that you can call action_group_begin() and action_group_end() before and after your actions
   //
@@ -389,23 +392,25 @@ struct Buffer {
   // TODO: Use a fixed buffer (circular queue) of undo actions
   bool undo_disabled;
   Array<UndoAction> _undo_actions;
-  int next_undo_action;
+  int _next_undo_action;
+  int _action_group_depth;
 
   void push_undo_action(UndoAction a) {
     if (undo_disabled)
       return;
 
-    // free actions after next_undo_action
-    for (int i = next_undo_action; i < _undo_actions.size; ++i) {
+    // free actions after _next_undo_action
+    for (int i = _next_undo_action; i < _undo_actions.size; ++i)
       util_free(_undo_actions[i]);
-    }
-    _undo_actions.size = next_undo_action;
+    _undo_actions.size = _next_undo_action;
     _undo_actions += a;
-    ++next_undo_action;
+    ++_next_undo_action;
   }
 
-  int _action_group_depth;
   void action_begin() {
+    if (undo_disabled)
+      return;
+
     if (_action_group_depth == 0) {
       push_undo_action({ACTIONTYPE_GROUP_BEGIN});
       push_undo_action(UndoAction::cursor_snapshot(cursors));
@@ -415,31 +420,63 @@ struct Buffer {
   }
 
   void action_end() {
+    if (undo_disabled)
+      return;
+
     --_action_group_depth;
     if (_action_group_depth == 0) {
-      push_undo_action(UndoAction::cursor_snapshot(cursors));
-      push_undo_action({ACTIONTYPE_GROUP_END});
+      // check if something actually happened
+      bool changed = true;
+      if (_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT && _undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN) {
+        changed = false;
+        UndoAction a = _undo_actions[_next_undo_action-1];
+        if (a.cc.cursors.size != cursors.size)
+          changed = true;
+        else {
+          for (int i = 0; i < a.cc.cursors.size; ++i) {
+            if (cursors[i] == a.cc.cursors[i])
+              continue;
+            changed = true;
+            break;
+          }
+        }
+      }
+
+      if (changed) {
+        push_undo_action(UndoAction::cursor_snapshot(cursors));
+        push_undo_action({ACTIONTYPE_GROUP_END});
+      }
+      else {
+        // remove the start
+        assert(_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT);
+        util_free(_undo_actions[_next_undo_action-1]);
+        assert(_undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN);
+        _next_undo_action -= 2;
+        _undo_actions.size -= 2;
+      }
     }
   }
 
   void undo() {
-    if (!next_undo_action)
+    if (undo_disabled)
+      return;
+    if (!_next_undo_action)
       return;
 
     undo_disabled = true;
-    --next_undo_action;
-    assert(_undo_actions[next_undo_action].type == ACTIONTYPE_GROUP_END);
-    --next_undo_action;
-    for (; _undo_actions[next_undo_action].type != ACTIONTYPE_GROUP_BEGIN; --next_undo_action) {
-      UndoAction a = _undo_actions[next_undo_action];
-      printf("undo action: %i\n", a.type);
+    --_next_undo_action;
+    assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_END);
+    --_next_undo_action;
+    for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_BEGIN; --_next_undo_action) {
+      UndoAction a = _undo_actions[_next_undo_action];
+      // printf("undo action: %i\n", a.type);
       switch (a.type) {
         case ACTIONTYPE_INSERT:
-          printf("Removing {%i %i}, {%i %i}\n", a.is.a.x, a.is.a.y, a.is.b.x, a.is.b.y);
+          // printf("Removing {%i %i}, {%i %i}\n", a.is.a.x, a.is.a.y, a.is.b.x, a.is.b.y);
           remove_range(a.is.a, a.is.b);
           break;
         case ACTIONTYPE_DELETE:
-          printf("Inserting '%.*s' at {%i %i}\n", a.rm.s.slice.length, a.rm.s.slice.chars, a.rm.a.x, a.rm.a.y);
+          // printf("Inserting '%.*s' at {%i %i}\n", a.rm.s.slice.length, a.rm.s.slice.chars, a.rm.a.x, a.rm.a.y);
           insert(a.rm.a, a.rm.s.slice);
           break;
         case ACTIONTYPE_CURSOR_SNAPSHOT:
@@ -451,27 +488,30 @@ struct Buffer {
           break;
       }
     }
-    printf("cursors: %i\n", cursors.size);
+    // printf("cursors: %i\n", cursors.size);
     undo_disabled = false;
   }
 
   void redo() {
-    if (next_undo_action == _undo_actions.size)
+    if (undo_disabled)
+      return;
+
+    if (_next_undo_action == _undo_actions.size)
       return;
 
     undo_disabled = true;
-    assert(_undo_actions[next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
-    ++next_undo_action;
-    for (; _undo_actions[next_undo_action].type != ACTIONTYPE_GROUP_END; ++next_undo_action) {
-      UndoAction a = _undo_actions[next_undo_action];
-      printf("redo action: %i\n", a.type);
+    assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
+    ++_next_undo_action;
+    for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_END; ++_next_undo_action) {
+      UndoAction a = _undo_actions[_next_undo_action];
+      // printf("redo action: %i\n", a.type);
       switch (a.type) {
         case ACTIONTYPE_INSERT:
-          printf("Inserting '%s' at {%i %i}\n", a.is.s.slice.chars, a.is.a.x, a.is.a.y);
+          // printf("Inserting '%s' at {%i %i}\n", a.is.s.slice.chars, a.is.a.x, a.is.a.y);
           insert(a.is.a, a.is.s.slice);
           break;
         case ACTIONTYPE_DELETE:
-          printf("Removing {%i %i}, {%i %i}\n", a.rm.a.x, a.rm.a.y, a.rm.b.x, a.rm.b.y);
+          // printf("Removing {%i %i}, {%i %i}\n", a.rm.a.x, a.rm.a.y, a.rm.b.x, a.rm.b.y);
           remove_range(a.rm.a, a.rm.b);
           break;
         case ACTIONTYPE_CURSOR_SNAPSHOT:
@@ -483,8 +523,31 @@ struct Buffer {
           break;
       }
     }
-    ++next_undo_action;
+    ++_next_undo_action;
     undo_disabled = false;
+  }
+
+  void print_undo_actions() {
+    puts("#########################");
+    for (UndoAction &a : _undo_actions) {
+      switch (a.type) {
+        case ACTIONTYPE_INSERT:
+          puts("   INSERT");
+          break;
+        case ACTIONTYPE_DELETE:
+          puts("   DELETE");
+          break;
+        case ACTIONTYPE_CURSOR_SNAPSHOT:
+          puts("   CURSORS");
+          break;
+        case ACTIONTYPE_GROUP_BEGIN:
+          puts(">>>");
+          break;
+        case ACTIONTYPE_GROUP_END:
+          puts("<<<");
+          break;
+      }
+    }
   }
 
   // Tokenization
@@ -496,15 +559,18 @@ struct Buffer {
   static Buffer* from_file(Slice filename);
 };
 
-static void util_free(UndoAction a) {
+static void util_free(UndoAction &a) {
   switch (a.type) {
     case ACTIONTYPE_INSERT:
+      // puts("Freeing INSERT");
       util_free(a.is.s);
       break;
     case ACTIONTYPE_DELETE:
+      // puts("Freeing DELETE");
       util_free(a.rm.s);
       break;
     case ACTIONTYPE_CURSOR_SNAPSHOT:
+      // puts("Freeing CURSOR SNAPSHOT");
       util_free(a.cc.cursors);
       break;
     case ACTIONTYPE_GROUP_BEGIN:
@@ -520,6 +586,10 @@ void util_free(Buffer &b) {
   util_free(b.identifiers);
   util_free(b.cursors);
   util_free(b._undo_actions);
+}
+
+void util_free(Buffer *b) {
+  util_free(*b);
 }
 
 UndoAction UndoAction::delete_range(Buffer &b, Range r) {
@@ -682,6 +752,9 @@ struct Pane {
     p.inactive_highlight_background_color = inactive_highlight_background_color;
   }
 };
+
+void util_free(Pane *p) {
+}
 
 struct PoppedColor {
   Color base_color;
@@ -1038,8 +1111,6 @@ static void save_buffer(Buffer *b) {
 
   status_message_set("Wrote %i lines to %s", b->num_lines(), b->filename);
 
-  b->modified = 0;
-
   err:
   fclose(f);
 }
@@ -1049,8 +1120,15 @@ static void menu_option_save() {
   save_buffer(G.editing_pane->buffer);
 }
 
+void state_free();
+
+void editor_exit(int exitcode) {
+  state_free();
+  exit(exitcode);
+}
+
 static void menu_option_quit() {
-  exit(0);
+  editor_exit(0);
 }
 
 static void menu_option_show_tab_type() {
@@ -1086,6 +1164,9 @@ static void mode_cleanup() {
 
   if (G.mode == MODE_INSERT)
     G.editing_pane->buffer->action_end();
+
+  if (G.mode == MODE_SEARCH)
+    G.search_buffer.identifiers = {};
 }
 
 static void mode_search() {
@@ -1682,6 +1763,25 @@ static void state_init() {
   status_message_set("Welcome!");
 }
 
+void state_free() {
+  // really none of this matters, since all resouces are freed when program exits
+  util_free(G.buffers);
+  util_free(G.null_buffer);
+  util_free(G.search_buffer);
+  util_free(G.menu_buffer);
+  util_free(G.filetree_buffer);
+  util_free(G.dropdown_buffer);
+  util_free(G.status_message_buffer);
+  util_free(G.files);
+  util_free(G.editing_panes);
+  util_free(&G.search_pane);
+  util_free(&G.menu_pane);
+  util_free(&G.status_message_pane);
+  util_free(&G.dropdown_pane);
+  util_free(&G.filetree_pane);
+  SDL_Quit();
+}
+
 static Pos char2pixel(Pos p) {
   return char2pixel(p.x, p.y);
 }
@@ -1952,10 +2052,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       buffer.deduplicate_cursors();
       break;}
     case 'q':
-      if (buffer.modified)
+      if (buffer.modified())
         status_message_set("You have unsaved changes. If you really want to exit, use :quit");
       else
-        exit(0);
+        editor_exit(0);
       break;
     case 'i':
       mode_insert();
@@ -2508,9 +2608,9 @@ void Buffer::remove_range(Pos a, Pos b) {
 
   action_begin();
   G.flags.cursor_dirty = true;
-  modified = true;
 
-  push_undo_action(UndoAction::delete_range(*this, {a,b}));
+  if (!undo_disabled)
+    push_undo_action(UndoAction::delete_range(*this, {a,b}));
 
   for (Cursor &c : cursors) {
     // All cursors that are inside range should be moved to beginning of range
@@ -2546,7 +2646,6 @@ void Buffer::remove_range(Pos a, Pos b) {
 void Buffer::delete_char() {
   action_begin();
   G.flags.cursor_dirty = true;
-  modified = true;
 
   for (int i = 0; i < cursors.size; ++i) {
     Pos pos = cursors[i].pos;
@@ -2628,7 +2727,6 @@ int Buffer::indentdepth(int y, bool *has_statement) {
 
 void Buffer::autoindent() {
   action_begin();
-  modified = true;
 
   for (Cursor c : cursors)
     autoindent(c.y);
@@ -2715,7 +2813,6 @@ void Buffer::insert(const Pos a, Slice s) {
 
   action_begin();
   G.flags.cursor_dirty = true;
-  modified = true;
 
   int num_lines = 0;
   int last_endline = 0;
@@ -2735,7 +2832,8 @@ void Buffer::insert(const Pos a, Slice s) {
   if (this == G.editing_pane->buffer)
     printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
-  push_undo_action(UndoAction::insert_slice(a, b, s));
+  if (!undo_disabled)
+    push_undo_action(UndoAction::insert_slice(a, b, s));
 
   if (num_lines == 0) {
     lines[a.y].insert(a.x, s);
@@ -2815,7 +2913,6 @@ void Buffer::insert(Utf8char ch) {
 
 void Buffer::insert_tab() {
   action_begin();
-  modified = true;
 
   if (tab_type == 0)
     insert(Utf8char::create('\t'));
@@ -2933,8 +3030,10 @@ void Buffer::goto_beginline() {
 }
 
 void Buffer::empty() {
+  if (cursors.size == 1 && lines.size == 1 && lines[0].length == 0)
+    return;
+
   G.flags.cursor_dirty = true;
-  modified = true;
 
   if (!cursors.size)
     cursors += {};
