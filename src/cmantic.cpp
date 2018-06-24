@@ -2205,7 +2205,7 @@ static void handle_rendering(float dt) {
   G.font_width = graphics_get_font_advance();
   G.line_height = G.font_height + G.line_margin;
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
-  glClearColor(G.default_background_color.r, G.default_background_color.g, G.default_background_color.g, 1.0f);
+  glClearColor(G.default_background_color.r/255.0f, G.default_background_color.g/255.0f, G.default_background_color.g/255.0f, 1.0f);
   glClear(GL_COLOR_BUFFER_BIT);
 
   // reflow panes
@@ -3961,7 +3961,7 @@ int main(int, const char *[])
       switch (event.type) {
       case SDL_WINDOWEVENT:
         if (event.window.event == SDL_WINDOWEVENT_CLOSE)
-          return 1;
+          editor_exit(0);
         break;
 
       case SDL_KEYDOWN:
