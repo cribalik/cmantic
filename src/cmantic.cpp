@@ -7,6 +7,9 @@
  * Fix memory leak occuring between frames
  * Retokenize on edit
  * Goto definition
+ * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
+ *
+ * Add support for sublimes yaml-based syntax highlighting
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -2274,7 +2277,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case CONTROL('z'):
       buffer.undo();
       break;
-      
+
     case CONTROL('Z'):
       buffer.redo();
       break;
