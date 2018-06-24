@@ -1,6 +1,5 @@
 /*
  * TODO:
- * Movement-based commands (delete-move, yank-move, etc.)
  * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
@@ -94,6 +93,7 @@ enum Mode {
   MODE_DELETE,
   MODE_GOTO,
   MODE_SEARCH,
+  MODE_YANK,
   MODE_FILESEARCH,
   MODE_COUNT
 };
@@ -472,9 +472,10 @@ struct Buffer {
 
         if (clip_filled) {
           StringBuffer clip = {};
-          for (StringBuffer s : clips) {
-            clip += s;
-            clip += '\n';
+          for (int i = 0; i < clips.size; ++i) {
+            clip += clips[i];
+            if (i < clips.size-1)
+              clip += '\n';
           }
           clip += '\0';
           SDL_SetClipboardText(clip.chars);
@@ -1219,6 +1220,13 @@ static void mode_goto() {
   status_message_set("goto");
 }
 
+static void mode_yank() {
+  mode_cleanup();
+  G.mode = MODE_YANK;
+  G.bottom_pane = &G.status_message_pane;
+  status_message_set("yank");
+}
+
 static void mode_delete() {
   mode_cleanup();
   G.mode = MODE_DELETE;
@@ -1436,9 +1444,9 @@ static void render_dropdown(Pane *pane) {
 
 #define CONTROL(c) ((c)|KEY_CONTROL)
 
-// TODO: use a unified key instead of this specialkey hack
-static void insert_default(Pane *p, int key) {
-  Buffer &b = *p->buffer;
+// TODO: use a unified key interface instead of this hack
+static void insert_default(Pane &p, int key) {
+  Buffer &b = *p.buffer;
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (key == KEY_ESCAPE) {
@@ -1460,7 +1468,109 @@ static void insert_default(Pane *p, int key) {
       b.delete_char();
       break;
   }
+}
 
+static bool movement_default(Pane &pane, int key) {
+  Buffer &buffer = *pane.buffer;
+
+  switch (key) {
+    case 'b': {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        if (buffer.advance_r(i))
+          break;
+        // if not in word, back to word
+        Utf8char c = buffer.getchar(i);
+        if (!(is_identifier_tail(c) || is_identifier_head(c)))
+          while (c = buffer.getchar(i), !(is_identifier_tail(c) || is_identifier_head(c)))
+            if (buffer.advance_r(i))
+              break;
+        // go to beginning of word
+        while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
+          if (buffer.advance_r(i))
+            break;
+        buffer.advance(i);
+      }
+      break;}
+
+    case 'w': {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        Utf8char c = buffer.getchar(i);
+        if (is_identifier_tail(c) || is_identifier_head(c))
+          while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
+            if (buffer.advance(i))
+              break;
+        while (c = buffer.getchar(i), !is_identifier_head(c))
+          if (buffer.advance(i))
+            break;
+      }
+      break;}
+
+    case 'n':
+      G.search_term_background_color.reset();
+      if (!buffer.find_and_move(G.search_buffer[0].slice, false))
+        status_message_set("'{}' not found", &G.search_buffer[0]);
+      /*jumplist_push(prev);*/
+      break;
+
+    case 'j':
+      buffer.move_y(1);
+      break;
+
+    case 'k':
+      buffer.move_y(-1);
+      break;
+
+    case 'h':
+      buffer.advance_r();
+      break;
+
+    case 'l':
+      buffer.advance();
+      break;
+
+    case 'L':
+      buffer.goto_endline();
+      break;
+
+    case 'H':
+      buffer.goto_beginline();
+      break;
+
+    case 'N':
+      G.search_term_background_color.reset();
+      if (!buffer.find_and_move_r(G.search_buffer[0], false))
+        status_message_set("'{}' not found", &G.search_buffer[0]);
+      /*jumplist_push(prev);*/
+      break;
+
+    case '{':
+      buffer.find_and_move_r('{', false);
+      break;
+
+    case '}': {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        Pos p = buffer.cursors[i].pos;
+        int depth = 0;
+        if (buffer.getchar(p) == '}')
+          buffer.advance(p);
+        for (TokenInfo *t = buffer.token_find(p); t < buffer.tokens.end(); ++t) {
+          if (t->token == '{') 
+            ++depth;
+          if (t->token == '}') {
+            --depth;
+            if (depth <= 0) {
+              buffer.move_to(i, t->a);
+              break;
+            }
+          }
+        }
+      }
+      break;}
+
+    default:
+      return false;
+  }
+  return true;
 }
 
 static const char *ttf_file = "font.ttf";
@@ -1828,7 +1938,7 @@ static void handle_menu_insert(int key, Pane &p) {
 
       // fallthrough
     default:
-      insert_default(&p, key);
+      insert_default(p, key);
       break;
   }
 }
@@ -1971,18 +2081,65 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       G.search_term_background_color.reset();
   } break;
 
-  case MODE_DELETE:
-    switch (key) {
-      case 'd':
-        buffer.delete_line();
-        mode_normal(true);
-        break;
+  case MODE_YANK: {
+    // TODO: is it more performant to check if it is a movement command first?
+    buffer.action_begin();
+    Array<Cursor> cursors = buffer.cursors.copy_shallow();
+    if (movement_default(*G.editing_pane, key)) {
+      StringBuffer sb = {};
+      for (int i = 0; i < cursors.size; ++i) {
+        Pos a = cursors[i].pos;
+        Pos b = buffer.cursors[i].pos;
+        if (b < a)
+          swap(a,b);
 
-      default:
-        mode_normal(true);
-        break;
+        StringBuffer s = buffer.range_to_string({a,b});
+        sb += s;
+        if (i < cursors.size-1)
+          sb += '\n';
+        util_free(s);
+
+        buffer.cursors[i].pos = a;
+      }
+      SDL_SetClipboardText(sb.chars);
+      util_free(sb);
     }
-    break;
+
+    buffer.action_end();
+    util_free(cursors);
+    mode_normal(true);
+    break;}
+
+  case MODE_DELETE: {
+    // TODO: is it more performant to check if it is a movement command first?
+    buffer.action_begin();
+    Array<Cursor> cursors = buffer.cursors.copy_shallow();
+    if (movement_default(*G.editing_pane, key)) {
+      // delete movement range
+      for (int i = 0; i < cursors.size; ++i) {
+        Pos a = cursors[i].pos;
+        Pos b = buffer.cursors[i].pos;
+        if (b < a)
+          swap(a,b);
+        buffer.advance(b);
+        buffer.remove_range(a, b, i);
+      }
+    }
+    else {
+      switch (key) {
+        case 'd':
+          buffer.delete_line();
+          break;
+
+        default:
+          break;
+      }
+    }
+    buffer.action_end();
+
+    util_free(cursors);
+    mode_normal(true);
+    break;}
 
   case MODE_INSERT: {
     if (ctrl)
@@ -1998,7 +2155,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       case KEY_TAB:
         if (dropdown_autocomplete(buffer))
           break;
-        insert_default(G.editing_pane, key);
+        insert_default(*G.editing_pane, key);
         break;
 
       case CONTROL('j'): {
@@ -2016,13 +2173,17 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         break;}
 
       default:
-        insert_default(G.editing_pane, key);
+        insert_default(*G.editing_pane, key);
         break;
     }
     break;}
 
   case MODE_NORMAL:
+    if (movement_default(*G.editing_pane, key))
+      break;
+
     switch (key) {
+
     case KEY_ESCAPE:
       buffer.collapse_cursors();
       break;
@@ -2043,39 +2204,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         exit(1);
       break;
 
-    case 'b': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        if (buffer.advance_r(i))
-          break;
-        // if not in word, back to word
-        Utf8char c = buffer.getchar(i);
-        if (!(is_identifier_tail(c) || is_identifier_head(c)))
-          while (c = buffer.getchar(i), !(is_identifier_tail(c) || is_identifier_head(c)))
-            if (buffer.advance_r(i))
-              break;
-        // go to beginning of word
-        while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
-          if (buffer.advance_r(i))
-            break;
-        buffer.advance(i);
-      }
-      buffer.deduplicate_cursors();
-      break;}
-
-    case 'w': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        Utf8char c = buffer.getchar(i);
-        if (is_identifier_tail(c) || is_identifier_head(c))
-          while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
-            if (buffer.advance(i))
-              break;
-        while (c = buffer.getchar(i), !is_identifier_head(c))
-          if (buffer.advance(i))
-            break;
-      }
-      buffer.deduplicate_cursors();
-      break;}
-
     case 'q':
       if (buffer.modified())
         status_message_set("You have unsaved changes. If you really want to exit, use :quit");
@@ -2085,30 +2213,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
     case 'i':
       mode_insert();
-      break;
-
-    case 'j':
-      buffer.move_y(1);
-      break;
-
-    case 'k':
-      buffer.move_y(-1);
-      break;
-
-    case 'h':
-      buffer.advance_r();
-      break;
-
-    case 'l':
-      buffer.advance();
-      break;
-
-    case 'L':
-      buffer.goto_endline();
-      break;
-
-    case 'H':
-      buffer.goto_beginline();
       break;
 
     case 'p':
@@ -2127,10 +2231,12 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         for (char *t = s; *t; ++t)
           num_endlines += (*t == '\n');
 
+
+        buffer.action_begin();
         buffer.raw_begin();
 
         // split clipboard among cursors
-        if (buffer.cursors.size > 1 && num_endlines == buffer.cursors.size) {
+        if (num_endlines == buffer.cursors.size-1) {
           char *start = s;
           char *end = start;
           for (int i = 0; i < buffer.cursors.size; ++i) {
@@ -2152,30 +2258,16 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         }
 
         buffer.raw_end();
+        buffer.action_end();
         SDL_free(s);
       }
-      break;
-
-    case 'n':
-      G.search_term_background_color.reset();
-      if (!buffer.find_and_move(G.search_buffer[0].slice, false))
-        status_message_set("'{}' not found", &G.search_buffer[0]);
-      /*jumplist_push(prev);*/
       break;
 
     case 'm': {
       int i = buffer.cursors.size;
       buffer.cursors.push(buffer.cursors[i-1]);
       buffer.move_y(i, 1);
-      buffer.deduplicate_cursors();
       break;}
-
-    case 'N':
-      G.search_term_background_color.reset();
-      if (!buffer.find_and_move_r(G.search_buffer[0], false))
-        status_message_set("'{}' not found", &G.search_buffer[0]);
-      /*jumplist_push(prev);*/
-      break;
 
     case CONTROL('w'): {
       Pane *p = new Pane{};
@@ -2223,39 +2315,20 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       buffer.action_end();
       break;
 
+    case 'y':
+      mode_yank();
+      break;
+
     case 'Y': {
       StringBuffer s = {};
       for (int i = 0; i < buffer.cursors.size; ++i) {
         s += StringBuffer::create(buffer.lines[buffer.cursors[i].y].slice);
         s += '\n';
+        if (i < buffer.cursors.size-1)
+          s += '\n';
       }
       SDL_SetClipboardText(s.chars);
       util_free(s);
-      break;}
-
-    case '{':
-      buffer.find_and_move_r('{', false);
-      break;
-
-    case '}': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        Pos p = buffer.cursors[i].pos;
-        int depth = 0;
-        if (buffer.getchar(p) == '}')
-          buffer.advance(p);
-        for (TokenInfo *t = buffer.token_find(p); t < buffer.tokens.end(); ++t) {
-          if (t->token == '{') 
-            ++depth;
-          if (t->token == '}') {
-            --depth;
-            if (depth <= 0) {
-              buffer.move_to(i, t->a);
-              break;
-            }
-          }
-        }
-      }
-      buffer.deduplicate_cursors();
       break;}
 
     case ':':
@@ -2281,8 +2354,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case CONTROL('Z'):
       buffer.redo();
       break;
+
     }
+    break;
   }
+  buffer.deduplicate_cursors();
 }
 
 static void handle_rendering(float dt) {
@@ -2411,13 +2487,11 @@ void Buffer::move_x(int marker_idx, int dx) {
 void Buffer::move_x(int dx) {
   for (int i = 0; i < cursors.size; ++i)
     move_x(i, dx);
-  deduplicate_cursors();
 }
 
 void Buffer::move_y(int dy) {
   for (int i = 0; i < cursors.size; ++i)
     move_y(i, dy);
-  deduplicate_cursors();
 }
 
 Buffer* Buffer::from_file(Slice filename) {
@@ -2502,7 +2576,7 @@ StringBuffer Buffer::range_to_string(const Range r) {
     s += lines[r.a.y](r.a.x, -1);
     s += '\n';
     for (int y = r.a.y+1; y < r.b.y; ++y) {
-      s += lines[r.a.y].slice;
+      s += lines[y].slice;
       s += '\n';
     }
     if (r.b.x)
@@ -2519,6 +2593,7 @@ void Buffer::move(int marker_idx, int dx, int dy) {
 }
 
 void Buffer::deduplicate_cursors() {
+  G.flags.cursor_dirty = true;
   for (int i = 0; i < cursors.size; ++i)
   for (int j = 0; j < cursors.size; ++j)
     if (i != j && cursors[i].pos == cursors[j].pos) {
@@ -3245,7 +3320,6 @@ int Buffer::advance() {
   int r = 1;
   for (int i = 0; i < cursors.size; ++i)
     r &= advance(i);
-  deduplicate_cursors();
   return r;
 }
 
@@ -3253,7 +3327,6 @@ int Buffer::advance_r() {
   int r = 1;
   for (int i = 0; i < cursors.size; ++i)
     r &= advance_r(i);
-  deduplicate_cursors();
   return r;
 }
 
@@ -3487,6 +3560,201 @@ void Canvas::fill(Color text, Color backgrnd) {
 
 void Canvas::invert_color(Pos p) {
   swap(text_colors[p.y*w + p.x], background_colors[p.y*w + p.x]);
+}
+
+// fills a to b but only inside the bounds 
+void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
+  Pos a = range.a;
+  Pos b = range.b;
+  a -= offset;
+  b -= offset;
+  if (bounds.w == -1)
+    bounds.w = w - bounds.x;
+  if (bounds.h == -1)
+    bounds.h = h - bounds.y;
+
+  bounds.x = clamp(bounds.x, 0, w-1);
+  bounds.w = clamp(bounds.w, 0, w-bounds.x);
+  bounds.y = clamp(bounds.y, 0, h-1);
+  bounds.h = clamp(bounds.h, 0, h-bounds.y);
+
+  a.x = clamp(a.x, bounds.x, bounds.w-1);
+  a.y = clamp(a.y, bounds.y, bounds.h-1);
+  b.x = clamp(b.x, bounds.x, bounds.w-1);
+  b.y = clamp(b.y, bounds.y, bounds.h-1);
+
+  if (a.y == b.y) {
+    for (int x = a.x; x <= b.x; ++x)
+      this->text_colors[a.y*this->w + x] = c;
+    return;
+  }
+
+  int y = a.y;
+  if (y < b.y)
+    for (int x = a.x; x < bounds.x+bounds.w; ++x)
+      this->text_colors[y*this->w + x] = c;
+  for (++y; y < b.y; ++y)
+    for (int x = bounds.x; x < bounds.x+bounds.w; ++x)
+      this->text_colors[y*this->w + x] = c;
+  for (int x = bounds.x; x <= b.x; ++x)
+    this->text_colors[y*this->w + x] = c;
+}
+
+// w,h: use -1 to say it goes to the end
+void Canvas::fill_textcolor(Rect r, Color c) {
+  r.x -= offset.x;
+  r.y -= offset.y;
+  if (r.w == -1)
+    r.w = this->w - r.x;
+  if (r.h == -1)
+    r.h = this->h - r.y;
+  r.w = at_most(r.w, this->w - r.x);
+  r.h = at_most(r.h, this->h - r.y);
+  if (r.w < 0 || r.h < 0)
+    return;
+
+  for (int y = r.y; y < r.y+r.h; ++y)
+  for (int x = r.x; x < r.x+r.w; ++x)
+    text_colors[y*this->w + x] = c;
+}
+
+// w,h: use -1 to say it goes to the end
+void Canvas::fill_background(Rect r, Color c) {
+  r.x -= offset.x;
+  r.y -= offset.y;
+  if (r.w == -1)
+    r.w = this->w - r.x;
+  if (r.h == -1)
+    r.h = this->h - r.y;
+  r.w = at_most(r.w, this->w - r.x);
+  r.h = at_most(r.h, this->h - r.y);
+  if (r.w < 0 || r.h < 0)
+    return;
+
+  for (int y = r.y; y < r.y+r.h; ++y)
+  for (int x = r.x; x < r.x+r.w; ++x)
+    background_colors[y*this->w + x] = c;
+}
+
+void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
+  if (!s.length)
+    return;
+
+  p = p + offset;
+
+  if (xclip1 == -1)
+    xclip1 = this->w;
+
+  Utf8char *row = &this->chars[p.y*w];
+  Color *text_row = &this->text_colors[p.y*w];
+  Color *background_row = &this->background_colors[p.y*w];
+
+  for (Utf8char c : s) {
+    if (c == '\t') {
+      for (int i = 0; i < G.tab_width; ++i, ++p.x)
+        if (p.x >= xclip0 && p.x < xclip1) {
+          row[p.x] = ' ';
+          if (text_color)
+            text_row[p.x] = *text_color;
+          if (background_color)
+            background_row[p.x] = *background_color;
+        }
+    }
+    else {
+      if (p.x >= xclip0 && p.x < xclip1) {
+        row[p.x] = c;
+        if (text_color)
+          text_row[p.x] = *text_color;
+        if (background_color)
+          background_row[p.x] = *background_color;
+      }
+      ++p.x;
+    }
+  }
+}
+
+void Canvas::render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
+  if (p.x >= w)
+    return;
+  G.tmp_render_buffer.clear();
+  G.tmp_render_buffer.appendv(fmt, args);
+  render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer.slice);
+}
+
+void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  this->render_str_v(p, text_color, background_color, x0, x1, fmt, args);
+  va_end(args);
+}
+
+void Canvas::render(Pos pos) {
+  #if 0
+  printf("PRINTING SCREEN\n\n");
+  for (int i = 0; i < h; ++i) {
+    for (int j = 0; j < w; ++j)
+      putchar('a' + (int)(styles[i*w + j].background_color.r * 25.0f));
+    putchar('\n');
+  }
+  #endif
+
+  Pos size = char2pixel(w,h) + Pos{2*margin, 2*margin};
+
+  // render shadow
+  if (draw_shadow) {
+    int shadow_offset = 3;
+    Color shadow_color = COLOR_BLACK;
+    shadow_color.a = 170;
+    Color shadow_color2 = COLOR_BLACK;
+    shadow_color2.a = 0;
+
+    // right side
+    push_quad(
+      {(u16)(pos.x + size.x),                 (u16)(pos.y + shadow_offset),          shadow_color},
+      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color},
+      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + shadow_offset),          shadow_color2});
+
+    // bottom side
+    push_quad(
+      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y),                 shadow_color},
+      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
+      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color});
+  }
+
+  // render base background
+  push_square_quad((u16)pos.x, (u16)(pos.x+size.x), (u16)(pos.y), (u16)(pos.y+size.y), background);
+  pos.x += margin;
+  pos.y += margin;
+
+  // render background
+  for (int y = 0; y < h; ++y) {
+    for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
+      if (x1 < w && background_colors[y*w + x1] == background_colors[y*w + x0])
+        continue;
+      Pos p0 = char2pixel(x0,y) + pos;
+      Pos p1 = char2pixel(x1,y+1) + pos;
+      const Color c = background_colors[y*w + x0];
+      push_square_quad((u16)p0.x, (u16)p1.x, (u16)p0.y, (u16)p1.y, c);
+      x0 = x1;
+    }
+  }
+
+  // render text
+  const int text_offset_y = (int)(-G.font_height*3.3f/15.0f); // TODO: get this from truetype?
+  for (int row = 0; row < h; ++row) {
+    G.tmp_render_buffer.clear();
+    G.tmp_render_buffer.append(&chars[row*w], w);
+    int y = char2pixely(row+1) + text_offset_y + pos.y;
+    for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
+      if (x1 < w && text_colors[row*w + x1] == text_colors[row*w + x0])
+        continue;
+      int x = char2pixelx(x0) + pos.x;
+      push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, text_colors[row*w + x0]);
+      x0 = x1;
+    }
+  }
 }
 
 void Pane::render_as_dropdown() {
@@ -3832,201 +4100,6 @@ int Pane::calc_left_visible_column() const {
   x = this->buffer->lines[this->buffer->cursors[0].y].visual_offset(x, G.tab_width);
   x -= this->numchars_x()*6/7;
   return at_least(x, 0);
-}
-
-// fills a to b but only inside the bounds 
-void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
-  Pos a = range.a;
-  Pos b = range.b;
-  a -= offset;
-  b -= offset;
-  if (bounds.w == -1)
-    bounds.w = w - bounds.x;
-  if (bounds.h == -1)
-    bounds.h = h - bounds.y;
-
-  bounds.x = clamp(bounds.x, 0, w-1);
-  bounds.w = clamp(bounds.w, 0, w-bounds.x);
-  bounds.y = clamp(bounds.y, 0, h-1);
-  bounds.h = clamp(bounds.h, 0, h-bounds.y);
-
-  a.x = clamp(a.x, bounds.x, bounds.w-1);
-  a.y = clamp(a.y, bounds.y, bounds.h-1);
-  b.x = clamp(b.x, bounds.x, bounds.w-1);
-  b.y = clamp(b.y, bounds.y, bounds.h-1);
-
-  if (a.y == b.y) {
-    for (int x = a.x; x <= b.x; ++x)
-      this->text_colors[a.y*this->w + x] = c;
-    return;
-  }
-
-  int y = a.y;
-  if (y < b.y)
-    for (int x = a.x; x < bounds.x+bounds.w; ++x)
-      this->text_colors[y*this->w + x] = c;
-  for (++y; y < b.y; ++y)
-    for (int x = bounds.x; x < bounds.x+bounds.w; ++x)
-      this->text_colors[y*this->w + x] = c;
-  for (int x = bounds.x; x <= b.x; ++x)
-    this->text_colors[y*this->w + x] = c;
-}
-
-// w,h: use -1 to say it goes to the end
-void Canvas::fill_textcolor(Rect r, Color c) {
-  r.x -= offset.x;
-  r.y -= offset.y;
-  if (r.w == -1)
-    r.w = this->w - r.x;
-  if (r.h == -1)
-    r.h = this->h - r.y;
-  r.w = at_most(r.w, this->w - r.x);
-  r.h = at_most(r.h, this->h - r.y);
-  if (r.w < 0 || r.h < 0)
-    return;
-
-  for (int y = r.y; y < r.y+r.h; ++y)
-  for (int x = r.x; x < r.x+r.w; ++x)
-    text_colors[y*this->w + x] = c;
-}
-
-// w,h: use -1 to say it goes to the end
-void Canvas::fill_background(Rect r, Color c) {
-  r.x -= offset.x;
-  r.y -= offset.y;
-  if (r.w == -1)
-    r.w = this->w - r.x;
-  if (r.h == -1)
-    r.h = this->h - r.y;
-  r.w = at_most(r.w, this->w - r.x);
-  r.h = at_most(r.h, this->h - r.y);
-  if (r.w < 0 || r.h < 0)
-    return;
-
-  for (int y = r.y; y < r.y+r.h; ++y)
-  for (int x = r.x; x < r.x+r.w; ++x)
-    background_colors[y*this->w + x] = c;
-}
-
-void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
-  if (!s.length)
-    return;
-
-  p = p + offset;
-
-  if (xclip1 == -1)
-    xclip1 = this->w;
-
-  Utf8char *row = &this->chars[p.y*w];
-  Color *text_row = &this->text_colors[p.y*w];
-  Color *background_row = &this->background_colors[p.y*w];
-
-  for (Utf8char c : s) {
-    if (c == '\t') {
-      for (int i = 0; i < G.tab_width; ++i, ++p.x)
-        if (p.x >= xclip0 && p.x < xclip1) {
-          row[p.x] = ' ';
-          if (text_color)
-            text_row[p.x] = *text_color;
-          if (background_color)
-            background_row[p.x] = *background_color;
-        }
-    }
-    else {
-      if (p.x >= xclip0 && p.x < xclip1) {
-        row[p.x] = c;
-        if (text_color)
-          text_row[p.x] = *text_color;
-        if (background_color)
-          background_row[p.x] = *background_color;
-      }
-      ++p.x;
-    }
-  }
-}
-
-void Canvas::render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
-  if (p.x >= w)
-    return;
-  G.tmp_render_buffer.clear();
-  G.tmp_render_buffer.appendv(fmt, args);
-  render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer.slice);
-}
-
-void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  this->render_str_v(p, text_color, background_color, x0, x1, fmt, args);
-  va_end(args);
-}
-
-void Canvas::render(Pos pos) {
-  #if 0
-  printf("PRINTING SCREEN\n\n");
-  for (int i = 0; i < h; ++i) {
-    for (int j = 0; j < w; ++j)
-      putchar('a' + (int)(styles[i*w + j].background_color.r * 25.0f));
-    putchar('\n');
-  }
-  #endif
-
-  Pos size = char2pixel(w,h) + Pos{2*margin, 2*margin};
-
-  // render shadow
-  if (draw_shadow) {
-    int shadow_offset = 3;
-    Color shadow_color = COLOR_BLACK;
-    shadow_color.a = 170;
-    Color shadow_color2 = COLOR_BLACK;
-    shadow_color2.a = 0;
-
-    // right side
-    push_quad(
-      {(u16)(pos.x + size.x),                 (u16)(pos.y + shadow_offset),          shadow_color},
-      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color},
-      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + shadow_offset),          shadow_color2});
-
-    // bottom side
-    push_quad(
-      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y),                 shadow_color},
-      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color});
-  }
-
-  // render base background
-  push_square_quad((u16)pos.x, (u16)(pos.x+size.x), (u16)(pos.y), (u16)(pos.y+size.y), background);
-  pos.x += margin;
-  pos.y += margin;
-
-  // render background
-  for (int y = 0; y < h; ++y) {
-    for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-      if (x1 < w && background_colors[y*w + x1] == background_colors[y*w + x0])
-        continue;
-      Pos p0 = char2pixel(x0,y) + pos;
-      Pos p1 = char2pixel(x1,y+1) + pos;
-      const Color c = background_colors[y*w + x0];
-      push_square_quad((u16)p0.x, (u16)p1.x, (u16)p0.y, (u16)p1.y, c);
-      x0 = x1;
-    }
-  }
-
-  // render text
-  const int text_offset_y = (int)(-G.font_height*3.3f/15.0f); // TODO: get this from truetype?
-  for (int row = 0; row < h; ++row) {
-    G.tmp_render_buffer.clear();
-    G.tmp_render_buffer.append(&chars[row*w], w);
-    int y = char2pixely(row+1) + text_offset_y + pos.y;
-    for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
-      if (x1 < w && text_colors[row*w + x1] == text_colors[row*w + x0])
-        continue;
-      int x = char2pixelx(x0) + pos.x;
-      push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, text_colors[row*w + x0]);
-      x0 = x1;
-    }
-  }
 }
 
 Pos Pane::slot2pixel(Pos p) const {
