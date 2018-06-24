@@ -2023,19 +2023,23 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case KEY_ESCAPE:
       buffer.collapse_cursors();
       break;
+
     case '=':
       buffer.autoindent();
       break;
+
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
       if (graphics_set_font_options(ttf_file, G.font_height))
         exit(1);
       break;
+
     case '-':
       G.font_height = at_least(G.font_height-1, 7);
       if (graphics_set_font_options(ttf_file, G.font_height))
         exit(1);
       break;
+
     case 'b': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         if (buffer.advance_r(i))
@@ -2054,6 +2058,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       buffer.deduplicate_cursors();
       break;}
+
     case 'w': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         Utf8char c = buffer.getchar(i);
@@ -2067,33 +2072,42 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       buffer.deduplicate_cursors();
       break;}
+
     case 'q':
       if (buffer.modified())
         status_message_set("You have unsaved changes. If you really want to exit, use :quit");
       else
         editor_exit(0);
       break;
+
     case 'i':
       mode_insert();
       break;
+
     case 'j':
       buffer.move_y(1);
       break;
+
     case 'k':
       buffer.move_y(-1);
       break;
+
     case 'h':
       buffer.advance_r();
       break;
+
     case 'l':
       buffer.advance();
       break;
+
     case 'L':
       buffer.goto_endline();
       break;
+
     case 'H':
       buffer.goto_beginline();
       break;
+
     case 'p':
       if (G.editing_pane == G.selected_pane && SDL_HasClipboardText()) {
         char *s = SDL_GetClipboardText();
@@ -2126,36 +2140,46 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         }
         // otherwise just paste out the whole thing for all cursors
         else {
-          buffer.insert(Slice::create(s));
+          Slice sl = Slice::create(s);
+          if (sl.chars[sl.length-1] == '\n') {
+            buffer.insert_newline_below();
+            --sl.length;
+          }
+          buffer.insert(sl);
         }
 
         buffer.raw_end();
         SDL_free(s);
       }
       break;
+
     case 'n':
       G.search_term_background_color.reset();
       if (!buffer.find_and_move(G.search_buffer[0].slice, false))
         status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
+
     case 'm': {
       int i = buffer.cursors.size;
       buffer.cursors.push(buffer.cursors[i-1]);
       buffer.move_y(i, 1);
       buffer.deduplicate_cursors();
       break;}
+
     case 'N':
       G.search_term_background_color.reset();
       if (!buffer.find_and_move_r(G.search_buffer[0], false))
         status_message_set("'{}' not found", &G.search_buffer[0]);
       /*jumplist_push(prev);*/
       break;
+
     case CONTROL('w'): {
       Pane *p = new Pane{};
       Pane::init_edit(*p, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
       G.editing_panes += p;
       break;}
+
     case CONTROL('l'): {
       int i;
       for (i = 0; i < G.editing_panes.size; ++i)
@@ -2165,6 +2189,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       G.editing_pane = G.editing_panes[i];
       G.selected_pane = G.editing_pane;
       break;}
+
     case CONTROL('h'): {
       int i;
       for (i = 0; i < G.editing_panes.size; ++i)
@@ -2174,15 +2199,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       G.editing_pane = G.editing_panes[i];
       G.selected_pane = G.editing_pane;
       break;}
+
     case ' ':
       mode_search();
       break;
+
     case CONTROL('p'):
       mode_filesearch();
       break;
+
     case 'g':
       mode_goto();
       break;
+
     case 'o':
       buffer.action_begin();
       buffer.insert_newline_below();
@@ -2190,6 +2219,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_insert();
       buffer.action_end();
       break;
+
     case 'Y': {
       StringBuffer s = {};
       for (int i = 0; i < buffer.cursors.size; ++i) {
@@ -2199,9 +2229,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       SDL_SetClipboardText(s.chars);
       util_free(s);
       break;}
+
     case '{':
       buffer.find_and_move_r('{', false);
       break;
+
     case '}': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         Pos p = buffer.cursors[i].pos;
@@ -2222,21 +2254,27 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       }
       buffer.deduplicate_cursors();
       break;}
+
     case ':':
       mode_menu();
       break;
+
     case 'd':
       mode_delete();
       break;
+
     case 'J':
       buffer.move_y(G.editing_pane->numchars_y()/2);
       break;
+
     case 'K':
       buffer.move_y(-G.editing_pane->numchars_y()/2);
       break;
+
     case CONTROL('z'):
       buffer.undo();
       break;
+      
     case CONTROL('Z'):
       buffer.redo();
       break;
