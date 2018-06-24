@@ -32,6 +32,8 @@
   typedef uint64_t u64;
 #endif
 
+// An annotation for function parameters that a variable is optional
+#define OPTIONAL
 
 struct Path;
 struct Slice;
@@ -681,6 +683,13 @@ struct Slice {
 
   static Slice create(const char *s) {
     return Slice::create(s, strlen(s));
+  }
+
+  static void print_hex(Slice s) {
+    putchar('\n');
+    for (int i = 0; i < s.length; ++i)
+      printf("%.2x", s.chars[i]);
+    putchar('\n');
   }
 
   STRING_METHODS_DECLARATION

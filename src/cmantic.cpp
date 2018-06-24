@@ -1,6 +1,6 @@
 /*
  * TODO:
- * Copy/paste
+ * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
@@ -241,18 +241,6 @@ struct TokenResult {
 
 struct Buffer;
 
-// Undo functionality:
-//
-// Every call on the buffer that mutates it will add that action to the undo/redo list.
-// But sometimes you want a series of actions to be grouped together for undo/redo.
-// To do that you can call action_group_begin() and action_group_end() before and after your actions
-//
-// Example:
-//
-// buffer.action_group_begin();
-// .. call methods on buffer that mutate it
-// buffer.action_group_end();
-//
 enum UndoActionType {
   ACTIONTYPE_INSERT,
   ACTIONTYPE_DELETE,
@@ -268,24 +256,26 @@ struct UndoAction {
       Pos a;
       Pos b;
       String s;
-    } is;
+      int cursor_idx;
+    } insert;
 
     // ACTIONTYPE_DELETE
     struct {
       Pos a;
       Pos b;
       String s;
-    } rm;
+      int cursor_idx;
+    } remove;
 
     // ACTIONTYPE_CURSOR_SNAPSHOT
     struct {
       Array<Cursor> cursors;
-    } cc;
+    };
   };
 
-  static UndoAction delete_range(Buffer &b, Range r);
+  static UndoAction delete_range(Range r, String s, int cursor_idx = -1);
   static UndoAction cursor_snapshot(Array<Cursor> cursors);
-  static UndoAction insert_slice(Pos a, Pos b, Slice s);
+  static UndoAction insert_slice(Pos a, Pos b, Slice s, int cursor_idx = -1);
 };
 
 static void util_free(UndoAction &a);
@@ -297,23 +287,24 @@ struct Buffer {
   Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
+  // raw_mode is used when inserting text that is not coming from the keyboard, for example when pasting text or doing undo/redo
+  // It disables autoindenting and other automatic formatting stuff
+  int _raw_mode_depth;
+
   /* parser stuff */
   Array<TokenInfo> tokens;
   Array<String> identifiers;
 
   Array<Cursor> cursors;
-  bool modified() {
-    return _next_undo_action > 0;
-  }
 
   // methods
-
+  bool modified() {return _next_undo_action > 0;}
+  void raw_begin() {++_raw_mode_depth;}
+  void raw_end() {--_raw_mode_depth;}
+  bool raw_mode() {return _raw_mode_depth;}
   StringBuffer& operator[](int i) {return lines[i];}
-
   const StringBuffer& operator[](int i) const {return lines[i];}
-
   int num_lines() const {return lines.size;}
-
   Slice slice(Pos p, int len) {return lines[p.y](p.x,p.x+len); }
   Pos to_visual_pos(Pos p);
   void move_to_y(int marker_idx, int y);
@@ -337,16 +328,18 @@ struct Buffer {
   bool find_and_move_r(char c, bool stay);
   bool find_start_of_identifier(Pos p, Pos *pout);
   void insert(Slice s);
-  void insert(Pos p, Slice s);
+  void insert(Pos p, Slice s, int cursor_idx = -1);
+  void insert(Slice s, int cursor_idx);
   void remove_trailing_whitespace(int y);
   void pretty_range(int y0, int y1);
   void pretty(int y);
   void insert(Pos p, Utf8char ch);
+  void insert(Utf8char ch, int cursor_idx);
   void insert(Utf8char ch);
   void delete_line_at(int y);
   void delete_line();
   void delete_line(int y);
-  void remove_range(Pos a, Pos b);
+  void remove_range(Pos a, Pos b, int cursor_idx = -1);
   void delete_char();
   void insert_tab();
   int getindent(int y);
@@ -375,6 +368,10 @@ struct Buffer {
   Utf8char getchar(int marker_idx);
   void deduplicate_cursors();
   void collapse_cursors();
+  StringBuffer range_to_string(Range r);
+  // Finds the token at or before given position
+  TokenInfo* token_find(Pos p);
+  TokenResult token_read(Pos *p, int y_end);
 
 
   // Undo functionality:
@@ -430,11 +427,11 @@ struct Buffer {
       if (_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT && _undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN) {
         changed = false;
         UndoAction a = _undo_actions[_next_undo_action-1];
-        if (a.cc.cursors.size != cursors.size)
+        if (a.cursors.size != cursors.size)
           changed = true;
         else {
-          for (int i = 0; i < a.cc.cursors.size; ++i) {
-            if (cursors[i] == a.cc.cursors[i])
+          for (int i = 0; i < a.cursors.size; ++i) {
+            if (cursors[i] == a.cursors[i])
               continue;
             changed = true;
             break;
@@ -445,6 +442,42 @@ struct Buffer {
       if (changed) {
         push_undo_action(UndoAction::cursor_snapshot(cursors));
         push_undo_action({ACTIONTYPE_GROUP_END});
+
+        #if 1
+        // build up clipboard from removed strings
+        Array<StringBuffer> clips = {};
+        // find start of group
+        UndoAction *a = &_undo_actions[_next_undo_action-1];
+        assert(a->type == ACTIONTYPE_GROUP_END);
+        while (a[-1].type != ACTIONTYPE_GROUP_BEGIN)
+          --a;
+        assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
+        clips.resize(a->cursors.size);
+        clips.zero();
+        // find every delete action, and if there is a cursor for that, add that delete that cursors 
+        bool clip_filled = false;
+        for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
+          if (a->type != ACTIONTYPE_DELETE)
+            continue;
+          if (a->remove.cursor_idx == -1)
+            continue;
+
+          clips[a->remove.cursor_idx] += a->remove.s;
+          clip_filled = true;
+        }
+
+        if (clip_filled) {
+          StringBuffer clip = {};
+          for (StringBuffer s : clips) {
+            clip += s;
+            clip += '\n';
+          }
+          clip += '\0';
+          SDL_SetClipboardText(clip.chars);
+          util_free(clip);
+        }
+        util_free(clips);
+        #endif
       }
       else {
         // remove the start
@@ -464,6 +497,7 @@ struct Buffer {
       return;
 
     undo_disabled = true;
+    raw_begin();
     --_next_undo_action;
     assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_END);
     --_next_undo_action;
@@ -472,16 +506,16 @@ struct Buffer {
       // printf("undo action: %i\n", a.type);
       switch (a.type) {
         case ACTIONTYPE_INSERT:
-          // printf("Removing {%i %i}, {%i %i}\n", a.is.a.x, a.is.a.y, a.is.b.x, a.is.b.y);
-          remove_range(a.is.a, a.is.b);
+          // printf("Removing {%i %i}, {%i %i}\n", a.insert.a.x, a.insert.a.y, a.insert.b.x, a.insert.b.y);
+          remove_range(a.insert.a, a.insert.b);
           break;
         case ACTIONTYPE_DELETE:
-          // printf("Inserting '%.*s' at {%i %i}\n", a.rm.s.slice.length, a.rm.s.slice.chars, a.rm.a.x, a.rm.a.y);
-          insert(a.rm.a, a.rm.s.slice);
+          // printf("Inserting '%.*s' at {%i %i}\n", a.remove.s.slice.length, a.remove.s.slice.chars, a.remove.a.x, a.remove.a.y);
+          insert(a.remove.a, a.remove.s.slice);
           break;
         case ACTIONTYPE_CURSOR_SNAPSHOT:
           util_free(cursors);
-          cursors = a.cc.cursors.copy_shallow();
+          cursors = a.cursors.copy_shallow();
           break;
         case ACTIONTYPE_GROUP_BEGIN:
         case ACTIONTYPE_GROUP_END:
@@ -490,6 +524,7 @@ struct Buffer {
     }
     // printf("cursors: %i\n", cursors.size);
     undo_disabled = false;
+    raw_end();
   }
 
   void redo() {
@@ -500,6 +535,7 @@ struct Buffer {
       return;
 
     undo_disabled = true;
+    raw_begin();
     assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
     ++_next_undo_action;
     for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_END; ++_next_undo_action) {
@@ -507,16 +543,16 @@ struct Buffer {
       // printf("redo action: %i\n", a.type);
       switch (a.type) {
         case ACTIONTYPE_INSERT:
-          // printf("Inserting '%s' at {%i %i}\n", a.is.s.slice.chars, a.is.a.x, a.is.a.y);
-          insert(a.is.a, a.is.s.slice);
+          // printf("Inserting '%s' at {%i %i}\n", a.insert.s.slice.chars, a.insert.a.x, a.insert.a.y);
+          insert(a.insert.a, a.insert.s.slice);
           break;
         case ACTIONTYPE_DELETE:
-          // printf("Removing {%i %i}, {%i %i}\n", a.rm.a.x, a.rm.a.y, a.rm.b.x, a.rm.b.y);
-          remove_range(a.rm.a, a.rm.b);
+          // printf("Removing {%i %i}, {%i %i}\n", a.remove.a.x, a.remove.a.y, a.remove.b.x, a.remove.b.y);
+          remove_range(a.remove.a, a.remove.b);
           break;
         case ACTIONTYPE_CURSOR_SNAPSHOT:
           util_free(cursors);
-          cursors = a.cc.cursors.copy_shallow();
+          cursors = a.cursors.copy_shallow();
           break;
         case ACTIONTYPE_GROUP_BEGIN:
         case ACTIONTYPE_GROUP_END:
@@ -525,6 +561,7 @@ struct Buffer {
     }
     ++_next_undo_action;
     undo_disabled = false;
+    raw_end();
   }
 
   void print_undo_actions() {
@@ -550,12 +587,6 @@ struct Buffer {
     }
   }
 
-  // Tokenization
-  // Finds the token at or before given position
-  TokenInfo* token_find(Pos p);
-  TokenResult token_read(Pos *p, int y_end);
-
-  // file reading
   static Buffer* from_file(Slice filename);
 };
 
@@ -563,15 +594,15 @@ static void util_free(UndoAction &a) {
   switch (a.type) {
     case ACTIONTYPE_INSERT:
       // puts("Freeing INSERT");
-      util_free(a.is.s);
+      util_free(a.insert.s);
       break;
     case ACTIONTYPE_DELETE:
       // puts("Freeing DELETE");
-      util_free(a.rm.s);
+      util_free(a.remove.s);
       break;
     case ACTIONTYPE_CURSOR_SNAPSHOT:
       // puts("Freeing CURSOR SNAPSHOT");
-      util_free(a.cc.cursors);
+      util_free(a.cursors);
       break;
     case ACTIONTYPE_GROUP_BEGIN:
     case ACTIONTYPE_GROUP_END:
@@ -592,40 +623,24 @@ void util_free(Buffer *b) {
   util_free(*b);
 }
 
-UndoAction UndoAction::delete_range(Buffer &b, Range r) {
+UndoAction UndoAction::delete_range(Range r, String s, int cursor_idx) {
   UndoAction a;
   a.type = ACTIONTYPE_DELETE;
-  // turn range into a string with endlines in it
-  // TODO: We could probably do some compression on this
-  if (r.a.y == r.b.y)
-    a.rm = {r.a, r.b, String::create(b.lines[r.a.y](r.a.x, r.b.x))};
-  else {
-    // first row
-    StringBuffer s = {};
-    s += b.lines[r.a.y](r.a.x, -1);
-    s += '\n';
-    for (int y = r.a.y+1; y < r.b.y; ++y) {
-      s += b.lines[r.a.y].slice;
-      s += '\n';
-    }
-    if (r.b.x)
-      s += b.lines[r.b.y](0, r.b.x);
-    a.rm = {r.a, r.b, s.string};
-  }
+  a.remove = {r.a, r.b, s, cursor_idx};
   return a;
 }
 
 UndoAction UndoAction::cursor_snapshot(Array<Cursor> cursors) {
   UndoAction a;
   a.type = ACTIONTYPE_CURSOR_SNAPSHOT;
-  a.cc = {cursors.copy_shallow()};
+  a.cursors = cursors.copy_shallow();
   return a;
 }
 
-UndoAction UndoAction::insert_slice(Pos a, Pos b, Slice s) {
+UndoAction UndoAction::insert_slice(Pos a, Pos b, Slice s, int cursor_idx) {
   UndoAction act;
   act.type = ACTIONTYPE_INSERT;
-  act.is = {a, b, String::create(s)};
+  act.insert = {a, b, String::create(s), cursor_idx};
   return act;
 }
 
@@ -753,7 +768,7 @@ struct Pane {
   }
 };
 
-void util_free(Pane *p) {
+void util_free(Pane*) {
 }
 
 struct PoppedColor {
@@ -2078,6 +2093,45 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     case 'H':
       buffer.goto_beginline();
       break;
+    case 'p':
+      if (G.editing_pane == G.selected_pane && SDL_HasClipboardText()) {
+        char *s = SDL_GetClipboardText();
+        // if we're on windows, we want to remove \r
+        #ifdef OS_WINDOWS
+          char *out = s;
+          for (char *in = s; *in; ++in)
+            if (*in != '\r')
+              *out++ = *in;
+          *out = '\0';
+        #endif
+
+        int num_endlines = 0;
+        for (char *t = s; *t; ++t)
+          num_endlines += (*t == '\n');
+
+        buffer.raw_begin();
+
+        // split clipboard among cursors
+        if (buffer.cursors.size > 1 && num_endlines == buffer.cursors.size) {
+          char *start = s;
+          char *end = start;
+          for (int i = 0; i < buffer.cursors.size; ++i) {
+            start = end;
+            while (*end && *end != '\n')
+              ++end;
+            buffer.insert(Slice::create(start, end-start), i);
+            ++end;
+          }
+        }
+        // otherwise just paste out the whole thing for all cursors
+        else {
+          buffer.insert(Slice::create(s));
+        }
+
+        buffer.raw_end();
+        SDL_free(s);
+      }
+      break;
     case 'n':
       G.search_term_background_color.reset();
       if (!buffer.find_and_move(G.search_buffer[0].slice, false))
@@ -2135,6 +2189,15 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_insert();
       buffer.action_end();
       break;
+    case 'Y': {
+      StringBuffer s = {};
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        s += StringBuffer::create(buffer.lines[buffer.cursors[i].y].slice);
+        s += '\n';
+      }
+      SDL_SetClipboardText(s.chars);
+      util_free(s);
+      break;}
     case '{':
       buffer.find_and_move_r('{', false);
       break;
@@ -2386,6 +2449,26 @@ Buffer* Buffer::from_file(Slice filename) {
   return 0;
 }
 
+StringBuffer Buffer::range_to_string(const Range r) {
+    // turn range into a string with endlines in it
+  // TODO: We could probably do some compression on this
+  if (r.a.y == r.b.y)
+    return StringBuffer::create(lines[r.a.y](r.a.x, r.b.x));
+  else {
+    // first row
+    StringBuffer s = {};
+    s += lines[r.a.y](r.a.x, -1);
+    s += '\n';
+    for (int y = r.a.y+1; y < r.b.y; ++y) {
+      s += lines[r.a.y].slice;
+      s += '\n';
+    }
+    if (r.b.x)
+      s += lines[r.b.y](0, r.b.x);
+    return s;
+  }
+}
+
 void Buffer::move(int marker_idx, int dx, int dy) {
   if (dy)
     move_y(marker_idx, dy);
@@ -2597,20 +2680,23 @@ void Buffer::delete_line(int y) {
 
 void Buffer::delete_line() {
   action_begin();
-  for (Cursor c : cursors)
-    delete_line(c.y);
+  for (int i = 0; i < cursors.size; ++i)
+    remove_range({0, cursors[i].y}, {0, cursors[i].y+1}, i);
   action_end();
 }
 
-void Buffer::remove_range(Pos a, Pos b) {
+// returns the string of what was removed
+void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
   if (b <= a)
     return;
 
   action_begin();
   G.flags.cursor_dirty = true;
 
-  if (!undo_disabled)
-    push_undo_action(UndoAction::delete_range(*this, {a,b}));
+  if (!undo_disabled) {
+    UndoAction act = UndoAction::delete_range({a,b}, range_to_string({a,b}).string, cursor_idx);
+    push_undo_action(act);
+  }
 
   for (Cursor &c : cursors) {
     // All cursors that are inside range should be moved to beginning of range
@@ -2652,12 +2738,12 @@ void Buffer::delete_char() {
     if (pos.x == 0) {
       if (pos.y == 0)
         return;
-      remove_range({lines[pos.y-1].length, pos.y-1}, {0, pos.y});
+      remove_range({lines[pos.y-1].length, pos.y-1}, {0, pos.y}, i);
     }
     else {
       Pos p = pos;
       advance_r(p);
-      remove_range(p, pos);
+      remove_range(p, pos, i);
     }
   }
 
@@ -2807,7 +2893,24 @@ void Buffer::push_line(Slice s) {
   action_end();
 }
 
-void Buffer::insert(const Pos a, Slice s) {
+void Buffer::insert(Utf8char ch, int cursor_idx) {
+  action_begin();
+
+  // TODO: @utf8
+  char c = ch.ansi();
+  insert(Slice{&c, 1}, cursor_idx);
+
+  if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
+    autoindent(cursors[cursor_idx].y);
+
+  action_end();
+}
+
+void Buffer::insert(Slice s, int cursor_idx) {
+  insert(cursors[cursor_idx].pos, s, cursor_idx);
+}
+
+void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
   if (!s.length)
     return;
 
@@ -2833,7 +2936,7 @@ void Buffer::insert(const Pos a, Slice s) {
     printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   if (!undo_disabled)
-    push_undo_action(UndoAction::insert_slice(a, b, s));
+    push_undo_action(UndoAction::insert_slice(a, b, s, cursor_idx));
 
   if (num_lines == 0) {
     lines[a.y].insert(a.x, s);
