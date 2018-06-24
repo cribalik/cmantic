@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * Movement-based commands (delete-move, yank-move, etc.)
  * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
