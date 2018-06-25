@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * clean trailing whitespace
+ * Pane stack
  * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
@@ -7,8 +9,9 @@
  * Goto definition
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
  * Compress undo history?
+ * Make syntax highlighter use declaration list
  *
- * Add support for sublimes yaml-based syntax highlighting
+ * Add support for sublimes yaml-based syntax highlighting?
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -18,7 +21,6 @@
  *
  * Folding
  * Multiuser editing
- * Pane stack
  * TODO stack
  * copy-paste
  * Jumplist
@@ -345,9 +347,8 @@ struct Buffer {
   void insert(Slice s);
   void insert(Pos p, Slice s, int cursor_idx = -1);
   void insert(Slice s, int cursor_idx);
-  void remove_trailing_whitespace(int y);
-  void pretty_range(int y0, int y1);
-  void pretty(int y);
+  void remove_trailing_whitespace(int cursor_idx);
+  void remove_trailing_whitespace();
   void insert(Pos p, Utf8char ch);
   void insert(Utf8char ch, int cursor_idx);
   void insert(Utf8char ch);
@@ -909,7 +910,6 @@ struct State {
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
-  #define DROPDOWN_SIZE 7
 };
 
 State G;
@@ -1291,8 +1291,6 @@ static void tokenize(Buffer &b) {
               tokens[j].token == TOKEN_IDENTIFIER &&
               tokens[j+1].token == '(') {
             declarations += {tokens[j].a, tokens[j].b};
-            Slice s = b.getslice(tokens[j].r);
-            printf("Found decl: %.*s\n", s.length, s.chars);
             break;
           }
           else if (j+3 < tokens.size &&
@@ -1302,8 +1300,6 @@ static void tokenize(Buffer &b) {
                    tokens[j+2].token == TOKEN_IDENTIFIER &&
                    tokens[j+3].token == '(') {
             declarations += {tokens[j].a, tokens[j+2].b};
-            Slice s = b.getslice(tokens[j].a, tokens[j+2].b);
-            printf("Found decl: %.*s\n", s.length, s.chars);
             break;
           }
           no_declaration:;
@@ -1663,7 +1659,7 @@ static void render_dropdown(Pane *pane) {
   // since fuzzy matching is expensive, we only update we moved since last time
   if (G.flags.cursor_dirty) {
     Slice identifier = b.slice(identifier_start, b.cursors[0].x - identifier_start.x);
-    StackArray<FuzzyMatch, DROPDOWN_SIZE> best_matches;
+    StackArray<FuzzyMatch, 10> best_matches;
     View<Slice> input = VIEW(b.identifiers, slice);
     best_matches.size = fuzzy_match(identifier, input, view(best_matches));
 
@@ -2257,6 +2253,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         if (dropdown_autocomplete(buffer))
           break;
         insert_default(*G.editing_pane, key);
+        break;
+
+      case KEY_ESCAPE:
+        buffer.remove_trailing_whitespace();
+        mode_normal(true);
         break;
 
       case CONTROL('j'): {
@@ -2859,37 +2860,32 @@ bool Buffer::find_and_move(Slice s, bool stay) {
   return true;
 }
 
-void Buffer::remove_trailing_whitespace(int y) {
+void Buffer::remove_trailing_whitespace() {
+  action_begin();
+  for (int i = 0; i < cursors.size; ++i)
+    remove_trailing_whitespace(i);
+  action_end();
+}
+
+void Buffer::remove_trailing_whitespace(int cursor_idx) {
+  int y = cursors[cursor_idx].y;
+  if (lines[y].length == 0)
+    return;
+
   int x = lines[y].length - 1;
   if (!getchar(x,y).isspace())
     return;
 
   action_begin();
   // TODO: @utf8
-  while (x >= 0 && getchar(x, y).isspace())
+  while (x > 0 && getchar(x, y).isspace())
     --x;
-  remove_range({x, y}, {lines[y].length, y});
-  goto_endline();
+  printf("%i\n", x);
+  remove_range({x, y}, {lines[y].length, y}, cursor_idx);
+  printf("{%i %i} {%i %i}\n", x, y, lines[y].length, y);
+  goto_endline(cursor_idx);
 
   action_end();
-}
-
-void Buffer::pretty_range(int y0, int y1) {
-  action_begin();
-  for (; y0 < y1; ++y0) {
-    #if 0
-      int diff;
-      diff = autoindent(y0);
-      if (y0 == pos.y)
-        move_x(diff);
-    #endif
-    remove_trailing_whitespace(y0);
-  }
-  action_end();
-}
-
-void Buffer::pretty(int y) {
-  pretty_range(y, y+1);
 }
 
 void Buffer::delete_line(int y) {
@@ -3254,8 +3250,10 @@ void Buffer::insert_tab() {
 void Buffer::insert_newline() {
   action_begin();
 
-  for (Cursor c : cursors)
-    insert(c.pos, Utf8char::create('\n'));
+  for (int i = 0; i < cursors.size; ++i) {
+    remove_trailing_whitespace(i);
+    insert(cursors[i].pos, Utf8char::create('\n'));
+  }
 
   action_end();
 }
@@ -3960,6 +3958,13 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         // TODO: @utf8
         Pos p = pos;
         t = b.token_read(&p, y1);
+        if (t.tok == TOKEN_IDENTIFIER && (
+            identifier == "struct" ||
+            identifier == "enum" ||
+            identifier == "#define" ||
+            identifier == "class"))
+          render_highlight(t.a, t.b, G.identifier_color);
+
         while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
           t = b.token_read(&p, y1);
         if (t.tok != TOKEN_IDENTIFIER)
