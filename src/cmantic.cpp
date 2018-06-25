@@ -4,9 +4,9 @@
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
- * Retokenize on edit
  * Goto definition
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
+ * Compress undo history?
  *
  * Add support for sublimes yaml-based syntax highlighting
  *
@@ -149,10 +149,20 @@ struct Pos {
   }
 };
 
-struct TokenInfo {
-  Token token;
+struct Range {
   Pos a;
   Pos b;
+};
+
+struct TokenInfo {
+  Token token;
+  union {
+    struct {
+      Pos a;
+      Pos b;
+    };
+    Range r;
+  };
 };
 
 void util_free(TokenInfo) {}
@@ -198,10 +208,7 @@ static bool is_identifier_tail(Utf8char c) {
   return c.is_ansi() && is_identifier_tail(c.ansi());
 }
 
-struct Range {
-  Pos a;
-  Pos b;
-};
+static void util_free(Range) {}
 union Rect {
   struct {
     Pos p;
@@ -283,6 +290,7 @@ struct UndoAction {
 };
 
 static void util_free(UndoAction &a);
+static void tokenize(Buffer &b);
 
 struct Buffer {
   String filename;
@@ -297,11 +305,14 @@ struct Buffer {
 
   /* parser stuff */
   Array<TokenInfo> tokens;
+  Array<Range> declarations;
   Array<String> identifiers;
 
   Array<Cursor> cursors;
 
   // methods
+  Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x+1);} // range is inclusive
+  Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x+1);} // range is inclusive
   bool modified() {return _next_undo_action > 0;}
   void raw_begin() {++_raw_mode_depth;}
   void raw_end() {--_raw_mode_depth;}
@@ -428,9 +439,12 @@ struct Buffer {
     if (_action_group_depth == 0) {
       // check if something actually happened
       bool changed = true;
+      bool buffer_changed = true;
       if (_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT && _undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN) {
         changed = false;
+        buffer_changed = false;
         UndoAction a = _undo_actions[_next_undo_action-1];
+        // check if cursors changed
         if (a.cursors.size != cursors.size)
           changed = true;
         else {
@@ -443,55 +457,58 @@ struct Buffer {
         }
       }
 
-      if (changed) {
-        push_undo_action(UndoAction::cursor_snapshot(cursors));
-        push_undo_action({ACTIONTYPE_GROUP_END});
-
-        #if 1
-        // build up clipboard from removed strings
-        Array<StringBuffer> clips = {};
-        // find start of group
-        UndoAction *a = &_undo_actions[_next_undo_action-1];
-        assert(a->type == ACTIONTYPE_GROUP_END);
-        while (a[-1].type != ACTIONTYPE_GROUP_BEGIN)
-          --a;
-        assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
-        clips.resize(a->cursors.size);
-        clips.zero();
-        // find every delete action, and if there is a cursor for that, add that delete that cursors 
-        bool clip_filled = false;
-        for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
-          if (a->type != ACTIONTYPE_DELETE)
-            continue;
-          if (a->remove.cursor_idx == -1)
-            continue;
-
-          clips[a->remove.cursor_idx] += a->remove.s;
-          clip_filled = true;
-        }
-
-        if (clip_filled) {
-          StringBuffer clip = {};
-          for (int i = 0; i < clips.size; ++i) {
-            clip += clips[i];
-            if (i < clips.size-1)
-              clip += '\n';
-          }
-          clip += '\0';
-          SDL_SetClipboardText(clip.chars);
-          util_free(clip);
-        }
-        util_free(clips);
-        #endif
-      }
-      else {
-        // remove the start
+      // if nothing happened, remove group
+      if (!changed) {
         assert(_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT);
         util_free(_undo_actions[_next_undo_action-1]);
         assert(_undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN);
         _next_undo_action -= 2;
         _undo_actions.size -= 2;
+        return;
       }
+
+
+      push_undo_action(UndoAction::cursor_snapshot(cursors));
+      push_undo_action({ACTIONTYPE_GROUP_END});
+
+      // retokenize
+      if (buffer_changed)
+        tokenize(*this);
+
+      // build up clipboard from removed strings
+      Array<StringBuffer> clips = {};
+      // find start of group
+      UndoAction *a = &_undo_actions[_next_undo_action-1];
+      assert(a->type == ACTIONTYPE_GROUP_END);
+      while (a[-1].type != ACTIONTYPE_GROUP_BEGIN)
+        --a;
+      assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
+      clips.resize(a->cursors.size);
+      clips.zero();
+      // find every delete action, and if there is a cursor for that, add that delete that cursors 
+      bool clip_filled = false;
+      for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
+        if (a->type != ACTIONTYPE_DELETE)
+          continue;
+        if (a->remove.cursor_idx == -1)
+          continue;
+
+        clips[a->remove.cursor_idx] += a->remove.s;
+        clip_filled = true;
+      }
+
+      if (clip_filled) {
+        StringBuffer clip = {};
+        for (int i = 0; i < clips.size; ++i) {
+          clip += clips[i];
+          if (i < clips.size-1)
+            clip += '\n';
+        }
+        clip += '\0';
+        SDL_SetClipboardText(clip.chars);
+        util_free(clip);
+      }
+      util_free(clips);
     }
   }
 
@@ -529,6 +546,9 @@ struct Buffer {
     }
     // printf("cursors: %i\n", cursors.size);
     undo_disabled = false;
+
+    // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
+    tokenize(*this);
     raw_end();
   }
 
@@ -566,6 +586,8 @@ struct Buffer {
     }
     ++_next_undo_action;
     undo_disabled = false;
+    // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
+    tokenize(*this);
     raw_end();
   }
 
@@ -949,6 +971,7 @@ static const Slice operators[] = {
 
 /****** @TOKENIZER ******/
 
+// TODO: currently we only set starting position of tokens (a). We need b as well! :O
 static void tokenize(Buffer &b) {
   Array<TokenInfo> tokens = b.tokens;
   util_free(tokens);
@@ -1072,6 +1095,61 @@ static void tokenize(Buffer &b) {
   tokens += {TOKEN_EOF, 0, b.lines.size, 0, b.lines.size};
 
   b.tokens = tokens;
+
+  // TODO: find definitions
+  Array<Range> declarations = b.declarations;
+  util_free(declarations);
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo ti = tokens[i];
+    switch (ti.token) {
+      case TOKEN_IDENTIFIER: {
+        Slice s = b.lines[ti.a.y](ti.a.x, ti.b.x+1);
+        if (i < tokens.size-1 && (s == "struct" || s == "enum" || s == "class") && tokens[i+1].token == TOKEN_IDENTIFIER) {
+          declarations += {tokens[i+1].a, tokens[i+1].b};
+          break;
+        }
+
+        // check for function declaration
+        {
+          int j = i;
+          Slice op;
+
+          // skip pointer and references
+          for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
+            op = b.getslice(ti.r);
+            if (op == "*" || op == "&")
+              continue;
+            goto no_declaration;
+          }
+
+          if (j+1 < tokens.size &&
+              tokens[j].token == TOKEN_IDENTIFIER &&
+              tokens[j+1].token == TOKEN_OPERATOR &&
+              b.getslice(tokens[j+1].r) == ")") {
+            declarations += {tokens[j].a, tokens[j].b};
+            printf("Found decl: %.*s\n", s.length, s.chars);
+            break;
+          }
+          else if (j+3 < tokens.size &&
+                   tokens[j].token == TOKEN_IDENTIFIER &&
+                   tokens[j+1].token == TOKEN_OPERATOR &&
+                   b.getslice(tokens[j+1].r) == "::" &&
+                   tokens[j+2].token == TOKEN_IDENTIFIER &&
+                   tokens[j+3].token == TOKEN_OPERATOR &&
+                   b.getslice(tokens[j+3].r) == "(") {
+            declarations += {tokens[j].a, tokens[j+2].b};
+            Slice s = b.getslice(tokens[j].r);
+            printf("Found decl: %.*s\n", s.length, s.chars);
+            break;
+          }
+          no_declaration:;
+        }
+        break;}
+      default:
+        break;
+    }
+  }
+  b.declarations = declarations;
 }
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
@@ -1158,6 +1236,14 @@ static void menu_option_show_tab_type() {
     status_message_set("Tabs is %i spaces", G.editing_pane->buffer->tab_type);
 }
 
+static void menu_option_print_declarations() {
+  Buffer &b = *G.editing_pane->buffer;
+  for (Range r : b.declarations) {
+    Slice s = b.getslice(r);
+    printf("%.*s\n", s.length, s.chars);
+  }
+}
+
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   {
     Slice::create("quit"),
@@ -1173,6 +1259,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("show_tab_type"),
     Slice::create("Show if tab type is spaces or tab"),
     menu_option_show_tab_type
+  },
+  {
+    Slice::create("show_declaration"),
+    Slice::create("Show all declarations in current buffer"),
+    menu_option_print_declarations
   }
 };
 
@@ -1776,7 +1867,7 @@ static void state_init() {
 
   // @colors!
   G.default_text_color = COLOR_WHITE;
-  G.default_background_color = {41, 41, 41, 255};
+  G.default_background_color = {38,50,56, 255};
   G.default_gutter_text_color = {127, 127, 127, 255};
   G.default_gutter_background_color = G.default_background_color;
   G.number_color = COLOR_RED;
@@ -2121,7 +2212,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         Pos b = buffer.cursors[i].pos;
         if (b < a)
           swap(a,b);
-        buffer.advance(b);
         buffer.remove_range(a, b, i);
       }
     }
@@ -2593,12 +2683,12 @@ void Buffer::move(int marker_idx, int dx, int dy) {
 }
 
 void Buffer::deduplicate_cursors() {
-  G.flags.cursor_dirty = true;
   for (int i = 0; i < cursors.size; ++i)
   for (int j = 0; j < cursors.size; ++j)
     if (i != j && cursors[i].pos == cursors[j].pos) {
       cursors[j] = cursors[--cursors.size],
       --j;
+      G.flags.cursor_dirty = true;
     }
 }
 
@@ -2817,8 +2907,10 @@ void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
 
   for (Cursor &c : cursors) {
     // All cursors that are inside range should be moved to beginning of range
-    if (a <= c.pos && c.pos <= b)
+    if (a <= c.pos && c.pos <= b) {
       c.pos = a;
+      c.ghost_x = c.x;
+    }
     // If lines were deleted, all cursors below b.y should move up
     else if (b.y > a.y && c.y > b.y)
       c.y -= b.y-a.y;
@@ -2826,6 +2918,7 @@ void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
     else if (c.y == b.y && c.x >= b.x-1) {
       c.y = a.y;
       c.x = a.x + c.x - b.x;
+      c.ghost_x = c.x;
     }
   }
 
@@ -2839,6 +2932,7 @@ void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
     // delete lines a+1 to and including b
     lines.remove_slown(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
+  // not sure if this is really needed..
   for (Cursor &c : cursors)
 	  if (c.y >= lines.size)
 		  c.y = lines.size - 1;
@@ -3049,8 +3143,8 @@ void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
   else
     b = {a.x + s.length, a.y};
 
-  if (this == G.editing_pane->buffer)
-    printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
+  // if (this == G.editing_pane->buffer)
+    // printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   if (!undo_disabled)
     push_undo_action(UndoAction::insert_slice(a, b, s, cursor_idx));
@@ -3059,8 +3153,10 @@ void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
     lines[a.y].insert(a.x, s);
     // move cursors
     for (Cursor &c : cursors)
-      if (c.y == a.y && c.x >= a.x)
+      if (c.y == a.y && c.x >= a.x) {
         c.x += s.length;
+        c.ghost_x = c.x;
+      }
   }
   else {
     lines.insertz(a.y+1, num_lines);
@@ -3090,6 +3186,7 @@ void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
       if (c.y == a.y && c.x >= a.x) {
         c.y += num_lines;
         c.x = b.x + c.x - a.x;
+        c.ghost_x = c.x;
       }
       else if (c.y > a.y) {
         c.y += num_lines;
@@ -3850,28 +3947,26 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         // check for functions
         // we assume "<identifier> [<identifier><operators>]* <identifier>(" is a function declaration
         // TODO: @utf8
-        if (identifier != "return") {
-          Pos p = pos;
+        Pos p = pos;
+        t = b.token_read(&p, y1);
+        while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
           t = b.token_read(&p, y1);
-          while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
-            t = b.token_read(&p, y1);
+        if (t.tok != TOKEN_IDENTIFIER)
+          break;
+        Pos fun_start = t.a;
+        Pos fun_end = t.b;
+        t = b.token_read(&p, y1);
+
+        if (t.tok == TOKEN_OPERATOR && t.operator_str == "::") {
+          t = b.token_read(&p, y1);
           if (t.tok != TOKEN_IDENTIFIER)
             break;
-          Pos fun_start = t.a;
-          Pos fun_end = t.b;
+          fun_end = t.b;
           t = b.token_read(&p, y1);
-
-          if (t.tok == TOKEN_OPERATOR && t.operator_str == "::") {
-            t = b.token_read(&p, y1);
-            if (t.tok != TOKEN_IDENTIFIER)
-              break;
-            fun_end = t.b;
-            t = b.token_read(&p, y1);
-          }
-
-          if (t.tok == '(')
-            render_highlight(fun_start, fun_end, G.identifier_color);
         }
+
+        if (t.tok == '(')
+          render_highlight(fun_start, fun_end, G.identifier_color);
       } break;
 
       case '#':
