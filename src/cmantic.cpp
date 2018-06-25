@@ -311,8 +311,8 @@ struct Buffer {
   Array<Cursor> cursors;
 
   // methods
-  Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x+1);} // range is inclusive
-  Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x+1);} // range is inclusive
+  Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
+  Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
   bool modified() {return _next_undo_action > 0;}
   void raw_begin() {++_raw_mode_depth;}
   void raw_end() {--_raw_mode_depth;}
@@ -969,6 +969,160 @@ static const Slice operators[] = {
   {(char*)">", 1},
 };
 
+static const Color COLOR_PINK = {236, 64, 122, 255};
+static const Color COLOR_YELLOW = {255, 235, 59, 255};
+static const Color COLOR_AMBER = {255,193,7, 255};
+static const Color COLOR_DEEP_ORANGE = {255,138,101, 255};
+static const Color COLOR_ORANGE = {255,183,77, 255};
+static const Color COLOR_GREEN = {129,199,132, 255};
+static const Color COLOR_LIGHT_GREEN = {174,213,129, 255};
+static const Color COLOR_INDIGO = {121,134,203, 255};
+static const Color COLOR_DEEP_PURPLE = {149,117,205, 255};
+static const Color COLOR_RED = {229,115,115, 255};
+static const Color COLOR_CYAN = {77,208,225, 255};
+static const Color COLOR_LIGHT_BLUE = {79,195,247, 255};
+static const Color COLOR_PURPLE = {186,104,200, 255};
+static const Color COLOR_BLUEGREY = {84, 110, 122, 255};
+static const Color COLOR_GREY = {51, 51, 51, 255};
+static const Color COLOR_LIGHT_GREY = {76, 76, 76, 255};
+static const Color COLOR_BLACK = {25, 25, 25, 255};
+static const Color COLOR_WHITE = {230, 230, 230, 255};
+static const Color COLOR_BLUE = {79,195,247, 255};
+static const Color COLOR_DARK_BLUE = {124, 173, 213, 255};
+
+enum KeywordType {
+  KEYWORD_NONE,
+  KEYWORD_CONTROL, // control flow
+  KEYWORD_TYPE,
+  KEYWORD_SPECIFIER,
+  KEYWORD_DECLARATION,
+  KEYWORD_FUNCTION,
+  KEYWORD_MACRO,
+  KEYWORD_CONSTANT,
+  KEYWORD_COUNT
+};
+
+Color keyword_colors[KEYWORD_COUNT];
+
+struct Keyword {
+  const char *name;
+  KeywordType type;
+};
+static Keyword keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"NULL", KEYWORD_CONSTANT},
+  {"delete", KEYWORD_CONSTANT},
+  {"new", KEYWORD_CONSTANT},
+
+  // types
+
+  {"char", KEYWORD_TYPE},
+  {"short", KEYWORD_TYPE},
+  {"int", KEYWORD_TYPE},
+  {"long", KEYWORD_TYPE},
+  {"float", KEYWORD_TYPE},
+  {"double", KEYWORD_TYPE},
+  {"unsigned", KEYWORD_TYPE},
+  {"void", KEYWORD_TYPE},
+  {"bool", KEYWORD_TYPE},
+  {"uint64_t", KEYWORD_TYPE},
+  {"uint32_t", KEYWORD_TYPE},
+  {"uint16_t", KEYWORD_TYPE},
+  {"uint8_t", KEYWORD_TYPE},
+  {"int64_t", KEYWORD_TYPE},
+  {"int32_t", KEYWORD_TYPE},
+  {"int16_t", KEYWORD_TYPE},
+  {"int8_t", KEYWORD_TYPE},
+  {"u64", KEYWORD_TYPE},
+  {"u32", KEYWORD_TYPE},
+  {"u16", KEYWORD_TYPE},
+  {"u8", KEYWORD_TYPE},
+  {"i64", KEYWORD_TYPE},
+  {"i32", KEYWORD_TYPE},
+  {"i16", KEYWORD_TYPE},
+  {"i8", KEYWORD_TYPE},
+  {"va_list", KEYWORD_TYPE},
+
+  // function
+
+  #if 0
+  {"typeof", KEYWORD_FUNCTION},
+  {"sizeof", KEYWORD_FUNCTION},
+  {"printf", KEYWORD_FUNCTION},
+  {"puts", KEYWORD_FUNCTION},
+  {"strcmp", KEYWORD_FUNCTION},
+  {"strlen", KEYWORD_FUNCTION},
+  {"fprintf", KEYWORD_FUNCTION},
+  {"malloc", KEYWORD_FUNCTION},
+  {"free", KEYWORD_FUNCTION},
+  {"new", KEYWORD_FUNCTION},
+  {"delete", KEYWORD_FUNCTION},
+  {"fflush", KEYWORD_FUNCTION},
+  {"va_start", KEYWORD_FUNCTION},
+  {"vfprintf", KEYWORD_FUNCTION},
+  {"va_end", KEYWORD_FUNCTION},
+  {"abort", KEYWORD_FUNCTION},
+  {"exit", KEYWORD_FUNCTION},
+  {"min", KEYWORD_FUNCTION},
+  {"max", KEYWORD_FUNCTION},
+  {"memcmp", KEYWORD_FUNCTION},
+  {"putchar", KEYWORD_FUNCTION},
+  {"putc", KEYWORD_FUNCTION},
+  {"fputc", KEYWORD_FUNCTION},
+  {"getchar", KEYWORD_FUNCTION},
+  {"swap", KEYWORD_FUNCTION},
+  #endif
+
+  // specifiers
+
+  {"static", KEYWORD_SPECIFIER},
+  {"const", KEYWORD_SPECIFIER},
+  {"extern", KEYWORD_SPECIFIER},
+  {"nothrow", KEYWORD_SPECIFIER},
+  {"noexcept", KEYWORD_SPECIFIER},
+
+  // declarations
+
+  {"struct", KEYWORD_DECLARATION},
+  {"class", KEYWORD_DECLARATION},
+  {"union", KEYWORD_DECLARATION},
+  {"enum", KEYWORD_DECLARATION},
+  {"typedef", KEYWORD_DECLARATION},
+  {"template", KEYWORD_DECLARATION},
+  {"operator", KEYWORD_DECLARATION},
+
+  // macro
+
+  {"#include", KEYWORD_MACRO},
+  {"#define", KEYWORD_MACRO},
+  {"#undef", KEYWORD_MACRO},
+  {"#ifdef", KEYWORD_MACRO},
+  {"#ifndef", KEYWORD_MACRO},
+  {"#endif", KEYWORD_MACRO},
+  {"#elif", KEYWORD_MACRO},
+  {"#else", KEYWORD_MACRO},
+  {"#if", KEYWORD_MACRO},
+  {"#error", KEYWORD_MACRO},
+
+  // flow control
+
+  {"switch", KEYWORD_CONTROL},
+  {"case", KEYWORD_CONTROL},
+  {"if", KEYWORD_CONTROL},
+  {"else", KEYWORD_CONTROL},
+  {"for", KEYWORD_CONTROL},
+  {"while", KEYWORD_CONTROL},
+  {"return", KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break", KEYWORD_CONTROL},
+  {"goto", KEYWORD_CONTROL},
+};
+
+
 /****** @TOKENIZER ******/
 
 // TODO: currently we only set starting position of tokens (a). We need b as well! :O
@@ -979,6 +1133,7 @@ static void tokenize(Buffer &b) {
   int y = 0;
 
   for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
     #define NEXT(n) (x += n, c = line[x])
     if (y >= b.lines.size)
       break;
@@ -987,7 +1142,7 @@ static void tokenize(Buffer &b) {
     // endline
     char c;
     if (x >= b.lines[y].length) {
-      tokens += {TOKEN_EOL, x, y};
+      t.token = TOKEN_EOL;
       ++y, x = 0;
       goto token_done;
     }
@@ -1001,7 +1156,7 @@ static void tokenize(Buffer &b) {
 
     // identifier
     if (is_identifier_head(c)) {
-      tokens += {TOKEN_IDENTIFIER, x, y};
+      t.token = TOKEN_IDENTIFIER;
       int identifier_start = x;
       NEXT(1);
       while (is_identifier_tail(c))
@@ -1016,7 +1171,7 @@ static void tokenize(Buffer &b) {
 
     // block comment
     if (line.begins_with(x, "/*")) {
-      tokens += {TOKEN_BLOCK_COMMENT, x, y};
+      t.token = TOKEN_BLOCK_COMMENT;
       NEXT(2);
       // goto matching end block
       for (;;) {
@@ -1042,14 +1197,14 @@ static void tokenize(Buffer &b) {
 
     // line comment
     if (line.begins_with(x, "//")) {
-      tokens += {TOKEN_LINE_COMMENT, x, y};
+      t.token = TOKEN_LINE_COMMENT;
       x = line.length;
       goto token_done;
     }
 
     // number
     if (is_number_head(c)) {
-      tokens += {TOKEN_NUMBER, x, y};
+      t.token = TOKEN_NUMBER;
       NEXT(1);
       while (is_number_tail(c))
         NEXT(1);
@@ -1064,7 +1219,7 @@ static void tokenize(Buffer &b) {
 
     // string
     if (c == '"' || c == '\'') {
-      tokens += {TOKEN_STRING, x, y};
+      t.token = TOKEN_STRING;
       const char str_char = c;
       NEXT(1);
       while (x < line.length && c != str_char)
@@ -1077,18 +1232,21 @@ static void tokenize(Buffer &b) {
     // operators
     for (int i = 0; i < (int)ARRAY_LEN(operators); ++i) {
       if (line.begins_with(x, operators[i])) {
-        tokens += {TOKEN_OPERATOR, x, y};
+        t.token = TOKEN_OPERATOR;
         NEXT(operators[i].length);
         goto token_done;
       }
     }
 
     // single char token
-    tokens += {(Token)c, x, y};
+    t.token = (Token)c;
     NEXT(1);
 
     token_done:;
-    tokens.last().b = {x, y};
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      tokens += t;
+    }
     #undef NEXT
   }
 
@@ -1103,14 +1261,21 @@ static void tokenize(Buffer &b) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER: {
-        Slice s = b.lines[ti.a.y](ti.a.x, ti.b.x+1);
-        if (i < tokens.size-1 && (s == "struct" || s == "enum" || s == "class") && tokens[i+1].token == TOKEN_IDENTIFIER) {
-          declarations += {tokens[i+1].a, tokens[i+1].b};
+        Slice s = b.getslice(ti.r);
+        if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class" || s == "#define") &&
+            tokens[i+1].token == TOKEN_IDENTIFIER &&
+            tokens[i+2].token == '}') {
+          declarations += tokens[i+1].r;
           break;
         }
 
         // check for function declaration
         {
+          // is it a keyword, then ignore (things like else if (..) is not a declaration)
+          for (int j = 0; j < (int)ARRAY_LEN(keywords); ++j)
+            if (s == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
+              goto no_declaration;
+
           int j = i;
           Slice op;
 
@@ -1124,9 +1289,9 @@ static void tokenize(Buffer &b) {
 
           if (j+1 < tokens.size &&
               tokens[j].token == TOKEN_IDENTIFIER &&
-              tokens[j+1].token == TOKEN_OPERATOR &&
-              b.getslice(tokens[j+1].r) == ")") {
+              tokens[j+1].token == '(') {
             declarations += {tokens[j].a, tokens[j].b};
+            Slice s = b.getslice(tokens[j].r);
             printf("Found decl: %.*s\n", s.length, s.chars);
             break;
           }
@@ -1135,10 +1300,9 @@ static void tokenize(Buffer &b) {
                    tokens[j+1].token == TOKEN_OPERATOR &&
                    b.getslice(tokens[j+1].r) == "::" &&
                    tokens[j+2].token == TOKEN_IDENTIFIER &&
-                   tokens[j+3].token == TOKEN_OPERATOR &&
-                   b.getslice(tokens[j+3].r) == "(") {
+                   tokens[j+3].token == '(') {
             declarations += {tokens[j].a, tokens[j+2].b};
-            Slice s = b.getslice(tokens[j].r);
+            Slice s = b.getslice(tokens[j].a, tokens[j+2].b);
             printf("Found decl: %.*s\n", s.length, s.chars);
             break;
           }
@@ -1665,159 +1829,6 @@ static bool movement_default(Pane &pane, int key) {
 }
 
 static const char *ttf_file = "font.ttf";
-
-static const Color COLOR_PINK = {236, 64, 122, 255};
-static const Color COLOR_YELLOW = {255, 235, 59, 255};
-static const Color COLOR_AMBER = {255,193,7, 255};
-static const Color COLOR_DEEP_ORANGE = {255,138,101, 255};
-static const Color COLOR_ORANGE = {255,183,77, 255};
-static const Color COLOR_GREEN = {129,199,132, 255};
-static const Color COLOR_LIGHT_GREEN = {174,213,129, 255};
-static const Color COLOR_INDIGO = {121,134,203, 255};
-static const Color COLOR_DEEP_PURPLE = {149,117,205, 255};
-static const Color COLOR_RED = {229,115,115, 255};
-static const Color COLOR_CYAN = {77,208,225, 255};
-static const Color COLOR_LIGHT_BLUE = {79,195,247, 255};
-static const Color COLOR_PURPLE = {186,104,200, 255};
-static const Color COLOR_BLUEGREY = {84, 110, 122, 255};
-static const Color COLOR_GREY = {51, 51, 51, 255};
-static const Color COLOR_LIGHT_GREY = {76, 76, 76, 255};
-static const Color COLOR_BLACK = {25, 25, 25, 255};
-static const Color COLOR_WHITE = {230, 230, 230, 255};
-static const Color COLOR_BLUE = {79,195,247, 255};
-static const Color COLOR_DARK_BLUE = {124, 173, 213, 255};
-
-enum KeywordType {
-  KEYWORD_NONE,
-  KEYWORD_CONTROL, // control flow
-  KEYWORD_TYPE,
-  KEYWORD_SPECIFIER,
-  KEYWORD_DECLARATION,
-  KEYWORD_FUNCTION,
-  KEYWORD_MACRO,
-  KEYWORD_CONSTANT,
-  KEYWORD_COUNT
-};
-
-Color keyword_colors[KEYWORD_COUNT];
-
-struct Keyword {
-  const char *name;
-  KeywordType type;
-};
-static Keyword keywords[] = {
-
-  // constants
-
-  {"true", KEYWORD_CONSTANT},
-  {"false", KEYWORD_CONSTANT},
-  {"NULL", KEYWORD_CONSTANT},
-  {"delete", KEYWORD_CONSTANT},
-  {"new", KEYWORD_CONSTANT},
-
-  // types
-
-  {"char", KEYWORD_TYPE},
-  {"short", KEYWORD_TYPE},
-  {"int", KEYWORD_TYPE},
-  {"long", KEYWORD_TYPE},
-  {"float", KEYWORD_TYPE},
-  {"double", KEYWORD_TYPE},
-  {"unsigned", KEYWORD_TYPE},
-  {"void", KEYWORD_TYPE},
-  {"bool", KEYWORD_TYPE},
-  {"uint64_t", KEYWORD_TYPE},
-  {"uint32_t", KEYWORD_TYPE},
-  {"uint16_t", KEYWORD_TYPE},
-  {"uint8_t", KEYWORD_TYPE},
-  {"int64_t", KEYWORD_TYPE},
-  {"int32_t", KEYWORD_TYPE},
-  {"int16_t", KEYWORD_TYPE},
-  {"int8_t", KEYWORD_TYPE},
-  {"u64", KEYWORD_TYPE},
-  {"u32", KEYWORD_TYPE},
-  {"u16", KEYWORD_TYPE},
-  {"u8", KEYWORD_TYPE},
-  {"i64", KEYWORD_TYPE},
-  {"i32", KEYWORD_TYPE},
-  {"i16", KEYWORD_TYPE},
-  {"i8", KEYWORD_TYPE},
-  {"va_list", KEYWORD_TYPE},
-
-  // function
-
-  #if 0
-  {"typeof", KEYWORD_FUNCTION},
-  {"sizeof", KEYWORD_FUNCTION},
-  {"printf", KEYWORD_FUNCTION},
-  {"puts", KEYWORD_FUNCTION},
-  {"strcmp", KEYWORD_FUNCTION},
-  {"strlen", KEYWORD_FUNCTION},
-  {"fprintf", KEYWORD_FUNCTION},
-  {"malloc", KEYWORD_FUNCTION},
-  {"free", KEYWORD_FUNCTION},
-  {"new", KEYWORD_FUNCTION},
-  {"delete", KEYWORD_FUNCTION},
-  {"fflush", KEYWORD_FUNCTION},
-  {"va_start", KEYWORD_FUNCTION},
-  {"vfprintf", KEYWORD_FUNCTION},
-  {"va_end", KEYWORD_FUNCTION},
-  {"abort", KEYWORD_FUNCTION},
-  {"exit", KEYWORD_FUNCTION},
-  {"min", KEYWORD_FUNCTION},
-  {"max", KEYWORD_FUNCTION},
-  {"memcmp", KEYWORD_FUNCTION},
-  {"putchar", KEYWORD_FUNCTION},
-  {"putc", KEYWORD_FUNCTION},
-  {"fputc", KEYWORD_FUNCTION},
-  {"getchar", KEYWORD_FUNCTION},
-  {"swap", KEYWORD_FUNCTION},
-  #endif
-
-  // specifiers
-
-  {"static", KEYWORD_SPECIFIER},
-  {"const", KEYWORD_SPECIFIER},
-  {"extern", KEYWORD_SPECIFIER},
-  {"nothrow", KEYWORD_SPECIFIER},
-  {"noexcept", KEYWORD_SPECIFIER},
-
-  // declarations
-
-  {"struct", KEYWORD_DECLARATION},
-  {"class", KEYWORD_DECLARATION},
-  {"union", KEYWORD_DECLARATION},
-  {"enum", KEYWORD_DECLARATION},
-  {"typedef", KEYWORD_DECLARATION},
-  {"template", KEYWORD_DECLARATION},
-  {"operator", KEYWORD_DECLARATION},
-
-  // macro
-
-  {"#include", KEYWORD_MACRO},
-  {"#define", KEYWORD_MACRO},
-  {"#undef", KEYWORD_MACRO},
-  {"#ifdef", KEYWORD_MACRO},
-  {"#ifndef", KEYWORD_MACRO},
-  {"#endif", KEYWORD_MACRO},
-  {"#elif", KEYWORD_MACRO},
-  {"#else", KEYWORD_MACRO},
-  {"#if", KEYWORD_MACRO},
-  {"#error", KEYWORD_MACRO},
-
-  // flow control
-
-  {"switch", KEYWORD_CONTROL},
-  {"case", KEYWORD_CONTROL},
-  {"if", KEYWORD_CONTROL},
-  {"else", KEYWORD_CONTROL},
-  {"for", KEYWORD_CONTROL},
-  {"while", KEYWORD_CONTROL},
-  {"return", KEYWORD_CONTROL},
-  {"continue", KEYWORD_CONTROL},
-  {"break", KEYWORD_CONTROL},
-  {"goto", KEYWORD_CONTROL},
-};
 
 static void _filetree_fill(Path &path) {
   Array<StringBuffer> files = {};
