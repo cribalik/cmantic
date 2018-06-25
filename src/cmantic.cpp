@@ -1,17 +1,15 @@
 /*
  * TODO:
- * clean trailing whitespace
+ * Jumplist
  * Pane stack
  * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
- * Goto definition
+ * Index entire file tree
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
  * Compress undo history?
  * Make syntax highlighter use declaration list
- *
- * Add support for sublimes yaml-based syntax highlighting?
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -22,8 +20,6 @@
  * Folding
  * Multiuser editing
  * TODO stack
- * copy-paste
- * Jumplist
  * Optimize autocompletion using some sort of A*
  * update file list on change
  *
@@ -97,6 +93,7 @@ enum Mode {
   MODE_SEARCH,
   MODE_YANK,
   MODE_FILESEARCH,
+  MODE_GOTO_DEFINITION,
   MODE_COUNT
 };
 
@@ -298,6 +295,7 @@ struct Buffer {
   String filename;
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
 
+  Array<Cursor> cursors;
   Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
@@ -310,9 +308,10 @@ struct Buffer {
   Array<Range> declarations;
   Array<String> identifiers;
 
-  Array<Cursor> cursors;
 
   // methods
+  Range* Buffer::getdeclaration(Slice s);
+  TokenInfo* gettoken(Pos p);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
   bool modified() {return _next_undo_action > 0;}
@@ -716,6 +715,7 @@ enum PaneType {
   PANETYPE_MENU,
   PANETYPE_STATUSMESSAGE,
   PANETYPE_DROPDOWN,
+  PANETYPE_GOTO_DEFINITION,
 };
 
 struct MenuOption {
@@ -760,6 +760,7 @@ struct Pane {
   // internal methods
   void render_edit();
   void render_as_dropdown();
+  void render_goto_definition();
   void render_menu();
   void render_textsearch();
   void render_filesearch();
@@ -887,6 +888,8 @@ struct State {
   Buffer dropdown_buffer;
   Pane filetree_pane;
   Buffer filetree_buffer;
+  Pane goto_definition_pane;
+  Buffer goto_definition_buffer;
   Buffer null_buffer;
 
   Array<Buffer*> buffers;
@@ -1264,7 +1267,7 @@ static void tokenize(Buffer &b) {
         Slice s = b.getslice(ti.r);
         if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class" || s == "#define") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
-            tokens[i+2].token == '}') {
+            tokens[i+2].token == '{') {
           declarations += tokens[i+1].r;
           break;
         }
@@ -1421,7 +1424,7 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     menu_option_show_tab_type
   },
   {
-    Slice::create("show_declaration"),
+    Slice::create("show_declarations"),
     Slice::create("Show all declarations in current buffer"),
     menu_option_print_declarations
   }
@@ -1452,6 +1455,14 @@ static void mode_search() {
   G.search_failed = 0;
   G.bottom_pane = &G.search_pane;
   G.search_buffer.empty();
+}
+
+static void mode_goto_definition() {
+  mode_cleanup();
+  G.mode = MODE_GOTO_DEFINITION;
+  G.bottom_pane = &G.goto_definition_pane;
+  G.selected_pane = &G.goto_definition_pane;
+  G.goto_definition_buffer.empty();
 }
 
 static void mode_filesearch() {
@@ -1818,6 +1829,17 @@ static bool movement_default(Pane &pane, int key) {
       }
       break;}
 
+    case '*': {
+      TokenInfo *t = buffer.gettoken(buffer.cursors[0].pos);
+      if (!t)
+        break;
+      if (t->token != TOKEN_IDENTIFIER)
+        break;
+      G.search_term_background_color.reset();
+      G.search_buffer[0].length = 0;
+      G.search_buffer[0] += buffer.getslice(t->r);
+      buffer.find_and_move(G.search_buffer[0].slice, false);
+      break;}
     default:
       return false;
   }
@@ -1979,6 +2001,15 @@ static void state_init() {
   G.status_message_pane.active_highlight_background_color = &G.active_highlight_background_color.color;
   G.status_message_pane.margin = 5;
 
+  // goto definition pane
+  G.goto_definition_buffer.empty();
+  G.goto_definition_pane.type = PANETYPE_GOTO_DEFINITION;
+  G.goto_definition_pane.buffer = &G.goto_definition_buffer;
+  G.goto_definition_pane.background_color = &G.bottom_pane_highlight.color;
+  G.goto_definition_pane.text_color = &G.default_text_color;
+  G.goto_definition_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
+  G.goto_definition_pane.margin = 5;
+
   G.editing_pane = main_pane;
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = main_pane;
@@ -2070,6 +2101,20 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       case 'b':
         buffer.move_to(0, buffer.num_lines()-1);
         break;
+      case 'd': {
+        // goto declaration
+        TokenInfo *t = buffer.gettoken(buffer.cursors[0].pos);
+        if (!t)
+          break;
+        if (t->token != TOKEN_IDENTIFIER)
+          break;
+
+        Range *decl = buffer.getdeclaration(buffer.getslice(t->r));
+        if (!decl)
+          break;
+
+        buffer.move_to(decl->a);
+        break;}
     }
     mode_normal(true);
     break;
@@ -2106,6 +2151,34 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       handle_menu_insert(key, G.menu_pane);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
+
+  case MODE_GOTO_DEFINITION: {
+    if (key == KEY_ESCAPE) {
+      mode_normal(true);
+      break;
+    }
+
+    if (key == KEY_RETURN) {
+      Slice* opt = G.goto_definition_pane.menu_get_selection();
+      if (!opt) {
+        status_message_set("\"{}\": No such file", &G.goto_definition_buffer[0].slice);
+        mode_normal(false);
+        break;
+      }
+
+      Range *decl = buffer.getdeclaration(*opt);
+      if (!decl) {
+        mode_normal(true);
+        break;
+      }
+
+      buffer.move_to(decl->a);
+      mode_normal(true);
+      break;
+    }
+
+    handle_menu_insert(key, G.goto_definition_pane);
+    break;}
 
   case MODE_FILESEARCH:
     if (special_key == KEY_RETURN) {
@@ -2184,23 +2257,25 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     buffer.action_begin();
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
     if (movement_default(*G.editing_pane, key)) {
-      StringBuffer sb = {};
-      for (int i = 0; i < cursors.size; ++i) {
-        Pos a = cursors[i].pos;
-        Pos b = buffer.cursors[i].pos;
-        if (b < a)
-          swap(a,b);
+      if (cursors.size == buffer.cursors.size) {
+        StringBuffer sb = {};
+        for (int i = 0; i < cursors.size; ++i) {
+          Pos a = cursors[i].pos;
+          Pos b = buffer.cursors[i].pos;
+          if (b < a)
+            swap(a,b);
 
-        StringBuffer s = buffer.range_to_string({a,b});
-        sb += s;
-        if (i < cursors.size-1)
-          sb += '\n';
-        util_free(s);
+          StringBuffer s = buffer.range_to_string({a,b});
+          sb += s;
+          if (i < cursors.size-1)
+            sb += '\n';
+          util_free(s);
 
-        buffer.cursors[i].pos = a;
+          buffer.cursors[i].pos = a;
+        }
+        SDL_SetClipboardText(sb.chars);
+        util_free(sb);
       }
-      SDL_SetClipboardText(sb.chars);
-      util_free(sb);
     }
 
     buffer.action_end();
@@ -2213,13 +2288,15 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     buffer.action_begin();
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
     if (movement_default(*G.editing_pane, key)) {
-      // delete movement range
-      for (int i = 0; i < cursors.size; ++i) {
-        Pos a = cursors[i].pos;
-        Pos b = buffer.cursors[i].pos;
-        if (b < a)
-          swap(a,b);
-        buffer.remove_range(a, b, i);
+      if (cursors.size == buffer.cursors.size) {
+        // delete movement range
+        for (int i = 0; i < cursors.size; ++i) {
+          Pos a = cursors[i].pos;
+          Pos b = buffer.cursors[i].pos;
+          if (b < a)
+            swap(a,b);
+          buffer.remove_range(a, b, i);
+        }
       }
     }
     else {
@@ -2288,6 +2365,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
     case KEY_ESCAPE:
       buffer.collapse_cursors();
+      break;
+
+    case CONTROL('g'):
+      mode_goto_definition();
       break;
 
     case '=':
@@ -2685,6 +2766,31 @@ StringBuffer Buffer::range_to_string(const Range r) {
       s += lines[r.b.y](0, r.b.x);
     return s;
   }
+}
+
+Range* Buffer::getdeclaration(Slice s) {
+  for (Range &r : declarations)
+    if (getslice(r) == s)
+      return &r;
+  return 0;
+}
+
+TokenInfo* Buffer::gettoken(Pos p) {
+  // TODO: binary search
+  int a = 0, b = tokens.size-1;
+
+  while (a <= b) {
+    int mid = (a+b)/2;
+    if (tokens[mid].a <= p && p < tokens[mid].b) {
+      printf("{%i %i}\n", tokens[mid].a.x, tokens[mid].b.x);
+      return &tokens[mid];
+    }
+    if (tokens[mid].a < p)
+      a = mid+1;
+    else
+      b = mid-1;
+  }
+  return 0;
 }
 
 void Buffer::move(int marker_idx, int dx, int dy) {
@@ -4020,6 +4126,9 @@ void Pane::render() {
     case PANETYPE_DROPDOWN:
       render_as_dropdown();
       break;
+    case PANETYPE_GOTO_DEFINITION:
+      render_goto_definition();
+      break;
   }
 }
 
@@ -4114,6 +4223,21 @@ void Pane::render_filesearch() {
 void Pane::render_textsearch() {
   render_single_line(Slice::create("search: "));
   render_menu_popup(VIEW(G.editing_pane->buffer->identifiers, slice));
+}
+
+void Pane::render_goto_definition() {
+  Buffer &b = *G.editing_pane->buffer;
+  render_single_line(Slice::create("goto decl: "));
+
+  Array<Slice> decls = {};
+  if (G.flags.cursor_dirty) {
+    decls.reserve(b.declarations.size);
+    for (Range r : b.declarations)
+      decls += b.getslice(r);
+  }
+
+  render_menu_popup(view(decls));
+  util_free(decls);
 }
 
 void Pane::render_menu() {
