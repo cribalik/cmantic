@@ -1,6 +1,7 @@
 /*
  * TODO:
  * Jumplist
+ * Make syntax highlighter use declaration list
  * Pane stack
  * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
@@ -9,7 +10,6 @@
  * Index entire file tree
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
  * Compress undo history?
- * Make syntax highlighter use declaration list
  *
  * Update identifiers as you type
  *       When you make a change, go backwards to check if it was an
@@ -84,6 +84,95 @@
     #define IF_DEBUG(stmt)
   #endif
 
+struct FuzzyMatch {
+  Slice str;
+  float points;
+};
+
+static int fuzzy_cmp(const void *aa, const void *bb) {
+  const FuzzyMatch *a = (FuzzyMatch*)aa, *b = (FuzzyMatch*)bb;
+
+  if (a->points != b->points)
+    return (int)(b->points - a->points + 0.5f);
+  return a->str.length - b->str.length;
+}
+
+// returns number of found matches
+static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> result) {
+  int num_results = 0;
+
+  if (string.length == 0) {
+    int l = min(result.size, strings.size);
+    for (int i = 0; i < l; ++i)
+      result[i] = {strings[i], 0.0f};
+    return l;
+  }
+
+  for (int i = 0; i < strings.size; ++i) {
+    Slice identifier = strings[i];
+
+    const int test_len = identifier.length;
+    if (string.length > test_len)
+      continue;
+
+    const char *in = string.chars;
+    const char *in_end = in + string.length;
+    const char *test = identifier.chars;
+    const char *test_end = test + test_len;
+
+    float points = 0;
+    float gain = 10;
+
+    for (; in < in_end && test < test_end; ++test) {
+      if (*in == *test) {
+        points += gain;
+        gain = 10;
+        ++in;
+      }
+      else if (tolower(*in) == tolower(*test)) {
+        points += gain*0.8f;
+        gain = 10;
+        ++in;
+      }
+      /* Don't penalize special characters */
+      else if (isalnum(*test))
+        gain *= 0.7;
+    }
+
+    if (in != in_end || points <= 0)
+      continue;
+
+    /* push match */
+
+    if (num_results < result.size) {
+      result[num_results].str = identifier;
+      result[num_results].points = points;
+      ++num_results;
+    } else {
+      /* find worst match and replace */
+      FuzzyMatch &worst = result[ARRAY_MIN_BY(result, points)];
+      if (points > worst.points) {
+        worst.str = identifier;
+        worst.points = points;
+      }
+    }
+  }
+
+  qsort(result.items, num_results, sizeof(result[0]), fuzzy_cmp);
+  return num_results;
+}
+
+static Array<String> easy_fuzzy_match(Slice input, View<Slice> options) {
+  StackArray<FuzzyMatch, 15> matches = {};
+
+  int n = fuzzy_match(input, options, view(matches));
+
+  Array<String> result = {};
+  for (int i = 0; i < n; ++i)
+    result += String::create(matches[i].str);
+  return result;
+}
+
 enum Mode {
   MODE_NORMAL,
   MODE_INSERT,
@@ -94,6 +183,7 @@ enum Mode {
   MODE_YANK,
   MODE_FILESEARCH,
   MODE_GOTO_DEFINITION,
+  MODE_CWD,
   MODE_COUNT
 };
 
@@ -310,7 +400,7 @@ struct Buffer {
 
 
   // methods
-  Range* Buffer::getdeclaration(Slice s);
+  Range* getdeclaration(Slice s);
   TokenInfo* gettoken(Pos p);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
@@ -334,13 +424,13 @@ struct Buffer {
   void move_x(int marker_idx, int dx);
   void move(int marker_idx, int dx, int dy);
   void update();
-  bool find_r(StringBuffer s, int stay, Pos *pos);
+  bool find_r(Slice s, int stay, Pos *pos);
   bool find_r(char c, int stay, Pos *pos);
   bool find(Slice s, bool stay, Pos *pos);
   bool find(char c, bool stay, Pos *pos);
   bool find_and_move(Slice s, bool stay);
   bool find_and_move(char c, bool stay);
-  bool find_and_move_r(StringBuffer s, bool stay);
+  bool find_and_move_r(Slice s, bool stay);
   bool find_and_move_r(char c, bool stay);
   bool find_start_of_identifier(Pos p, Pos *pout);
   void insert(Slice s);
@@ -710,12 +800,9 @@ void util_free(Canvas &c) {
 enum PaneType {
   PANETYPE_NULL,
   PANETYPE_EDIT,
-  PANETYPE_FILESEARCH,
-  PANETYPE_TEXTSEARCH,
   PANETYPE_MENU,
   PANETYPE_STATUSMESSAGE,
   PANETYPE_DROPDOWN,
-  PANETYPE_GOTO_DEFINITION,
 };
 
 struct MenuOption {
@@ -745,8 +832,12 @@ struct Pane {
 
     // PANETYPE_MENU
     struct {
+      // callbacks
+      Array<String> (*get_suggestions)();
+      Slice prefix;
+
       int current_match;
-      Array<Slice> suggestions;
+      Array<String> suggestions;
     } menu;
 
     // PANETYPE_DROPDOWN
@@ -762,10 +853,8 @@ struct Pane {
   void render_as_dropdown();
   void render_goto_definition();
   void render_menu();
-  void render_textsearch();
-  void render_filesearch();
-  void render_single_line(Slice prefix);
-  void render_menu_popup(View<Slice> options);
+  void render_single_line();
+  void render_menu_popup();
   void render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
@@ -774,7 +863,7 @@ struct Pane {
     if (!menu.suggestions.size)
       return 0;
     int i = clamp(menu.current_match, 0, menu.suggestions.size);
-    return &menu.suggestions[i];
+    return &menu.suggestions[i].slice;
   };
 
   int numchars_x() const;
@@ -873,24 +962,21 @@ struct State {
   PoppedColor bottom_pane_highlight;
 
   /* editor state */
+  Path current_working_directory;
   Array<Pane*> editing_panes;
   Pane *bottom_pane;
   Pane *selected_pane; // the pane that the marker currently is on, could be everything from editing pane, to menu pane, to filesearch pane
   Pane *editing_pane; // the pane that is currently being edited on, regardless if you happen to be in filesearch or menu
 
-  Pane search_pane;
-  Buffer search_buffer;
   Pane menu_pane;
   Buffer menu_buffer;
   Pane status_message_pane;
   Buffer status_message_buffer;
   Pane dropdown_pane;
   Buffer dropdown_buffer;
-  Pane filetree_pane;
-  Buffer filetree_buffer;
-  Pane goto_definition_pane;
-  Buffer goto_definition_buffer;
   Buffer null_buffer;
+
+  String search_term;
 
   Array<Buffer*> buffers;
 
@@ -1097,6 +1183,7 @@ static Keyword keywords[] = {
   {"typedef", KEYWORD_DECLARATION},
   {"template", KEYWORD_DECLARATION},
   {"operator", KEYWORD_DECLARATION},
+  {"namespace", KEYWORD_DECLARATION},
 
   // macro
 
@@ -1265,7 +1352,12 @@ static void tokenize(Buffer &b) {
     switch (ti.token) {
       case TOKEN_IDENTIFIER: {
         Slice s = b.getslice(ti.r);
-        if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class" || s == "#define") &&
+        if (i+1 < tokens.size && s == "#define") {
+          declarations += tokens[i+1].r;
+          break;
+        }
+
+        if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
             tokens[i+2].token == '{') {
           declarations += tokens[i+1].r;
@@ -1284,7 +1376,7 @@ static void tokenize(Buffer &b) {
 
           // skip pointer and references
           for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
-            op = b.getslice(ti.r);
+            op = b.getslice(tokens[j].r);
             if (op == "*" || op == "&")
               continue;
             goto no_declaration;
@@ -1407,6 +1499,11 @@ static void menu_option_print_declarations() {
   }
 }
 
+static void mode_cwd();
+static void menu_option_chdir() {
+  mode_cwd();
+}
+
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   {
     Slice::create("quit"),
@@ -1427,20 +1524,28 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("show_declarations"),
     Slice::create("Show all declarations in current buffer"),
     menu_option_print_declarations
+  },
+  {
+    Slice::create("chdir"),
+    Slice::create("Change current working directory"),
+    menu_option_chdir
   }
 };
+
+static Array<String> easy_fuzzy_match(Slice input, View<Slice> options);
 
 static void mode_cleanup() {
   G.flags.cursor_dirty = true;
 
   if (G.mode == MODE_FILESEARCH)
-    G.filetree_buffer.empty();
+    G.menu_buffer.empty();
 
   if (G.mode == MODE_INSERT)
     G.editing_pane->buffer->action_end();
+}
 
-  if (G.mode == MODE_SEARCH)
-    G.search_buffer.identifiers = {};
+static Array<String> get_search_suggestions() {
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer->identifiers, slice));
 }
 
 static void mode_search() {
@@ -1450,28 +1555,112 @@ static void mode_search() {
 
   G.mode = MODE_SEARCH;
   G.bottom_pane_highlight.reset();
-  G.selected_pane = &G.search_pane;
+  G.selected_pane = &G.menu_pane;
   G.search_begin_pos = G.editing_pane->buffer->cursors[0].pos;
   G.search_failed = 0;
-  G.bottom_pane = &G.search_pane;
-  G.search_buffer.empty();
+
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu.get_suggestions = &get_search_suggestions;
+  G.menu_pane.menu.prefix = Slice::create("search");
+
+  G.menu_buffer.empty();
+}
+
+static Array<String> get_cwd_suggestions() {
+  // get folder
+
+  // first try relative path, and then try absolute
+  // TODO: Fix .push and Path::create so that they consolidate '..'
+  Path rel = G.current_working_directory.copy(); rel.push(G.menu_buffer.lines[0].slice);
+  Path rel_dir = rel.copy();
+  Path abs = Path::create(G.menu_buffer.lines[0].slice);
+  Path abs_dir = abs.copy();
+
+  Path *p = &rel;
+  Path *dir = &rel_dir;
+
+  if (!File::isdir(rel_dir)) {
+    rel_dir.pop();
+    if (!File::isdir(rel_dir)) {
+      p = &abs;
+      dir = &abs_dir;
+      if (!File::isdir(*dir))
+        dir->pop();
+    }
+  }
+
+  Array<Path> paths = {};
+  File::list_files(*dir, &paths);
+
+  Array<Slice> match_queries = {};
+  for (Path path : paths)
+    if (File::isdir(path))
+      match_queries += path.string.slice;
+
+  StackArray<FuzzyMatch, 15> matches = {};
+  int n = fuzzy_match(p->name(), view(match_queries), view(matches));
+  Array<String> result = {};
+  for (int i = 0; i < n; ++i)
+    result += String::create(matches[i].str);
+
+  util_free(match_queries);
+  util_free(paths);
+  util_free(rel);
+  util_free(rel_dir);
+  util_free(abs);
+  util_free(abs_dir);
+  return result;
+}
+
+static void mode_cwd() {
+  mode_cleanup();
+  G.mode = MODE_CWD;
+
+  G.selected_pane = &G.menu_pane;
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu.get_suggestions = &get_cwd_suggestions;
+  G.menu_pane.menu.prefix = Slice::create("chdir");
+
+  G.menu_buffer.empty();
+}
+
+static Array<String> get_goto_definition_suggestions() {
+  Buffer &b = *G.editing_pane->buffer;
+  Array<Slice> decls = {};
+  decls.reserve(b.declarations.size);
+  for (Range r : b.declarations)
+    decls += b.getslice(r);
+
+  Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(decls));
+  util_free(decls);
+  return result;
 }
 
 static void mode_goto_definition() {
   mode_cleanup();
   G.mode = MODE_GOTO_DEFINITION;
-  G.bottom_pane = &G.goto_definition_pane;
-  G.selected_pane = &G.goto_definition_pane;
-  G.goto_definition_buffer.empty();
+  G.selected_pane = &G.menu_pane;
+
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu.get_suggestions = &get_goto_definition_suggestions;
+  G.menu_pane.menu.prefix = Slice::create("goto decl");
+
+  G.menu_buffer.empty();
+}
+
+static Array<String> get_filesearch_suggestions() {
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.files, string.slice));
 }
 
 static void mode_filesearch() {
   mode_cleanup();
   G.mode = MODE_FILESEARCH;
   G.bottom_pane_highlight.reset();
-  G.selected_pane = &G.filetree_pane;
-  G.bottom_pane = &G.filetree_pane;
-  G.filetree_buffer.empty();
+  G.selected_pane = &G.menu_pane;
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu.get_suggestions = &get_filesearch_suggestions;
+  G.menu_pane.menu.prefix = Slice::create("open");
+  G.menu_buffer.empty();
 }
 
 static void mode_goto() {
@@ -1521,84 +1710,19 @@ static void mode_insert() {
   status_message_set("insert");
 }
 
+static Array<String> get_menu_suggestions() {
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW_FROM_ARRAY(menu_options, opt.name));
+}
+
 static void mode_menu() {
   mode_cleanup();
   G.mode = MODE_MENU;
   G.selected_pane = &G.menu_pane;
   G.bottom_pane_highlight.reset();
   G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu.get_suggestions = &get_menu_suggestions;
+  G.menu_pane.menu.prefix = Slice::create("menu");
   G.menu_buffer.empty();
-}
-
-struct FuzzyMatch {
-  Slice str;
-  float points;
-};
-
-static int fuzzy_cmp(const void *aa, const void *bb) {
-  const FuzzyMatch *a = (FuzzyMatch*)aa, *b = (FuzzyMatch*)bb;
-
-  if (a->points != b->points)
-    return (int)(b->points - a->points + 0.5f);
-  return a->str.length - b->str.length;
-}
-
-// returns number of found matches
-static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> result) {
-  int num_results = 0;
-
-  for (int i = 0; i < strings.size; ++i) {
-    Slice identifier = strings[i];
-
-    const int test_len = identifier.length;
-    if (string.length > test_len)
-      continue;
-
-    const char *in = string.chars;
-    const char *in_end = in + string.length;
-    const char *test = identifier.chars;
-    const char *test_end = test + test_len;
-
-    float points = 0;
-    float gain = 10;
-
-    for (; in < in_end && test < test_end; ++test) {
-      if (*in == *test) {
-        points += gain;
-        gain = 10;
-        ++in;
-      }
-      else if (tolower(*in) == tolower(*test)) {
-        points += gain*0.8f;
-        gain = 10;
-        ++in;
-      }
-      /* Don't penalize special characters */
-      else if (isalnum(*test))
-        gain *= 0.7;
-    }
-
-    if (in != in_end || points <= 0)
-      continue;
-
-    /* push match */
-
-    if (num_results < result.size) {
-      result[num_results].str = identifier;
-      result[num_results].points = points;
-      ++num_results;
-    } else {
-      /* find worst match and replace */
-      FuzzyMatch &worst = result[ARRAY_MIN_BY(result, points)];
-      if (points > worst.points) {
-        worst.str = identifier;
-        worst.points = points;
-      }
-    }
-  }
-
-  qsort(result.items, num_results, sizeof(result[0]), fuzzy_cmp);
-  return num_results;
 }
 
 static int char2pixelx(int x) {
@@ -1769,8 +1893,8 @@ static bool movement_default(Pane &pane, int key) {
 
     case 'n':
       G.search_term_background_color.reset();
-      if (!buffer.find_and_move(G.search_buffer[0].slice, false))
-        status_message_set("'{}' not found", &G.search_buffer[0]);
+      if (!buffer.find_and_move(G.search_term.slice, false))
+        status_message_set("'{}' not found", &G.menu_buffer[0]);
       /*jumplist_push(prev);*/
       break;
 
@@ -1800,8 +1924,8 @@ static bool movement_default(Pane &pane, int key) {
 
     case 'N':
       G.search_term_background_color.reset();
-      if (!buffer.find_and_move_r(G.search_buffer[0], false))
-        status_message_set("'{}' not found", &G.search_buffer[0]);
+      if (!buffer.find_and_move_r(G.search_term.slice, false))
+        status_message_set("'{}' not found", &G.search_term.slice);
       /*jumplist_push(prev);*/
       break;
 
@@ -1836,9 +1960,9 @@ static bool movement_default(Pane &pane, int key) {
       if (t->token != TOKEN_IDENTIFIER)
         break;
       G.search_term_background_color.reset();
-      G.search_buffer[0].length = 0;
-      G.search_buffer[0] += buffer.getslice(t->r);
-      buffer.find_and_move(G.search_buffer[0].slice, false);
+      util_free(G.search_term);
+      G.search_term = String::create(buffer.getslice(t->r));
+      buffer.find_and_move(G.search_term.slice, false);
       break;}
     default:
       return false;
@@ -1848,19 +1972,18 @@ static bool movement_default(Pane &pane, int key) {
 
 static const char *ttf_file = "font.ttf";
 
-static void _filetree_fill(Path &path) {
-  Array<StringBuffer> files = {};
+static void _filetree_fill(Path path) {
+  Array<Path> files = {};
   if (!File::list_files(path, &files))
     goto err;
 
-  for (StringBuffer f : files) {
-    path.push(f);
-    if (File::filetype(path) == FILETYPE_DIR)
-      _filetree_fill(path);
+  for (Path f : files) {
+    puts(f.string.chars);
+    if (File::filetype(f) == FILETYPE_DIR)
+      _filetree_fill(f);
     else {
-      G.files += path.copy();
+      G.files += f.copy();
     }
-    path.pop();
   }
 
   err:
@@ -1868,9 +1991,12 @@ static void _filetree_fill(Path &path) {
 }
 
 static void filetree_init() {
+  util_free(G.files);
   Path cwd = {};
-  if (File::cwd(&cwd))
+  if (File::cwd(&cwd)) {
+    printf("Cwd: %s\n", cwd.string.chars);
     _filetree_fill(cwd);
+  }
   util_free(cwd);
 }
 
@@ -1893,6 +2019,9 @@ static void state_init() {
   G.default_tab_type = 4;
   G.line_margin = 0;
   G.line_height = G.font_height + G.line_margin;
+
+  if (!File::cwd(&G.current_working_directory))
+    fprintf(stderr, "Failed to find current working directory, something is very wrong\n"), exit(1);
 
   // @colors!
   G.default_text_color = COLOR_WHITE;
@@ -1956,16 +2085,8 @@ static void state_init() {
   Pane *main_pane = new Pane{};
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
 
-  // search pane
-  G.search_buffer.empty();
-  G.search_pane.type = PANETYPE_TEXTSEARCH;
-  G.search_pane.buffer = &G.search_buffer;
-  G.search_pane.background_color = &G.bottom_pane_highlight.color;
-  G.search_pane.text_color = &G.default_text_color;
-  G.search_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
-  G.search_pane.margin = 5;
 
-  // menu pane
+  // search pane
   G.menu_buffer.empty();
   G.menu_pane.type = PANETYPE_MENU;
   G.menu_pane.buffer = &G.menu_buffer;
@@ -1973,15 +2094,6 @@ static void state_init() {
   G.menu_pane.text_color = &G.default_text_color;
   G.menu_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
   G.menu_pane.margin = 5;
-
-  // file tree pane
-  G.filetree_buffer.empty();
-  G.filetree_pane.type = PANETYPE_FILESEARCH;
-  G.filetree_pane.buffer = &G.filetree_buffer;
-  G.filetree_pane.background_color = &G.bottom_pane_highlight.color;
-  G.filetree_pane.text_color = &G.default_text_color;
-  G.filetree_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
-  G.filetree_pane.margin = 5;
 
   // dropdown pane
   G.dropdown_buffer.empty();
@@ -2000,15 +2112,7 @@ static void state_init() {
   G.status_message_pane.text_color = &G.default_text_color;
   G.status_message_pane.active_highlight_background_color = &G.active_highlight_background_color.color;
   G.status_message_pane.margin = 5;
-
-  // goto definition pane
-  G.goto_definition_buffer.empty();
-  G.goto_definition_pane.type = PANETYPE_GOTO_DEFINITION;
-  G.goto_definition_pane.buffer = &G.goto_definition_buffer;
-  G.goto_definition_pane.background_color = &G.bottom_pane_highlight.color;
-  G.goto_definition_pane.text_color = &G.default_text_color;
-  G.goto_definition_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
-  G.goto_definition_pane.margin = 5;
+  G.status_message_pane.menu.prefix = Slice::create("status");
 
   G.editing_pane = main_pane;
   G.bottom_pane = &G.status_message_pane;
@@ -2025,18 +2129,14 @@ void state_free() {
   // really none of this matters, since all resouces are freed when program exits
   util_free(G.buffers);
   util_free(G.null_buffer);
-  util_free(G.search_buffer);
   util_free(G.menu_buffer);
-  util_free(G.filetree_buffer);
   util_free(G.dropdown_buffer);
   util_free(G.status_message_buffer);
   util_free(G.files);
   util_free(G.editing_panes);
-  util_free(&G.search_pane);
   util_free(&G.menu_pane);
   util_free(&G.status_message_pane);
   util_free(&G.dropdown_pane);
-  util_free(&G.filetree_pane);
   SDL_Quit();
 }
 
@@ -2046,14 +2146,17 @@ static Pos char2pixel(Pos p) {
 
 static void handle_menu_insert(int key, Pane &p) {
     switch (key) {
+
     case KEY_ARROW_DOWN:
     case CONTROL('j'):
       p.menu.current_match = clamp(p.menu.current_match+1, 0, p.menu.suggestions.size-1);
       break;
+
     case KEY_ARROW_UP:
     case CONTROL('k'):
       p.menu.current_match = clamp(p.menu.current_match-1, 0, p.menu.suggestions.size-1);
       break;
+
     case KEY_TAB: {
       Slice *s = p.menu_get_selection();
       if (s) {
@@ -2064,8 +2167,6 @@ static void handle_menu_insert(int key, Pane &p) {
       }
       break;}
 
-
-      // fallthrough
     default:
       insert_default(p, key);
       break;
@@ -2084,6 +2185,33 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     key |= KEY_CONTROL;
 
   switch (G.mode) {
+  case MODE_CWD:
+    if (key == KEY_RETURN) {
+      Path p = Path::create(G.menu_buffer.lines[0].slice);
+      if (!File::isdir(p)) {
+        status_message_set("'{}' is not a directory", &p.string.slice);
+        goto err;
+      }
+
+      if (!File::chdir(p)) {
+        status_message_set("Failed to change directory to '{}'", &p.string.slice);
+        goto err;
+      }
+
+      status_message_set("Changed directory to '{}'", &p.string.slice);
+      util_free(G.current_working_directory);
+      G.current_working_directory = p;
+      filetree_init();
+      mode_normal(false);
+      break;
+      err:
+      util_free(p);
+      mode_normal(false);
+    }
+    else
+      handle_menu_insert(key, G.menu_pane);
+    break;
+
   case MODE_GOTO:
     buffer.collapse_cursors();
     if (isdigit(key)) {
@@ -2124,26 +2252,27 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
   case MODE_MENU:
     if (special_key == KEY_RETURN) {
-      StringBuffer line;
-
       if (G.menu_buffer.isempty()) {
         mode_normal(true);
         break;
       }
 
       // dropdown_autocomplete(G.menu_buffer);
+      Slice *s = G.menu_pane.menu_get_selection();
+      if (!s)
+        s = &G.menu_buffer[0].slice;
 
-      line = G.menu_buffer[0];
       foreach(menu_options) {
-        if (G.menu_buffer[0].slice == it->opt.name) {
+        if (*s == it->opt.name) {
           it->fun();
           goto done;
         }
       }
-      status_message_set("Unknown option '{}'", &G.menu_buffer[0]);
+      status_message_set("Unknown option '{}'", s);
       done:
-
-      mode_normal(false);
+      // if the menu option changed the mode, leave it
+      if (G.mode == MODE_MENU)
+        mode_normal(false);
     }
     else if (special_key == KEY_ESCAPE)
       mode_normal(true);
@@ -2159,9 +2288,9 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     }
 
     if (key == KEY_RETURN) {
-      Slice* opt = G.goto_definition_pane.menu_get_selection();
+      Slice* opt = G.menu_pane.menu_get_selection();
       if (!opt) {
-        status_message_set("\"{}\": No such file", &G.goto_definition_buffer[0].slice);
+        status_message_set("\"{}\": No such file", &G.menu_buffer[0].slice);
         mode_normal(false);
         break;
       }
@@ -2177,14 +2306,14 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     }
 
-    handle_menu_insert(key, G.goto_definition_pane);
+    handle_menu_insert(key, G.menu_pane);
     break;}
 
   case MODE_FILESEARCH:
     if (special_key == KEY_RETURN) {
-      Slice* opt = G.filetree_pane.menu_get_selection();
+      Slice* opt = G.menu_pane.menu_get_selection();
       if (!opt) {
-        status_message_set("\"{}\": No such file", &G.filetree_buffer[0].slice);
+        status_message_set("\"{}\": No such file", &G.menu_buffer[0].slice);
         mode_normal(false);
         break;
       }
@@ -2220,31 +2349,33 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
           status_message_set("Failed to load file {}", &filename);
         }
       }
-      G.filetree_buffer.empty();
+      G.menu_buffer.empty();
       mode_normal(false);
       break;
     }
 
-    handle_menu_insert(key, G.filetree_pane);
+    handle_menu_insert(key, G.menu_pane);
     break;
 
   case MODE_SEARCH: {
-    handle_menu_insert(key, G.search_pane);
+    handle_menu_insert(key, G.menu_pane);
+    util_free(G.search_term);
+    G.search_term = String::create(G.menu_buffer.lines[0].slice);
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
 
       // if escape, get from suggestions
       if (special_key == KEY_ESCAPE) {
-        Slice* opt = G.search_pane.menu_get_selection();
+        Slice* opt = G.menu_pane.menu_get_selection();
         if (opt) {
-          G.search_buffer[0].clear();
-          G.search_buffer[0] += *opt;
+          util_free(G.search_term);
+          G.search_term = String::create(*opt);
         }
       }
 
-      G.search_failed = !buffer.find_and_move(G.search_buffer[0].slice, true);
+      G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
       if (G.search_failed) {
         buffer.move_to(G.search_begin_pos);
-        status_message_set("'{}' not found", &G.search_buffer[0]);
+        status_message_set("'{}' not found", &G.search_term.slice);
         mode_normal(false);
       } else
         mode_normal(true);
@@ -2588,10 +2719,6 @@ static void handle_rendering(float dt) {
   for (Pane *p : G.editing_panes)
     p->render();
   G.bottom_pane->render();
-
-  // update search buffer identifier list
-  if (G.mode == MODE_SEARCH)
-    G.search_buffer.identifiers = G.editing_pane->buffer->identifiers;
 }
 
 Pos Buffer::to_visual_pos(Pos p) {
@@ -2776,7 +2903,6 @@ Range* Buffer::getdeclaration(Slice s) {
 }
 
 TokenInfo* Buffer::gettoken(Pos p) {
-  // TODO: binary search
   int a = 0, b = tokens.size-1;
 
   while (a <= b) {
@@ -2819,7 +2945,7 @@ void Buffer::update() {
     move(i, 0, 0);
 }
 
-bool Buffer::find_r(StringBuffer s, int stay, Pos *p) {
+bool Buffer::find_r(Slice s, int stay, Pos *p) {
   if (!s.length)
     return false;
 
@@ -2939,7 +3065,7 @@ bool Buffer::find_and_move_r(char c, bool stay) {
   return true;
 }
 
-bool Buffer::find_and_move_r(StringBuffer s, bool stay) {
+bool Buffer::find_and_move_r(Slice s, bool stay) {
   collapse_cursors();
   Pos p = cursors[0].pos;
   if (!find_r(s, stay, &p))
@@ -4111,31 +4237,22 @@ void Pane::render() {
     case PANETYPE_EDIT:
       render_edit();
       break;
-    case PANETYPE_FILESEARCH:
-      render_filesearch();
-      break;
-    case PANETYPE_TEXTSEARCH:
-      render_textsearch();
-      break;
     case PANETYPE_MENU:
       render_menu();
       break;
     case PANETYPE_STATUSMESSAGE:
-      render_single_line(Slice::create("status: "));
+      render_single_line();
       break;
     case PANETYPE_DROPDOWN:
       render_as_dropdown();
       break;
-    case PANETYPE_GOTO_DEFINITION:
-      render_goto_definition();
-      break;
   }
 }
 
-void Pane::render_single_line(Slice prefix) {
+void Pane::render_single_line() {
   Buffer &b = *buffer;
   // TODO: scrolling in x
-  Pos buf_offset = {prefix.length, 0};
+  Pos buf_offset = {menu.prefix.length+2, 0};
 
   // render the editing line
   Canvas canvas;
@@ -4145,7 +4262,7 @@ void Pane::render_single_line(Slice prefix) {
   canvas.margin = this->margin;
 
   // draw prefix
-  canvas.render_str({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, prefix);
+  canvas.render_strf({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, "{}: ", &menu.prefix);
 
   // draw buffer
   canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].slice);
@@ -4161,21 +4278,14 @@ void Pane::render_single_line(Slice prefix) {
   util_free(canvas);
 }
 
-void Pane::render_menu_popup(View<Slice> options) {
-  Buffer &b = *buffer;
-  if (b.isempty())
-    return;
-
-  // since fuzzy matching is expensive, we only update we moved since last time
+void Pane::render_menu_popup() {
+  // since getting suggestions might be expensive, we only update if we moved since last time
   if (G.flags.cursor_dirty) {
-    menu.current_match = 0;
-    StackArray<FuzzyMatch, 15> matches;
-    int n = fuzzy_match(b.lines[0].slice, options, view(matches));
-
     util_free(menu.suggestions);
-    for (int i = 0; i < n; ++i)
-      menu.suggestions.push(matches[i].str);
+    menu.suggestions = menu.get_suggestions();
+    menu.current_match = 0;
   }
+
   if (!menu.suggestions.size)
     return;
 
@@ -4196,7 +4306,7 @@ void Pane::render_menu_popup(View<Slice> options) {
   p.y -= char2pixely(height) + margin;
 
   for (int i = 0; i < at_most(menu.suggestions.size, height); ++i)
-    canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i]);
+    canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i].slice);
 
   // highlight
   canvas.fill_background({0, menu.current_match, {-1, 1}}, *this->active_highlight_background_color);
@@ -4208,41 +4318,9 @@ void Pane::render_menu_popup(View<Slice> options) {
   render_text();
 }
 
-void Pane::render_filesearch() {
-  render_single_line(Slice::create("open: "));
-  Array<Slice> filenames = {};
-  if (G.flags.cursor_dirty) {
-    filenames.reserve(G.files.size);
-    for (Path p : G.files)
-      filenames += p.name();
-  }
-  render_menu_popup(view(filenames));
-  util_free(filenames);
-}
-
-void Pane::render_textsearch() {
-  render_single_line(Slice::create("search: "));
-  render_menu_popup(VIEW(G.editing_pane->buffer->identifiers, slice));
-}
-
-void Pane::render_goto_definition() {
-  Buffer &b = *G.editing_pane->buffer;
-  render_single_line(Slice::create("goto decl: "));
-
-  Array<Slice> decls = {};
-  if (G.flags.cursor_dirty) {
-    decls.reserve(b.declarations.size);
-    for (Range r : b.declarations)
-      decls += b.getslice(r);
-  }
-
-  render_menu_popup(view(decls));
-  util_free(decls);
-}
-
 void Pane::render_menu() {
-  render_single_line(Slice::create("menu: "));
-  render_menu_popup(VIEW_FROM_ARRAY(menu_options, opt.name));
+  render_single_line();
+  render_menu_popup();
 }
 
 void Pane::render_edit() {
@@ -4285,10 +4363,10 @@ void Pane::render_edit() {
       canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *highlight_background_color);
 
   // if there is a search term, highlight that as well
-  if (G.search_buffer.lines[0].length > 0) {
+  if (G.search_term.length > 0) {
     Pos pos = {0, buf_offset.y};
-    while (b.find(G.search_buffer.lines[0].slice, false, &pos) && pos.y < buf_y1)
-      canvas.fill_background({buf2char(pos), G.search_buffer.lines[0].length, 1}, G.search_term_background_color.color);
+    while (b.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
+      canvas.fill_background({buf2char(pos), G.search_term.length, 1}, G.search_term_background_color.color);
   }
 
   // draw marker

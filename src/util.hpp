@@ -143,6 +143,12 @@ struct View {
         t = get(i);
     return t;
   }
+
+  template<class U>
+  void free(int offset) {
+    Array<U> a = {(U*)((char*)items - offset), size, size};
+    util_free(a);
+  }
 };
 
 template<class T>
@@ -150,6 +156,7 @@ View<T> view(T *items, int size, int stride) {
   return {items, size, stride};
 }
 
+#define VIEW_FREE(view, original_type, field) view.free<original_type>(offsetof(original_type, field))
 #define VIEW(array, field) view(&array.items[0].field, array.size, sizeof(*array.items))
 #define VIEW_FROM_ARRAY(array, field) view(&array[0].field, ARRAY_LEN(array), sizeof(*array))
 
@@ -1096,20 +1103,34 @@ struct Path {
     return p;
   };
 
+  void prepend(Slice dir) {
+    string.insert(0, dir);
+    string.insert(dir.length, separator);
+  }
+
+  void prepend(Path p) {
+    prepend(p.string.slice);
+  }
+
   void push(const char *str) {
-    string += Path::separator;
+    if (string.length == 0 || string[string.length-1] != separator)
+      string += Path::separator;
     string += str;
   }
 
-  void push(StringBuffer file) {
-    string += Path::separator;
-    string.append(file);
+  void push(Slice file) {
+    if (string.length == 0 || string[string.length-1] != separator)
+      string += Path::separator;
+    string += file;
   }
 
   void pop() {
     int l;
-    if (string.find_r(separator, &l))
-      string.resize(l);
+    if (string.find_r(separator, &l)) {
+      string.resize(l+1);
+      string.length = l;
+      string[l] = '\0';
+    }
   }
 
   Path copy() const {
@@ -1129,6 +1150,10 @@ struct Path {
       return path(x+1, -1);
     return path;
   }
+
+  static Path create(Slice p) {
+    return {StringBuffer::create(p)};
+  }
 };
 
 void util_free(Path &p) {
@@ -1144,6 +1169,10 @@ enum FileType {
 namespace File {
 
   #ifdef OS_LINUX
+
+  bool chdir(Path p) {
+    return !chdir(p.string.chars);
+  }
 
   bool cwd(Path *p) {
     StringBuffer s = {};
@@ -1179,7 +1208,7 @@ namespace File {
     return FILETYPE_UNKNOWN;
   }
 
-  bool list_files(Path p, Array<StringBuffer> *result) {
+  bool list_files(Path p, Array<Path> *result) {
     *result = {};
     DIR *dp = opendir(p.string.chars);
     if (!dp)
@@ -1189,9 +1218,9 @@ namespace File {
       if (ep->d_name[0] == '.')
         continue;
 
-      Path p = {};
-      p.string += ep->d_name;
-      result->push(p.string);
+      Path pp = p.copy();
+      pp.push(ep->d_name);
+      result->push(pp);
     }
 
     closedir(dp);
@@ -1199,6 +1228,10 @@ namespace File {
   }
 
   #else
+
+  bool chdir(Path p) {
+    return SetCurrentDirectory(p.string.chars);
+  }
 
   bool cwd(Path *p) {
     StringBuffer s = {};
@@ -1233,11 +1266,12 @@ namespace File {
     return FILETYPE_UNKNOWN;
   }
 
-  bool list_files(Path &directory, Array<StringBuffer> *result) {
+  bool list_files(Path directory, Array<Path> *result) {
+    Path dir = directory.copy();
     WIN32_FIND_DATA find_data;
-    directory.push("*");
-    HANDLE handle = FindFirstFile(directory.string.chars, &find_data);
-    directory.pop();
+    dir.push("*");
+    HANDLE handle = FindFirstFile(dir.string.chars, &find_data);
+    util_free(dir);
 
     if (handle == INVALID_HANDLE_VALUE)
       return false;
@@ -1245,7 +1279,9 @@ namespace File {
     do {
       if (find_data.cFileName[0] == '.')
         continue;
-      result->push(StringBuffer::create(find_data.cFileName));
+      Path p = directory.copy();
+      p.push(find_data.cFileName);
+      result->push(p);
     } while (FindNextFile(handle, &find_data) != 0);
 
     FindClose(handle);
@@ -1253,6 +1289,14 @@ namespace File {
   }
 
   #endif /* OS */
+
+  bool isdir(Path path) {
+    return filetype(path) == FILETYPE_DIR;
+  }
+
+  bool isfile(Path path) {
+    return filetype(path) == FILETYPE_FILE;
+  }
 }
 
 #endif /* UTIL_FILE */
