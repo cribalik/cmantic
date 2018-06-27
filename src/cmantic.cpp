@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * parse BOM
+ * menu option to close buffer
  * Jumplist
  * Make syntax highlighter use declaration list
  * Pane stack
@@ -75,7 +77,6 @@
       struct Header *p = (Header*)malloc(sizeof(struct Header) + size);
       p->line = line;
       p->file = file;
-      printf("%s:%i malloc %lu\n", file, line, size);
       return (char*)p + sizeof(struct Header);
     }
     #define malloc(size) debug_malloc(size, __LINE__, __FILE__)
@@ -704,7 +705,8 @@ struct Buffer {
     }
   }
 
-  static Buffer* from_file(Slice filename);
+  static bool reload(Buffer *b);
+  static bool from_file(Slice filename, Buffer *b);
 };
 
 static void util_free(UndoAction &a) {
@@ -938,6 +940,8 @@ struct State {
   int line_height;
   StringBuffer tmp_render_buffer;
   int win_height, win_width;
+  Path ttf_file;
+
 
   /* settings */
   Color default_background_color;
@@ -1440,8 +1444,6 @@ static void save_buffer(Buffer *b) {
     return;
   }
 
-  printf("Opened file %s\n", b->filename.chars);
-
   const int endline_len = strlen(b->endline_string);
 
   /* TODO: actually write to a temporary file, and when we have succeeded, rename it over the old file */
@@ -1493,15 +1495,20 @@ static void menu_option_show_tab_type() {
 
 static void menu_option_print_declarations() {
   Buffer &b = *G.editing_pane->buffer;
-  for (Range r : b.declarations) {
+  for (Range r : b.declarations)
     Slice s = b.getslice(r);
-    printf("%.*s\n", s.length, s.chars);
-  }
 }
 
 static void mode_cwd();
 static void menu_option_chdir() {
   mode_cwd();
+}
+
+static void menu_option_reload() {
+  if (Buffer::reload(G.editing_pane->buffer))
+    status_message_set("Reloaded {}", &G.editing_pane->buffer->filename.slice);
+  else
+    status_message_set("Failed to reload {}", &G.editing_pane->buffer->filename.slice);
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1529,7 +1536,12 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("chdir"),
     Slice::create("Change current working directory"),
     menu_option_chdir
-  }
+  },
+  {
+    Slice::create("reload"),
+    Slice::create("Reload current buffer"),
+    menu_option_reload
+  },
 };
 
 static Array<String> easy_fuzzy_match(Slice input, View<Slice> options);
@@ -1649,7 +1661,13 @@ static void mode_goto_definition() {
 }
 
 static Array<String> get_filesearch_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.files, string.slice));
+  Array<Slice> filenames = {};
+  filenames.reserve(G.files.size);
+  for (Path p : G.files)
+    filenames += p.name();
+  Array<String> match = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(filenames));
+  util_free(filenames);
+  return match;
 }
 
 static void mode_filesearch() {
@@ -1970,15 +1988,12 @@ static bool movement_default(Pane &pane, int key) {
   return true;
 }
 
-static const char *ttf_file = "font.ttf";
-
 static void _filetree_fill(Path path) {
   Array<Path> files = {};
   if (!File::list_files(path, &files))
     goto err;
 
   for (Path f : files) {
-    puts(f.string.chars);
     if (File::filetype(f) == FILETYPE_DIR)
       _filetree_fill(f);
     else {
@@ -1993,20 +2008,23 @@ static void _filetree_fill(Path path) {
 static void filetree_init() {
   util_free(G.files);
   Path cwd = {};
-  if (File::cwd(&cwd)) {
-    printf("Cwd: %s\n", cwd.string.chars);
+  if (File::cwd(&cwd))
     _filetree_fill(cwd);
-  }
   util_free(cwd);
 }
 
 static void state_init() {
 
+  if (!File::cwd(&G.current_working_directory))
+    fprintf(stderr, "Failed to find current working directory, something is very wrong\n"), exit(1);
+  G.ttf_file = G.current_working_directory.copy();
+  G.ttf_file.push("font.ttf");
+
   // initialize graphics library
   if (graphics_init(&G.window))
     exit(1);
   G.font_height = 14;
-  if (graphics_text_init(ttf_file, G.font_height))
+  if (graphics_text_init(G.ttf_file.string.chars, G.font_height))
     exit(1);
   if (graphics_quad_init())
     exit(1);
@@ -2020,12 +2038,9 @@ static void state_init() {
   G.line_margin = 0;
   G.line_height = G.font_height + G.line_margin;
 
-  if (!File::cwd(&G.current_working_directory))
-    fprintf(stderr, "Failed to find current working directory, something is very wrong\n"), exit(1);
-
   // @colors!
   G.default_text_color = COLOR_WHITE;
-  G.default_background_color = {38,50,56, 255};
+  G.default_background_color = {33, 33, 33, 255};
   G.default_gutter_text_color = {127, 127, 127, 255};
   G.default_gutter_background_color = G.default_background_color;
   G.number_color = COLOR_RED;
@@ -2340,13 +2355,14 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         G.editing_pane->buffer = b;
       }
       else {
-        b = Buffer::from_file(filename);
-        if (b) {
+        b = (Buffer*)malloc(sizeof(Buffer));
+        if (Buffer::from_file(filename, b)) {
           G.buffers.push(b);
           G.editing_pane->buffer = b;
           status_message_set("Loaded file {} (%s)", &filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
           status_message_set("Failed to load file {}", &filename);
+          free(b);
         }
       }
       G.menu_buffer.empty();
@@ -2508,13 +2524,13 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
-      if (graphics_set_font_options(ttf_file, G.font_height))
+      if (graphics_set_font_options(G.ttf_file.string.chars, G.font_height))
         exit(1);
       break;
 
     case '-':
       G.font_height = at_least(G.font_height-1, 7);
-      if (graphics_set_font_options(ttf_file, G.font_height))
+      if (graphics_set_font_options(G.ttf_file.string.chars, G.font_height))
         exit(1);
       break;
 
@@ -2587,6 +2603,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       Pane *p = new Pane{};
       Pane::init_edit(*p, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
       G.editing_panes += p;
+      break;}
+
+    case CONTROL('q'): {
+      if (G.editing_panes.size == 1)
+        break;
+
+      Pane **p = G.editing_panes.find(G.editing_pane);
+      if (p) {
+        int i = p - G.editing_panes.items;
+        G.editing_panes.remove_slow(i);
+        G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+        G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+      }
       break;}
 
     case CONTROL('l'): {
@@ -2804,14 +2833,19 @@ void Buffer::move_y(int dy) {
     move_y(i, dy);
 }
 
-Buffer* Buffer::from_file(Slice filename) {
+bool Buffer::reload(Buffer *b) {
+  String filename = String::create(b->filename.slice);
+  util_free(b);
+  bool succ = Buffer::from_file(filename.slice, b);
+  util_free(filename);
+  return succ;
+}
+
+bool Buffer::from_file(Slice filename, Buffer *buffer) {
   FILE* f = 0;
   int num_lines = 0;
-  Buffer *buffer = (Buffer*)malloc(sizeof(Buffer));
+  *buffer = {};
   Buffer &b = *buffer;
-  if (!buffer)
-    goto err;
-  b = {};
   b.endline_string = ENDLINE_UNIX;
   b.cursors.push({});
 
@@ -2863,7 +2897,7 @@ Buffer* Buffer::from_file(Slice filename) {
   b.guess_tab_type();
 
   fclose(f);
-  return buffer;
+  return true;
 
   err:
   if (buffer) {
@@ -2872,7 +2906,7 @@ Buffer* Buffer::from_file(Slice filename) {
   }
   if (f)
     fclose(f);
-  return 0;
+  return false;
 }
 
 StringBuffer Buffer::range_to_string(const Range r) {
@@ -2907,10 +2941,8 @@ TokenInfo* Buffer::gettoken(Pos p) {
 
   while (a <= b) {
     int mid = (a+b)/2;
-    if (tokens[mid].a <= p && p < tokens[mid].b) {
-      printf("{%i %i}\n", tokens[mid].a.x, tokens[mid].b.x);
+    if (tokens[mid].a <= p && p < tokens[mid].b)
       return &tokens[mid];
-    }
     if (tokens[mid].a < p)
       a = mid+1;
     else
@@ -3112,9 +3144,7 @@ void Buffer::remove_trailing_whitespace(int cursor_idx) {
   // TODO: @utf8
   while (x > 0 && getchar(x, y).isspace())
     --x;
-  printf("%i\n", x);
   remove_range({x, y}, {lines[y].length, y}, cursor_idx);
-  printf("{%i %i} {%i %i}\n", x, y, lines[y].length, y);
   goto_endline(cursor_idx);
 
   action_end();
