@@ -512,6 +512,7 @@ struct Utf8Iter {
   bool find_r(Slice s, int *result) const; \
   bool find_r(StringBuffer s, int *result) const; \
   bool find_r(char c, int *result) const; \
+  bool find_r(int offset, char c, int *result) const; \
   bool begins_with(int offset, String s) const; \
   bool begins_with(int offset, Slice s) const; \
   bool begins_with(int offset, StringBuffer s) const; \
@@ -538,6 +539,7 @@ struct Utf8Iter {
   bool classname::find_r(Slice s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
   bool classname::find_r(StringBuffer s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
   bool classname::find_r(char c, int *result) const {return Slice::find_r(chars, length, c, result);} \
+  bool classname::find_r(int offset, char c, int *result) const {return Slice::find_r(chars, offset, c, result);} \
   bool classname::begins_with(int offset, String s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, Slice s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
@@ -759,6 +761,7 @@ void util_free(String &s) {
   s.length = 0;
 }
 
+// You can assume the StringBuffer is always null-terminated
 union StringBuffer {
   struct {
     char *chars;
@@ -847,7 +850,7 @@ union StringBuffer {
   }
 
   void remove(int i, int n) {
-    memmove(chars+i, chars+i+n, length-i-n);
+    memmove(chars+i, chars+i+n, length+1-i-n);
     length -= n;
   }
 
@@ -1052,6 +1055,8 @@ String String::create(Slice s) {
 Slice Slice::slice(const char *str, int len, int a, int b) {
   if (b < 0)
     b = len + b + 1;
+  if (b < 0)
+    b = 0;
   Slice s;
   s.chars = (char*)(str+a);
   s.length = b-a;
@@ -1113,15 +1118,25 @@ struct Path {
   }
 
   void push(const char *str) {
-    if (string.length == 0 || string[string.length-1] != separator)
-      string += Path::separator;
-    string += str;
+    push(Slice::create(str));
   }
 
   void push(Slice file) {
     if (string.length == 0 || string[string.length-1] != separator)
       string += Path::separator;
     string += file;
+    for (int i = 1; i < string.length-3; ++i) {
+      if (string[i] == separator && string[i+1] == '.' && string[i+2] == '.' && string[i+3] == separator) {
+        int prev;
+        bool succ = string.find_r(i-1, separator, &prev);
+        if (!succ)
+          prev = -1;
+        printf("%i\n", prev);
+        int num_to_remove = i-prev+3;
+        string.remove(prev, num_to_remove);
+        i -= num_to_remove;
+      }
+    }
   }
 
   void pop() {

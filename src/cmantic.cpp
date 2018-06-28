@@ -88,6 +88,7 @@
 struct FuzzyMatch {
   Slice str;
   float points;
+  int idx;
 };
 
 static int fuzzy_cmp(const void *aa, const void *bb) {
@@ -105,7 +106,7 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
   if (string.length == 0) {
     int l = min(result.size, strings.size);
     for (int i = 0; i < l; ++i)
-      result[i] = {strings[i], 0.0f};
+      result[i] = {strings[i], 0.0f, i};
     return l;
   }
 
@@ -148,6 +149,7 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
     if (num_results < result.size) {
       result[num_results].str = identifier;
       result[num_results].points = points;
+      result[num_results].idx = i;
       ++num_results;
     } else {
       /* find worst match and replace */
@@ -155,6 +157,7 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
       if (points > worst.points) {
         worst.str = identifier;
         worst.points = points;
+        worst.idx = i;
       }
     }
   }
@@ -201,7 +204,6 @@ enum Token {
   TOKEN_IDENTIFIER          = -2,
   TOKEN_NUMBER              = -3,
   TOKEN_STRING              = -4,
-  TOKEN_EOL                 = -5,
   TOKEN_STRING_BEGIN        = -6,
   TOKEN_BLOCK_COMMENT       = -7,
   TOKEN_BLOCK_COMMENT_BEGIN = -8,
@@ -389,6 +391,7 @@ struct Buffer {
   Array<Cursor> cursors;
   Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
+  Array<Cursor> visual_start; // starting position of visual mode
 
   // raw_mode is used when inserting text that is not coming from the keyboard, for example when pasting text or doing undo/redo
   // It disables autoindenting and other automatic formatting stuff
@@ -838,7 +841,7 @@ struct Pane {
       Array<String> (*get_suggestions)();
       Slice prefix;
 
-      int current_match;
+      int current_suggestion;
       Array<String> suggestions;
     } menu;
 
@@ -849,6 +852,8 @@ struct Pane {
 
   // methods
   void render();
+  void update_suggestions();
+  void clear_suggestions();
 
   // internal methods
   void render_edit();
@@ -864,7 +869,7 @@ struct Pane {
   Slice* menu_get_selection() {
     if (!menu.suggestions.size)
       return 0;
-    int i = clamp(menu.current_match, 0, menu.suggestions.size);
+    int i = clamp(menu.current_suggestion, 0, menu.suggestions.size);
     return &menu.suggestions[i].slice;
   };
 
@@ -1110,6 +1115,7 @@ static Keyword keywords[] = {
   {"NULL", KEYWORD_CONSTANT},
   {"delete", KEYWORD_CONSTANT},
   {"new", KEYWORD_CONSTANT},
+  {"null", KEYWORD_CONSTANT},
 
   // types
 
@@ -1139,6 +1145,9 @@ static Keyword keywords[] = {
   {"i16", KEYWORD_TYPE},
   {"i8", KEYWORD_TYPE},
   {"va_list", KEYWORD_TYPE},
+  {"string", KEYWORD_TYPE},
+  {"IEnumerator", KEYWORD_TYPE},
+  {"byte", KEYWORD_TYPE},
 
   // function
 
@@ -1177,6 +1186,10 @@ static Keyword keywords[] = {
   {"extern", KEYWORD_SPECIFIER},
   {"nothrow", KEYWORD_SPECIFIER},
   {"noexcept", KEYWORD_SPECIFIER},
+  {"public", KEYWORD_SPECIFIER},
+  {"private", KEYWORD_SPECIFIER},
+  {"in", KEYWORD_SPECIFIER},
+  {"delegate", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -1214,12 +1227,14 @@ static Keyword keywords[] = {
   {"continue", KEYWORD_CONTROL},
   {"break", KEYWORD_CONTROL},
   {"goto", KEYWORD_CONTROL},
+  {"yield", KEYWORD_CONTROL},
+  {"foreach", KEYWORD_CONTROL},
+
 };
 
 
 /****** @TOKENIZER ******/
 
-// TODO: currently we only set starting position of tokens (a). We need b as well! :O
 static void tokenize(Buffer &b) {
   Array<TokenInfo> tokens = b.tokens;
   util_free(tokens);
@@ -1236,9 +1251,8 @@ static void tokenize(Buffer &b) {
     // endline
     char c;
     if (x >= b.lines[y].length) {
-      t.token = TOKEN_EOL;
       ++y, x = 0;
-      goto token_done;
+      continue;
     }
     c = line[x];
 
@@ -1549,8 +1563,10 @@ static Array<String> easy_fuzzy_match(Slice input, View<Slice> options);
 static void mode_cleanup() {
   G.flags.cursor_dirty = true;
 
-  if (G.mode == MODE_FILESEARCH)
+  if (G.mode == MODE_FILESEARCH || G.mode == MODE_SEARCH || G.mode == MODE_CWD) {
     G.menu_buffer.empty();
+  }
+  G.menu_pane.clear_suggestions();
 
   if (G.mode == MODE_INSERT)
     G.editing_pane->buffer->action_end();
@@ -1603,17 +1619,30 @@ static Array<String> get_cwd_suggestions() {
 
   Array<Path> paths = {};
   File::list_files(*dir, &paths);
+  for (int i = 0; i < paths.size; ++i) {
+    if (!File::isdir(paths[i])) {
+      util_free(paths[i]);
+      paths[i] = paths[--paths.size];
+      --i;
+    }
+  }
 
   Array<Slice> match_queries = {};
   for (Path path : paths)
-    if (File::isdir(path))
-      match_queries += path.string.slice;
+    match_queries += path.name();
 
   StackArray<FuzzyMatch, 15> matches = {};
   int n = fuzzy_match(p->name(), view(match_queries), view(matches));
   Array<String> result = {};
-  for (int i = 0; i < n; ++i)
-    result += String::create(matches[i].str);
+
+  // StringBuffer sb = {};
+  for (int i = 0; i < n; ++i) {
+    // sb.length = 0;
+    // sb.appendf("{} - %f", &matches[i].str, matches[i].points);
+    // result += String::create(sb.slice);
+    result += String::create(paths[matches[i].idx].string.slice);
+  }
+  // util_free(sb);
 
   util_free(match_queries);
   util_free(paths);
@@ -1634,6 +1663,8 @@ static void mode_cwd() {
   G.menu_pane.menu.prefix = Slice::create("chdir");
 
   G.menu_buffer.empty();
+  G.menu_buffer.insert(G.current_working_directory.string.slice);
+  G.menu_buffer.insert(Utf8char::create(Path::separator));
 }
 
 static Array<String> get_goto_definition_suggestions() {
@@ -2159,32 +2190,35 @@ static Pos char2pixel(Pos p) {
   return char2pixel(p.x, p.y);
 }
 
-static void handle_menu_insert(int key, Pane &p) {
+static void handle_menu_insert(int key) {
     switch (key) {
 
     case KEY_ARROW_DOWN:
     case CONTROL('j'):
-      p.menu.current_match = clamp(p.menu.current_match+1, 0, p.menu.suggestions.size-1);
+      G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion+1, 0, G.menu_pane.menu.suggestions.size-1);
       break;
 
     case KEY_ARROW_UP:
     case CONTROL('k'):
-      p.menu.current_match = clamp(p.menu.current_match-1, 0, p.menu.suggestions.size-1);
+      G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion-1, 0, G.menu_pane.menu.suggestions.size-1);
       break;
 
     case KEY_TAB: {
-      Slice *s = p.menu_get_selection();
+      Slice *s = G.menu_pane.menu_get_selection();
       if (s) {
-        p.buffer->empty();
-        p.buffer->insert(*s);
+        G.menu_pane.buffer->empty();
+        G.menu_pane.buffer->insert(*s);
       } else {
-        p.buffer->insert_tab();
+        G.menu_pane.buffer->insert_tab();
       }
       break;}
 
     default:
-      insert_default(p, key);
+      insert_default(G.menu_pane, key);
       break;
+  }
+  if (G.flags.cursor_dirty) {
+    G.menu_pane.update_suggestions();
   }
 }
 
@@ -2202,7 +2236,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
   switch (G.mode) {
   case MODE_CWD:
     if (key == KEY_RETURN) {
-      Path p = Path::create(G.menu_buffer.lines[0].slice);
+      Path p = Path::create(G.menu_buffer.lines[0](0, -2));
       if (!File::isdir(p)) {
         status_message_set("'{}' is not a directory", &p.string.slice);
         goto err;
@@ -2223,8 +2257,26 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       util_free(p);
       mode_normal(false);
     }
+    else if (special_key == KEY_BACKSPACE) {
+      Path p = Path::create(G.menu_buffer.lines[0](0, -2));
+      p.pop();
+      G.menu_buffer.empty();
+      G.menu_buffer.insert(p.string.slice);
+      G.menu_buffer.insert(Utf8char::create(Path::separator));
+      util_free(p);
+      G.menu_pane.update_suggestions();
+    }
+    else if (special_key == KEY_TAB) {
+      Slice *s = G.menu_pane.menu_get_selection();
+      if (s) {
+        G.menu_buffer.empty();
+        G.menu_buffer.insert(*s);
+        G.menu_buffer.insert(Utf8char::create(Path::separator));
+      }
+      G.menu_pane.update_suggestions();
+    }
     else
-      handle_menu_insert(key, G.menu_pane);
+      handle_menu_insert(key);
     break;
 
   case MODE_GOTO:
@@ -2292,7 +2344,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     else if (special_key == KEY_ESCAPE)
       mode_normal(true);
     else
-      handle_menu_insert(key, G.menu_pane);
+      handle_menu_insert(key);
     /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
@@ -2321,12 +2373,12 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       break;
     }
 
-    handle_menu_insert(key, G.menu_pane);
+    handle_menu_insert(key);
     break;}
 
   case MODE_FILESEARCH:
     if (special_key == KEY_RETURN) {
-      Slice* opt = G.menu_pane.menu_get_selection();
+      Slice *opt = G.menu_pane.menu_get_selection();
       if (!opt) {
         status_message_set("\"{}\": No such file", &G.menu_buffer[0].slice);
         mode_normal(false);
@@ -2369,25 +2421,13 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       mode_normal(false);
       break;
     }
-
-    handle_menu_insert(key, G.menu_pane);
+    else {
+      handle_menu_insert(key);
+    }
     break;
 
   case MODE_SEARCH: {
-    handle_menu_insert(key, G.menu_pane);
-    util_free(G.search_term);
-    G.search_term = String::create(G.menu_buffer.lines[0].slice);
     if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
-
-      // if escape, get from suggestions
-      if (special_key == KEY_ESCAPE) {
-        Slice* opt = G.menu_pane.menu_get_selection();
-        if (opt) {
-          util_free(G.search_term);
-          G.search_term = String::create(*opt);
-        }
-      }
-
       G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
       if (G.search_failed) {
         buffer.move_to(G.search_begin_pos);
@@ -2395,8 +2435,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         mode_normal(false);
       } else
         mode_normal(true);
-    } else
+    } else {
       G.search_term_background_color.reset();
+      handle_menu_insert(key);
+
+      if (G.flags.cursor_dirty) {
+        util_free(G.search_term);
+        Slice *s = G.menu_pane.menu_get_selection();
+        if (s)
+          G.search_term = String::create(*s);
+        else
+          G.search_term = String::create(G.menu_buffer.lines[0].slice);
+      }
+    }
   } break;
 
   case MODE_YANK: {
@@ -2676,6 +2727,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
     case ':':
       mode_menu();
+      break;
+
+    case 'v':
+      G.editing_pane->buffer->visual_start = G.editing_pane->buffer->cursors.copy_shallow();
       break;
 
     case 'd':
@@ -3741,12 +3796,9 @@ TokenResult Buffer::token_read(Pos *p, int y_end) {
 
     // endline
     if (x >= lines[y].length) {
-      result.tok = TOKEN_EOL;
-      result.a = {x,y};
-      result.b = {x,y};
       x = 0;
       ++y;
-      goto done;
+      continue;
     }
 
     char c = lines[y][x];
@@ -4279,6 +4331,19 @@ void Pane::render() {
   }
 }
 
+void Pane::update_suggestions() {
+  if (!G.flags.cursor_dirty)
+    return;
+  util_free(menu.suggestions);
+  menu.suggestions = menu.get_suggestions();
+  menu.current_suggestion = 0;
+}
+
+void Pane::clear_suggestions() {
+  util_free(menu.suggestions);
+  menu.current_suggestion = 0;
+}
+
 void Pane::render_single_line() {
   Buffer &b = *buffer;
   // TODO: scrolling in x
@@ -4309,13 +4374,6 @@ void Pane::render_single_line() {
 }
 
 void Pane::render_menu_popup() {
-  // since getting suggestions might be expensive, we only update if we moved since last time
-  if (G.flags.cursor_dirty) {
-    util_free(menu.suggestions);
-    menu.suggestions = menu.get_suggestions();
-    menu.current_match = 0;
-  }
-
   if (!menu.suggestions.size)
     return;
 
@@ -4339,7 +4397,7 @@ void Pane::render_menu_popup() {
     canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i].slice);
 
   // highlight
-  canvas.fill_background({0, menu.current_match, {-1, 1}}, *this->active_highlight_background_color);
+  canvas.fill_background({0, menu.current_suggestion, {-1, 1}}, *this->active_highlight_background_color);
 
   canvas.render(p);
   util_free(canvas);
@@ -4492,6 +4550,19 @@ static void test() {
   assert(a.find(0, b, &x));
   printf("%i\n", x);
   assert(x == 2);
+
+  #ifdef OS_WINDOWS
+  Path p = Path::create(Slice::create("hello"));
+  p.push("..");
+  puts(p.string.chars);
+  assert(p.string.slice == "hello\\..");
+  p.push("some_file");
+  puts(p.string.chars);
+  assert(p.string.slice == "some_file");
+  p.push("some\\path\\..\\h");
+  puts(p.string.chars);
+  assert(p.string.slice == "some_file\\some\\h");
+  #endif
 }
 
 #if 1
