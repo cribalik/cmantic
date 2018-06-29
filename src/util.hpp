@@ -1185,7 +1185,7 @@ namespace File {
 
   #ifdef OS_LINUX
 
-  bool chdir(Path p) {
+  bool change_dir(Path p) {
     return !chdir(p.string.chars);
   }
 
@@ -1244,7 +1244,7 @@ namespace File {
 
   #else
 
-  bool chdir(Path p) {
+  bool change_dir(Path p) {
     return SetCurrentDirectory(p.string.chars);
   }
 

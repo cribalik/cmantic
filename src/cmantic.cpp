@@ -42,6 +42,7 @@
     #define _POSIX_C_SOURCE 200112L
     #include <unistd.h>
     #include <termios.h>
+    #include <errno.h>
     #include <sys/ioctl.h>
     #include <sys/select.h>
   #else
@@ -893,7 +894,15 @@ struct Pane {
   }
 };
 
-void util_free(Pane*) {
+void util_free(Pane &p) {
+
+}
+
+void util_free(Pane *&p) {
+  if (!p)
+    return;
+  delete p;
+  p = 0;
 }
 
 struct PoppedColor {
@@ -1389,31 +1398,31 @@ static void tokenize(Buffer &b) {
             if (s == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
               goto no_declaration;
 
-          int j = i;
-          Slice op;
+          {
+            int j = i;
+            Slice op;
 
-          // skip pointer and references
-          for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
-            op = b.getslice(tokens[j].r);
-            if (op == "*" || op == "&")
-              continue;
-            goto no_declaration;
-          }
+            // skip pointer and references
+            for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
+              op = b.getslice(tokens[j].r);
+              if (op == "*" || op == "&")
+                continue;
+              goto no_declaration;
+            }
 
-          if (j+1 < tokens.size &&
-              tokens[j].token == TOKEN_IDENTIFIER &&
-              tokens[j+1].token == '(') {
-            declarations += {tokens[j].a, tokens[j].b};
-            break;
-          }
-          else if (j+3 < tokens.size &&
-                   tokens[j].token == TOKEN_IDENTIFIER &&
-                   tokens[j+1].token == TOKEN_OPERATOR &&
-                   b.getslice(tokens[j+1].r) == "::" &&
-                   tokens[j+2].token == TOKEN_IDENTIFIER &&
-                   tokens[j+3].token == '(') {
-            declarations += {tokens[j].a, tokens[j+2].b};
-            break;
+            if (j+1 < tokens.size &&
+                tokens[j].token == TOKEN_IDENTIFIER &&
+                tokens[j+1].token == '(') {
+              declarations += {tokens[j].a, tokens[j].b};
+            }
+            else if (j+3 < tokens.size &&
+                     tokens[j].token == TOKEN_IDENTIFIER &&
+                     tokens[j+1].token == TOKEN_OPERATOR &&
+                     b.getslice(tokens[j+1].r) == "::" &&
+                     tokens[j+2].token == TOKEN_IDENTIFIER &&
+                     tokens[j+3].token == '(') {
+              declarations += {tokens[j].a, tokens[j+2].b};
+            }
           }
           no_declaration:;
         }
@@ -1509,8 +1518,10 @@ static void menu_option_show_tab_type() {
 
 static void menu_option_print_declarations() {
   Buffer &b = *G.editing_pane->buffer;
-  for (Range r : b.declarations)
+  for (Range r : b.declarations) {
     Slice s = b.getslice(r);
+    printf("%.*s\n", s.length, s.chars);
+  }
 }
 
 static void mode_cwd();
@@ -2180,9 +2191,9 @@ void state_free() {
   util_free(G.status_message_buffer);
   util_free(G.files);
   util_free(G.editing_panes);
-  util_free(&G.menu_pane);
-  util_free(&G.status_message_pane);
-  util_free(&G.dropdown_pane);
+  util_free(G.menu_pane);
+  util_free(G.status_message_pane);
+  util_free(G.dropdown_pane);
   SDL_Quit();
 }
 
@@ -2242,7 +2253,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         goto err;
       }
 
-      if (!File::chdir(p)) {
+      if (!File::change_dir(p)) {
         status_message_set("Failed to change directory to '{}'", &p.string.slice);
         goto err;
       }
@@ -2407,7 +2418,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         G.editing_pane->buffer = b;
       }
       else {
-        b = (Buffer*)malloc(sizeof(Buffer));
+        b = new Buffer{};
         if (Buffer::from_file(filename, b)) {
           G.buffers.push(b);
           G.editing_pane->buffer = b;
