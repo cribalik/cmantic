@@ -1989,17 +1989,36 @@ static bool movement_default(Pane &pane, int key) {
       /*jumplist_push(prev);*/
       break;
 
-    case '{':
-      buffer.find_and_move_r('{', false);
-      break;
+    case '{': {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        Pos p = buffer.cursors[i].pos;
+        int depth = 0;
+        TokenInfo *t = buffer.token_find(p);
+        if (t && t->token == '{')
+          --t;
+        for (; t >= buffer.tokens.begin(); --t) {
+          if (t->token == '}')
+            ++depth;
+          if (t->token == '{') {
+            --depth;
+            if (depth <= 0) {
+              buffer.move_to(i, t->a);
+              break;
+            }
+          }
+        }
+      }
+      // buffer.find_and_move_r('{', false);
+      break;}
 
     case '}': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         Pos p = buffer.cursors[i].pos;
         int depth = 0;
-        if (buffer.getchar(p) == '}')
-          buffer.advance(p);
-        for (TokenInfo *t = buffer.token_find(p); t < buffer.tokens.end(); ++t) {
+        TokenInfo *t = buffer.token_find(p);
+        if (t && t->token == '}')
+          ++t;
+        for (; t < buffer.tokens.end(); ++t) {
           if (t->token == '{') 
             ++depth;
           if (t->token == '}') {
@@ -2474,6 +2493,8 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
           if (b < a)
             swap(a,b);
 
+          if (key == '{' || key == '}')
+            buffer.advance(b);
           StringBuffer s = buffer.range_to_string({a,b});
           sb += s;
           if (i < cursors.size-1)
@@ -2504,6 +2525,8 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
           Pos b = buffer.cursors[i].pos;
           if (b < a)
             swap(a,b);
+          if (key == '{' || key == '}')
+            buffer.advance(b);
           buffer.remove_range(a, b, i);
         }
       }
@@ -3790,7 +3813,7 @@ Utf8char Buffer::getchar(int marker_idx) {
 TokenInfo* Buffer::token_find(Pos p) {
   for (int i = 1; i < tokens.size; ++i)
     if (tokens[i-1].a <= p && p < tokens[i].a)
-      return &tokens[i];
+      return &tokens[i-1];
   return tokens.end();
 }
 
