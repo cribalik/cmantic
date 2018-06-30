@@ -894,7 +894,7 @@ struct Pane {
   }
 };
 
-void util_free(Pane &p) {
+void util_free(Pane&) {
 
 }
 
@@ -1676,6 +1676,7 @@ static void mode_cwd() {
   G.menu_buffer.empty();
   G.menu_buffer.insert(G.current_working_directory.string.slice);
   G.menu_buffer.insert(Utf8char::create(Path::separator));
+  G.menu_pane.update_suggestions();
 }
 
 static Array<String> get_goto_definition_suggestions() {
@@ -1700,6 +1701,7 @@ static void mode_goto_definition() {
   G.menu_pane.menu.prefix = Slice::create("goto decl");
 
   G.menu_buffer.empty();
+  G.menu_pane.update_suggestions();
 }
 
 static Array<String> get_filesearch_suggestions() {
@@ -1721,6 +1723,7 @@ static void mode_filesearch() {
   G.menu_pane.menu.get_suggestions = &get_filesearch_suggestions;
   G.menu_pane.menu.prefix = Slice::create("open");
   G.menu_buffer.empty();
+  G.menu_pane.update_suggestions();
 }
 
 static void mode_goto() {
@@ -1783,6 +1786,7 @@ static void mode_menu() {
   G.menu_pane.menu.get_suggestions = &get_menu_suggestions;
   G.menu_pane.menu.prefix = Slice::create("menu");
   G.menu_buffer.empty();
+  G.menu_pane.update_suggestions();
 }
 
 static int char2pixelx(int x) {
@@ -2267,9 +2271,19 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
   case MODE_CWD:
     if (key == KEY_RETURN) {
       Path p = Path::create(G.menu_buffer.lines[0](0, -2));
+      // if what the user wrote is not a directory, try the autocomplete
       if (!File::isdir(p)) {
-        status_message_set("'{}' is not a directory", &p.string.slice);
-        goto err;
+        Slice *s = G.menu_pane.menu_get_selection();
+        if (!s) {
+          status_message_set("'{}' is not a directory", &p.string.slice);
+          goto err;
+        }
+        util_free(p);
+        p = Path::create(*s);
+        if (!File::isdir(p)) {
+          status_message_set("'{}' is not a directory", &p.string.slice);
+          goto err;
+        }
       }
 
       if (!File::change_dir(p)) {
