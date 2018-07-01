@@ -1,9 +1,10 @@
 /*
  * TODO:
+ * Better way to have multi-key commands, without having a different mode for each key
+ * Build system
  * parse BOM
- * menu option to close buffer
  * Jumplist
- * Make syntax highlighter use declaration list
+ * Make syntax highlighter use pretokenized list
  * Pane stack
  * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
@@ -1021,6 +1022,7 @@ struct State {
 
 State G;
 
+typedef int Key;
 enum SpecialKey {
   KEY_NONE = 0,
   KEY_UNKNOWN = 257,
@@ -1154,7 +1156,6 @@ static Keyword keywords[] = {
   {"i16", KEYWORD_TYPE},
   {"i8", KEYWORD_TYPE},
   {"va_list", KEYWORD_TYPE},
-  {"string", KEYWORD_TYPE},
   {"IEnumerator", KEYWORD_TYPE},
   {"byte", KEYWORD_TYPE},
 
@@ -1247,6 +1248,7 @@ static Keyword keywords[] = {
 static void tokenize(Buffer &b) {
   Array<TokenInfo> tokens = b.tokens;
   util_free(tokens);
+  util_free(b.identifiers);
   int x = 0;
   int y = 0;
 
@@ -1339,8 +1341,18 @@ static void tokenize(Buffer &b) {
       t.token = TOKEN_STRING;
       const char str_char = c;
       NEXT(1);
+      #if 1
+      while (1) {
+        if (x >= line.length)
+          break;
+        if (c == str_char && (line[x-1] != '\\' || (x >= 2 && line[x-2] == '\\')))
+          break;
+        NEXT(1);
+      }
+      #else
       while (x < line.length && c != str_char)
         NEXT(1);
+      #endif
       if (x < line.length)
         NEXT(1);
       goto token_done;
@@ -1495,7 +1507,7 @@ static void save_buffer(Buffer *b) {
 
 static void menu_option_save() {
   if (G.selected_pane)
-  save_buffer(G.editing_pane->buffer);
+    save_buffer(G.editing_pane->buffer);
 }
 
 void state_free();
@@ -1895,7 +1907,7 @@ static void render_dropdown(Pane *pane) {
 #define CONTROL(c) ((c)|KEY_CONTROL)
 
 // TODO: use a unified key interface instead of this hack
-static void insert_default(Pane &p, int key) {
+static void insert_default(Pane &p, Key key) {
   Buffer &b = *p.buffer;
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
@@ -2256,16 +2268,8 @@ static void handle_menu_insert(int key) {
   }
 }
 
-static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
-
-  // TODO: insert utf8 characters
-  if (!input.is_ansi() && !special_key)
-    return;
-
+static void handle_input(Key key) { 
   Buffer &buffer = *G.editing_pane->buffer;
-  int key = special_key ? special_key : input.ansi();
-  if (ctrl)
-    key |= KEY_CONTROL;
 
   switch (G.mode) {
   case MODE_CWD:
@@ -2301,7 +2305,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       util_free(p);
       mode_normal(false);
     }
-    else if (special_key == KEY_BACKSPACE) {
+    else if (key == KEY_BACKSPACE) {
       Path p = Path::create(G.menu_buffer.lines[0](0, -2));
       p.pop();
       G.menu_buffer.empty();
@@ -2310,7 +2314,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       util_free(p);
       G.menu_pane.update_suggestions();
     }
-    else if (special_key == KEY_TAB) {
+    else if (key == KEY_TAB) {
       Slice *s = G.menu_pane.menu_get_selection();
       if (s) {
         G.menu_buffer.empty();
@@ -2327,7 +2331,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     buffer.collapse_cursors();
     if (isdigit(key)) {
       G.goto_line_number *= 10;
-      G.goto_line_number += input.ansi() - '0';
+      G.goto_line_number += key - '0';
       buffer.move_to_y(0, G.goto_line_number-1);
       status_message_set("goto %u", G.goto_line_number);
       break;
@@ -2362,13 +2366,12 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_MENU:
-    if (special_key == KEY_RETURN) {
+    if (key == KEY_RETURN) {
       if (G.menu_buffer.isempty()) {
         mode_normal(true);
         break;
       }
 
-      // dropdown_autocomplete(G.menu_buffer);
       Slice *s = G.menu_pane.menu_get_selection();
       if (!s)
         s = &G.menu_buffer[0].slice;
@@ -2385,7 +2388,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
       if (G.mode == MODE_MENU)
         mode_normal(false);
     }
-    else if (special_key == KEY_ESCAPE)
+    else if (key == KEY_ESCAPE)
       mode_normal(true);
     else
       handle_menu_insert(key);
@@ -2421,7 +2424,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;}
 
   case MODE_FILESEARCH:
-    if (special_key == KEY_RETURN) {
+    if (key == KEY_RETURN) {
       Slice *opt = G.menu_pane.menu_get_selection();
       if (!opt) {
         status_message_set("\"{}\": No such file", &G.menu_buffer[0].slice);
@@ -2471,7 +2474,7 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;
 
   case MODE_SEARCH: {
-    if (special_key == KEY_RETURN || special_key == KEY_ESCAPE) {
+    if (key == KEY_RETURN || key == KEY_ESCAPE) {
       G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
       if (G.search_failed) {
         buffer.move_to(G.search_begin_pos);
@@ -2562,8 +2565,6 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
     break;}
 
   case MODE_INSERT: {
-    if (ctrl)
-      key |= KEY_CONTROL;
     switch (key) {
       case KEY_RETURN:
         buffer.action_begin();
@@ -2638,6 +2639,10 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
         status_message_set("You have unsaved changes. If you really want to exit, use :quit");
       else
         editor_exit(0);
+      break;
+
+    case CONTROL('s'):
+      save_buffer(&buffer);
       break;
 
     case 'i':
@@ -2783,6 +2788,11 @@ static void handle_input(Utf8char input, SpecialKey special_key, bool ctrl) {
 
     case 'd':
       mode_delete();
+      break;
+
+    case 'V':
+      util_free(G.editing_pane->buffer->visual_start);
+      G.editing_pane->buffer->visual_start = G.editing_pane->buffer->cursors.copy_shallow();
       break;
 
     case 'J':
@@ -4308,9 +4318,11 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
       case TOKEN_IDENTIFIER: {
         // check for keywords
         Slice identifier = b[prev.y](prev.x, next.x+1);
+        KeywordType kwtype = KEYWORD_NONE;
         for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
           if (identifier == keywords[i].name) {
             render_highlight(prev, next, keyword_colors[keywords[i].type]);
+            kwtype = keywords[i].type;
             break;
           }
         }
@@ -4327,6 +4339,8 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
             identifier == "class"))
           render_highlight(t.a, t.b, G.identifier_color);
 
+        if (kwtype != KEYWORD_TYPE)
+          break;
         while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
           t = b.token_read(&p, y1);
         if (t.tok != TOKEN_IDENTIFIER)
@@ -4571,6 +4585,106 @@ int Pane::numchars_y() const {
   return (this->bounds.h - 2*this->margin) / G.line_height + 1;
 }
 
+static Key get_input() {
+  for (SDL_Event event; SDL_PollEvent(&event);) {
+    Utf8char input = {};
+    SpecialKey special_key = KEY_NONE;
+    bool ctrl = false;
+
+    switch (event.type) {
+    case SDL_WINDOWEVENT:
+      if (event.window.event == SDL_WINDOWEVENT_CLOSE)
+        editor_exit(0);
+      break;
+
+    case SDL_KEYDOWN:
+      if (event.key.keysym.mod & KMOD_CTRL)
+        ctrl = true;
+
+      switch (event.key.keysym.sym) {
+      case SDLK_ESCAPE:
+        special_key = KEY_ESCAPE;
+        break;
+      case SDLK_DOWN:
+        special_key = KEY_ARROW_DOWN;
+        break;
+      case SDLK_UP:
+        special_key = KEY_ARROW_UP;
+        break;
+      case SDLK_LEFT:
+        special_key = KEY_ARROW_LEFT;
+        break;
+      case SDLK_RIGHT:
+        special_key = KEY_ARROW_RIGHT;
+        break;
+      case SDLK_RETURN:
+        special_key = KEY_RETURN;
+        break;
+      case SDLK_TAB:
+        special_key = KEY_TAB;
+        break;
+      case SDLK_BACKSPACE:
+        special_key = KEY_BACKSPACE;
+        break;
+      case SDLK_HOME:
+        special_key = KEY_HOME;
+        break;
+      case SDLK_END:
+        special_key = KEY_END;
+        break;
+      case SDLK_a:
+      case SDLK_b:
+      case SDLK_c:
+      case SDLK_d:
+      case SDLK_e:
+      case SDLK_f:
+      case SDLK_g:
+      case SDLK_h:
+      case SDLK_i:
+      case SDLK_j:
+      case SDLK_k:
+      case SDLK_l:
+      case SDLK_m:
+      case SDLK_n:
+      case SDLK_o:
+      case SDLK_p:
+      case SDLK_q:
+      case SDLK_r:
+      case SDLK_s:
+      case SDLK_t:
+      case SDLK_u:
+      case SDLK_v:
+      case SDLK_w:
+      case SDLK_x:
+      case SDLK_y:
+      case SDLK_z:
+        if (ctrl)
+          input = (char)((event.key.keysym.mod & KMOD_SHIFT) ? toupper(event.key.keysym.sym) : event.key.keysym.sym);
+        break;
+      }
+      break;
+
+    case SDL_TEXTINPUT:
+      // ignore weird characters
+      if (strlen(event.text.text) > sizeof(input))
+        break;
+      input = event.text.text;
+      break;
+    }
+
+    // handle input
+    // TODO: insert utf8 characters
+    if ((input.code && input.is_ansi()) || special_key) {
+      Key key = special_key ? special_key : input.ansi();
+      if (ctrl)
+        key |= KEY_CONTROL;
+      return key;
+    }
+  }
+  return KEY_NONE;
+}
+
+
 static void test() {
   assert(memmem("a", 1, "a", 1));
   assert(!memmem("", 0, "", 0));
@@ -4633,96 +4747,9 @@ int main(int, const char *[])
     float dt = (float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f;
     ticks = SDL_GetTicks();
 
-    Utf8char input = {};
-    SpecialKey special_key = KEY_NONE;
-    bool ctrl = false;
-    for (SDL_Event event; SDL_PollEvent(&event);) {
-
-      switch (event.type) {
-      case SDL_WINDOWEVENT:
-        if (event.window.event == SDL_WINDOWEVENT_CLOSE)
-          editor_exit(0);
-        break;
-
-      case SDL_KEYDOWN:
-        if (event.key.keysym.mod & KMOD_CTRL)
-          ctrl = true;
-
-        switch (event.key.keysym.sym) {
-        case SDLK_ESCAPE:
-          special_key = KEY_ESCAPE;
-          break;
-        case SDLK_DOWN:
-          special_key = KEY_ARROW_DOWN;
-          break;
-        case SDLK_UP:
-          special_key = KEY_ARROW_UP;
-          break;
-        case SDLK_LEFT:
-          special_key = KEY_ARROW_LEFT;
-          break;
-        case SDLK_RIGHT:
-          special_key = KEY_ARROW_RIGHT;
-          break;
-        case SDLK_RETURN:
-          special_key = KEY_RETURN;
-          break;
-        case SDLK_TAB:
-          special_key = KEY_TAB;
-          break;
-        case SDLK_BACKSPACE:
-          special_key = KEY_BACKSPACE;
-          break;
-        case SDLK_HOME:
-          special_key = KEY_HOME;
-          break;
-        case SDLK_END:
-          special_key = KEY_END;
-          break;
-        case SDLK_a:
-        case SDLK_b:
-        case SDLK_c:
-        case SDLK_d:
-        case SDLK_e:
-        case SDLK_f:
-        case SDLK_g:
-        case SDLK_h:
-        case SDLK_i:
-        case SDLK_j:
-        case SDLK_k:
-        case SDLK_l:
-        case SDLK_m:
-        case SDLK_n:
-        case SDLK_o:
-        case SDLK_p:
-        case SDLK_q:
-        case SDLK_r:
-        case SDLK_s:
-        case SDLK_t:
-        case SDLK_u:
-        case SDLK_v:
-        case SDLK_w:
-        case SDLK_x:
-        case SDLK_y:
-        case SDLK_z:
-          input = (char)((event.key.keysym.mod & KMOD_SHIFT) ? toupper(event.key.keysym.sym) : event.key.keysym.sym);
-          break;
-        }
-        break;
-
-      case SDL_TEXTINPUT:
-        // ignore weird characters
-        if (strlen(event.text.text) > sizeof(input))
-          break;
-        input = event.text.text;
-        break;
-      }
-    }
-
-    // handle input
-    if (input.code || special_key)
-      handle_input(input, special_key, ctrl);
-
+    Key key = get_input();
+    if (key)
+      handle_input(key);
     handle_rendering(dt);
 
     // the quad and text buffers should be empty, but we flush them just to be safe

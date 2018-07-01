@@ -152,9 +152,10 @@ struct View {
 };
 
 template<class T>
-View<T> view(T *items, int size, int stride) {
+View<T> view(T *items, int size, int stride = sizeof(T)) {
   return {items, size, stride};
 }
+
 
 #define VIEW_FREE(view, original_type, field) view.free<original_type>(offsetof(original_type, field))
 #define VIEW(array, field) view(&array.items[0].field, array.size, sizeof(*array.items))
