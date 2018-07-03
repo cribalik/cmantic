@@ -1,10 +1,10 @@
 /*
  * TODO:
+ * recursive panes
+ * Jumplist
  * Build system
  * parse BOM
- * Jumplist
  * Make syntax highlighter use pretokenized list
- * Pane stack
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
@@ -28,6 +28,9 @@
  * movement (parentheses, block, etc.)
  * actions (Delete, Yank, ...)
  * SDL doesn't handle caps-escape swapping correctly on Windows.. We probably need to use VK directly for windows
+ *
+ * LOW:
+ * Update markers in other panes with same buffer (or at least make sure they are in range)
  */
 
 // @includes
