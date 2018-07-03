@@ -722,6 +722,7 @@ struct Pane {
                         Color *text_color,
                         Color *active_highlight_background_color,
                         Color *inactive_highlight_background_color) {
+    util_free(p.buffer);
     p = {};
     p.type = PANETYPE_EDIT;
     p.buffer = {b, Array<Cursor>{}};
@@ -2111,7 +2112,11 @@ void state_free() {
   util_free(G.dropdown_buffer);
   util_free(G.status_message_buffer);
   util_free(G.files);
+
+  for (Pane *p : G.editing_panes)
+    util_free(*p);
   util_free(G.editing_panes);
+
   util_free(G.menu_pane);
   util_free(G.status_message_pane);
   util_free(G.dropdown_pane);
@@ -2696,11 +2701,13 @@ static void handle_input(Key key) {
           destination += c.pos;
 
         if (G.visual_entire_line) {
-          for (Pos &p : G.visual_start.cursors)
-            p.x = 0;
-          for (Pos &p : destination)
-            p.x = 0,
-            ++p.y;
+          for (int i = 0; i < G.visual_start.cursors.size; ++i) {
+            if (destination[i] < G.visual_start.cursors[i])
+              swap(destination[i], G.visual_start.cursors[i]);
+            G.visual_start.cursors[i].x = 0;
+            destination[i].x = 0;
+            ++destination[i].y;
+          }
         }
 
         range_to_clipboard(*buffer.data, view(G.visual_start.cursors), view(destination));
@@ -2753,6 +2760,8 @@ static void handle_input(Key key) {
         for (int i = 0; i < G.visual_start.cursors.size; ++i) {
           Pos pa = G.visual_start.cursors[i];
           Pos pb = buffer.cursors[i].pos;
+          if (pb < pa)
+            swap(pa, pb);
           if (G.visual_entire_line) {
             pa.x = 0;
             pb.x = 0;
@@ -4886,7 +4895,6 @@ static Key get_input() {
   }
   return KEY_NONE;
 }
-
 
 static void test() {
   assert(memmem("a", 1, "a", 1));
