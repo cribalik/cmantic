@@ -344,7 +344,7 @@ struct TokenResult {
   Slice operator_str;
 };
 
-struct Buffer;
+struct BufferData;
 
 enum UndoActionType {
   ACTIONTYPE_INSERT,
@@ -384,13 +384,14 @@ struct UndoAction {
 };
 
 static void util_free(UndoAction &a);
-static void tokenize(Buffer &b);
+static void tokenize(BufferData &b);
 
-struct Buffer {
+struct BufferData {
   String filename;
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
 
-  Array<Cursor> cursors;
+  BufferData *buffer;
+
   Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
@@ -417,71 +418,44 @@ struct Buffer {
   int num_lines() const {return lines.size;}
   Slice slice(Pos p, int len) {return lines[p.y](p.x,p.x+len); }
   Pos to_visual_pos(Pos p);
-  void move_to_y(int marker_idx, int y);
-  void move_to_x(int marker_idx, int x);
-  void move_to(int marker_idx, Pos p);
-  void move_to(int x, int y);
-  void move_to(Pos p);
-  void move_y(int dy);
-  void move_y(int marker_idx, int dy);
-  void move_x(int dx);
-  void move_x(int marker_idx, int dx);
-  void move(int marker_idx, int dx, int dy);
-  void update();
   bool find_r(Slice s, int stay, Pos *pos);
   bool find_r(char c, int stay, Pos *pos);
   bool find(Slice s, bool stay, Pos *pos);
   bool find(char c, bool stay, Pos *pos);
-  bool find_and_move(Slice s, bool stay);
-  bool find_and_move(char c, bool stay);
-  bool find_and_move_r(Slice s, bool stay);
-  bool find_and_move_r(char c, bool stay);
   bool find_start_of_identifier(Pos p, Pos *pout);
-  void insert(Slice s);
-  void insert(Pos p, Slice s, int cursor_idx = -1);
-  void insert(Slice s, int cursor_idx);
-  void remove_trailing_whitespace(int cursor_idx);
-  void remove_trailing_whitespace();
-  void insert(Pos p, Utf8char ch);
-  void insert(Utf8char ch, int cursor_idx);
-  void insert(Utf8char ch);
+  void insert(Array<Cursor> &cursors, Slice s);
+  void insert(Array<Cursor> &cursors, Pos p, Slice s, int cursor_idx = -1);
+  void insert(Array<Cursor> &cursors, Slice s, int cursor_idx);
+  void remove_trailing_whitespace(Array<Cursor> &cursors, int cursor_idx);
+  void insert(Array<Cursor> &cursors, Pos p, Utf8char ch);
+  void insert(Array<Cursor> &cursors, Utf8char ch, int cursor_idx);
+  void insert(Array<Cursor> &cursors, Utf8char ch);
   void delete_line_at(int y);
-  void delete_line();
-  void delete_line(int y);
-  void remove_range(Pos a, Pos b, int cursor_idx = -1);
-  void delete_char();
-  void insert_tab();
+  void delete_line(Array<Cursor> &cursors);
+  void delete_line(Array<Cursor> &cursors, int y);
+  void remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx = -1);
+  void delete_char(Array<Cursor>& cursors);
+  void insert_tab(Array<Cursor> &cursors);
   int getindent(int y);
   int indentdepth(int y, bool *has_statement);
-  void autoindent(const int y);
-  void autoindent();
+  void autoindent(Array<Cursor> &cursors, const int y);
+  void autoindent(Array<Cursor> &cursors);
   int isempty();
-  void push_line(Slice s);
-  void insert_newline();
-  void insert_newline_below();
-  void guess_tab_type();
-  void goto_endline();
-  void goto_endline(int marker_idx);
-  int begin_of_line(int y);
-  void goto_beginline();
-  void empty();
-  int advance(int *x, int *y) const;
-  int advance(Pos &p) const;
-  int advance(int marker_idx);
-  int advance();
   int advance_r(Pos &p) const;
-  int advance_r();
-  int advance_r(int marker_idx);
+  int advance(Pos &p) const;
+  int advance(int *x, int *y) const;
+  void push_line(Array<Cursor> &cursors, Slice s);
+  void insert_newline(Array<Cursor> &cursors);
+  void insert_newline_below(Array<Cursor> &cursors);
+  void guess_tab_type();
+  int begin_of_line(int y);
+  void empty(Array<Cursor> &cursors);
   Utf8char getchar(Pos p);
   Utf8char getchar(int x, int y);
-  Utf8char getchar(int marker_idx);
-  void deduplicate_cursors();
-  void collapse_cursors();
   StringBuffer range_to_string(Range r);
   // Finds the token at or before given position
   TokenInfo* token_find(Pos p);
   TokenResult token_read(Pos *p, int y_end);
-
 
   // Undo functionality:
   //
@@ -501,223 +475,22 @@ struct Buffer {
   int _next_undo_action;
   int _action_group_depth;
 
-  void push_undo_action(UndoAction a) {
-    if (undo_disabled)
-      return;
+  void print_undo_actions();
+  void redo(Array<Cursor> &cursors);
+  void undo(Array<Cursor> &cursors);
+  void action_end(Array<Cursor> &cursors);
+  void action_begin(Array<Cursor> &cursors);
+  void push_undo_action(UndoAction a);
 
-    // free actions after _next_undo_action
-    for (int i = _next_undo_action; i < _undo_actions.size; ++i)
-      util_free(_undo_actions[i]);
-    _undo_actions.size = _next_undo_action;
-    _undo_actions += a;
-    ++_next_undo_action;
-  }
-
-  void action_begin() {
-    if (undo_disabled)
-      return;
-
-    if (_action_group_depth == 0) {
-      push_undo_action({ACTIONTYPE_GROUP_BEGIN});
-      push_undo_action(UndoAction::cursor_snapshot(cursors));
-    }
-    // TODO: check if anything actually happened between begin and end
-    ++_action_group_depth;
-  }
-
-  void action_end() {
-    if (undo_disabled)
-      return;
-
-    --_action_group_depth;
-    if (_action_group_depth == 0) {
-      // check if something actually happened
-      bool changed = true;
-      bool buffer_changed = true;
-      if (_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT && _undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN) {
-        changed = false;
-        buffer_changed = false;
-        UndoAction a = _undo_actions[_next_undo_action-1];
-        // check if cursors changed
-        if (a.cursors.size != cursors.size)
-          changed = true;
-        else {
-          for (int i = 0; i < a.cursors.size; ++i) {
-            if (cursors[i] == a.cursors[i])
-              continue;
-            changed = true;
-            break;
-          }
-        }
-      }
-
-      // if nothing happened, remove group
-      if (!changed) {
-        assert(_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT);
-        util_free(_undo_actions[_next_undo_action-1]);
-        assert(_undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN);
-        _next_undo_action -= 2;
-        _undo_actions.size -= 2;
-        return;
-      }
-
-
-      push_undo_action(UndoAction::cursor_snapshot(cursors));
-      push_undo_action({ACTIONTYPE_GROUP_END});
-
-      // retokenize
-      if (buffer_changed)
-        tokenize(*this);
-
-      // build up clipboard from removed strings
-      Array<StringBuffer> clips = {};
-      // find start of group
-      UndoAction *a = &_undo_actions[_next_undo_action-1];
-      assert(a->type == ACTIONTYPE_GROUP_END);
-      while (a[-1].type != ACTIONTYPE_GROUP_BEGIN)
-        --a;
-      assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
-      clips.resize(a->cursors.size);
-      clips.zero();
-      // find every delete action, and if there is a cursor for that, add that delete that cursors 
-      bool clip_filled = false;
-      for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
-        if (a->type != ACTIONTYPE_DELETE)
-          continue;
-        if (a->remove.cursor_idx == -1)
-          continue;
-
-        clips[a->remove.cursor_idx] += a->remove.s;
-        clip_filled = true;
-      }
-
-      if (clip_filled) {
-        StringBuffer clip = {};
-        for (int i = 0; i < clips.size; ++i) {
-          clip += clips[i];
-          if (i < clips.size-1)
-            clip += '\n';
-        }
-        clip += '\0';
-        SDL_SetClipboardText(clip.chars);
-        util_free(clip);
-      }
-      util_free(clips);
-    }
-  }
-
-  void undo() {
-    if (undo_disabled)
-      return;
-    if (!_next_undo_action)
-      return;
-
-    undo_disabled = true;
-    raw_begin();
-    --_next_undo_action;
-    assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_END);
-    --_next_undo_action;
-    for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_BEGIN; --_next_undo_action) {
-      UndoAction a = _undo_actions[_next_undo_action];
-      // printf("undo action: %i\n", a.type);
-      switch (a.type) {
-        case ACTIONTYPE_INSERT:
-          // printf("Removing {%i %i}, {%i %i}\n", a.insert.a.x, a.insert.a.y, a.insert.b.x, a.insert.b.y);
-          remove_range(a.insert.a, a.insert.b);
-          break;
-        case ACTIONTYPE_DELETE:
-          // printf("Inserting '%.*s' at {%i %i}\n", a.remove.s.slice.length, a.remove.s.slice.chars, a.remove.a.x, a.remove.a.y);
-          insert(a.remove.a, a.remove.s.slice);
-          break;
-        case ACTIONTYPE_CURSOR_SNAPSHOT:
-          util_free(cursors);
-          cursors = a.cursors.copy_shallow();
-          break;
-        case ACTIONTYPE_GROUP_BEGIN:
-        case ACTIONTYPE_GROUP_END:
-          break;
-      }
-    }
-    // printf("cursors: %i\n", cursors.size);
-    undo_disabled = false;
-
-    // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-    tokenize(*this);
-    raw_end();
-  }
-
-  void redo() {
-    if (undo_disabled)
-      return;
-
-    if (_next_undo_action == _undo_actions.size)
-      return;
-
-    undo_disabled = true;
-    raw_begin();
-    assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
-    ++_next_undo_action;
-    for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_END; ++_next_undo_action) {
-      UndoAction a = _undo_actions[_next_undo_action];
-      // printf("redo action: %i\n", a.type);
-      switch (a.type) {
-        case ACTIONTYPE_INSERT:
-          // printf("Inserting '%s' at {%i %i}\n", a.insert.s.slice.chars, a.insert.a.x, a.insert.a.y);
-          insert(a.insert.a, a.insert.s.slice);
-          break;
-        case ACTIONTYPE_DELETE:
-          // printf("Removing {%i %i}, {%i %i}\n", a.remove.a.x, a.remove.a.y, a.remove.b.x, a.remove.b.y);
-          remove_range(a.remove.a, a.remove.b);
-          break;
-        case ACTIONTYPE_CURSOR_SNAPSHOT:
-          util_free(cursors);
-          cursors = a.cursors.copy_shallow();
-          break;
-        case ACTIONTYPE_GROUP_BEGIN:
-        case ACTIONTYPE_GROUP_END:
-          break;
-      }
-    }
-    ++_next_undo_action;
-    undo_disabled = false;
-    // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-    tokenize(*this);
-    raw_end();
-  }
-
-  void print_undo_actions() {
-    puts("#########################");
-    for (UndoAction &a : _undo_actions) {
-      switch (a.type) {
-        case ACTIONTYPE_INSERT:
-          puts("   INSERT");
-          break;
-        case ACTIONTYPE_DELETE:
-          puts("   DELETE");
-          break;
-        case ACTIONTYPE_CURSOR_SNAPSHOT:
-          puts("   CURSORS");
-          break;
-        case ACTIONTYPE_GROUP_BEGIN:
-          puts(">>>");
-          break;
-        case ACTIONTYPE_GROUP_END:
-          puts("<<<");
-          break;
-      }
-    }
-  }
-
-  static bool reload(Buffer *b);
-  static bool from_file(Slice filename, Buffer *b);
+  static bool reload(BufferData *b);
+  static bool from_file(Slice filename, BufferData *b);
 };
 
-void util_free(Buffer &b);
-void util_free(Buffer *b) {
+void util_free(BufferData &b);
+void util_free(BufferData *b) {
   util_free(*b);
   delete b;
 }
-
 
 static void util_free(UndoAction &a) {
   switch (a.type) {
@@ -809,9 +582,72 @@ struct MenuOption {
   Slice description;
 };
 
+struct BufferView {
+  BufferData *data;
+  Array<Cursor> cursors;
+
+  void move_to_y(int marker_idx, int y);
+  void move_to_x(int marker_idx, int x);
+  void move_to(int marker_idx, Pos p);
+  void move_to(int x, int y);
+  void move_to(Pos p);
+  void move_y(int dy);
+  void move_y(int marker_idx, int dy);
+  void move_x(int dx);
+  void move_x(int marker_idx, int dx);
+  void move(int marker_idx, int dx, int dy);
+  void action_end() {data->action_end(cursors);}
+  void action_begin() {data->action_begin(cursors);}
+  void undo() {data->undo(cursors);}
+  void redo() {data->redo(cursors);}
+  void deduplicate_cursors();
+  void collapse_cursors();
+  void update();
+  bool find_and_move(Slice s, bool stay);
+  bool find_and_move(char c, bool stay);
+  bool find_and_move_r(Slice s, bool stay);
+  bool find_and_move_r(char c, bool stay);
+  int advance();
+  int advance(int marker_idx);
+  int advance_r();
+  int advance_r(int marker_idx);
+  void goto_endline();
+  void goto_endline(int marker_idx);
+  void goto_beginline();
+  void delete_line() {data->delete_line(cursors);}
+  void remove_range(Pos a, Pos b, int cursor_idx) {data->remove_range(cursors, a, b, cursor_idx);}
+  void remove_trailing_whitespace();
+  void remove_trailing_whitespace(int cursor_idx) {data->remove_trailing_whitespace(cursors, cursor_idx);}
+  void autoindent(const int y) {data->autoindent(cursors, y);}
+  void autoindent() {data->autoindent(cursors);}
+  void push_line(Slice s) {data->push_line(cursors, s);}
+  void insert(Slice s) {data->insert(cursors, s);}
+  void insert(Pos p, Slice s, int cursor_idx = -1) {data->insert(cursors, p, s, cursor_idx);}
+  void insert(Slice s, int cursor_idx) {data->insert(cursors, s, cursor_idx);}
+  void insert(Pos p, Utf8char ch) {data->insert(cursors, p, ch);}
+  void insert(Utf8char ch, int cursor_idx) {data->insert(cursors, ch, cursor_idx);}
+  void insert(Utf8char ch) {data->insert(cursors, ch);}
+  void insert_newline() {data->insert_newline(cursors);}
+  void insert_newline_below() {data->insert_newline_below(cursors);}
+  void insert_tab() {data->insert_tab(cursors);}
+  void empty() {data->empty(cursors);}
+  Utf8char getchar(int cursor_idx) {return data->getchar(cursors[cursor_idx].pos);}
+
+  static BufferView create(BufferData *data) {
+    BufferView b = {data, {}};
+    b.cursors += Cursor{};
+    return b;
+  }
+};
+
+static void util_free(BufferView &b) {
+  util_free(b.cursors);
+  b.data = 0;
+}
+
 struct Pane {
   PaneType type;
-  Buffer *buffer; // TODO: move to panetype specific stuff
+  BufferView buffer;
 
   Rect bounds;
   const Color *background_color;
@@ -848,6 +684,10 @@ struct Pane {
   void render();
   void update_suggestions();
   void clear_suggestions();
+  void switch_buffer(BufferData *d) {
+    util_free(buffer);
+    buffer = BufferView::create(d);
+  }
 
   // internal methods
   void render_edit();
@@ -876,18 +716,26 @@ struct Pane {
   Pos buf2char(Pos p) const;
   Pos buf2pixel(Pos p) const;
 
-  static void init_edit(Pane &p, Buffer *b, Color *background_color, Color *text_color, Color *active_highlight_background_color, Color *inactive_highlight_background_color) {
+  static void init_edit(Pane &p,
+                        BufferData *b,
+                        Color *background_color,
+                        Color *text_color,
+                        Color *active_highlight_background_color,
+                        Color *inactive_highlight_background_color) {
     p = {};
     p.type = PANETYPE_EDIT;
-    p.buffer = b;
+    p.buffer = {b, Array<Cursor>{}};
+    p.buffer.cursors += {};
     p.background_color = background_color;
     p.text_color = text_color;
     p.active_highlight_background_color = active_highlight_background_color;
     p.inactive_highlight_background_color = inactive_highlight_background_color;
+    p.buffer.empty();
   }
 };
 
-void util_free(Pane&) {
+void util_free(Pane &p) {
+  util_free(p.buffer.cursors);
 }
 
 void util_free(Pane *&p) {
@@ -938,7 +786,7 @@ struct FileNode {
 };
 
 struct Location {
-  Buffer *buffer;
+  BufferData *buffer;
   Array<Pos> cursors;
 };
 
@@ -988,16 +836,16 @@ struct State {
   Pane *editing_pane; // the pane that is currently being edited on, regardless if you happen to be in filesearch or menu
 
   Pane menu_pane;
-  Buffer menu_buffer;
+  BufferData menu_buffer;
   Pane status_message_pane;
-  Buffer status_message_buffer;
+  BufferData status_message_buffer;
   Pane dropdown_pane;
-  Buffer dropdown_buffer;
-  Buffer null_buffer;
+  BufferData dropdown_buffer;
+  BufferData null_buffer;
 
   String search_term;
 
-  Array<Buffer*> buffers;
+  Array<BufferData*> buffers;
 
   Mode mode;
 
@@ -1051,7 +899,7 @@ static void status_message_set(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
 
-  G.status_message_buffer.empty();
+  G.status_message_pane.buffer.empty();
   G.status_message_buffer[0].clear();
   G.status_message_buffer[0].appendv(fmt, args);
 }
@@ -1250,7 +1098,7 @@ static Keyword keywords[] = {
 
 /****** @TOKENIZER ******/
 
-static void tokenize(Buffer &b) {
+static void tokenize(BufferData &b) {
   Array<TokenInfo> tokens = b.tokens;
   util_free(tokens);
   util_free(b.identifiers);
@@ -1473,7 +1321,7 @@ static const char* cman_strerror(int e) {
 #define file_write(file, str, len) (fwrite(str, len, 1, file) != 1)
 #define file_read(file, buf, n) (fread(buf, n, 1, file) != 1)
 
-static void save_buffer(Buffer *b) {
+static void save_buffer(BufferData *b) {
   FILE* f;
   int i;
 
@@ -1512,7 +1360,7 @@ static void save_buffer(Buffer *b) {
 
 static void menu_option_save() {
   if (G.selected_pane)
-    save_buffer(G.editing_pane->buffer);
+    save_buffer(G.editing_pane->buffer.data);
 }
 
 void state_free();
@@ -1527,14 +1375,14 @@ static void menu_option_quit() {
 }
 
 static void menu_option_show_tab_type() {
-  if (G.editing_pane->buffer->tab_type == 0)
+  if (G.editing_pane->buffer.data->tab_type == 0)
     status_message_set("Using tabs");
   else
-    status_message_set("Tabs is %i spaces", G.editing_pane->buffer->tab_type);
+    status_message_set("Tabs is %i spaces", G.editing_pane->buffer.data->tab_type);
 }
 
 static void menu_option_print_declarations() {
-  Buffer &b = *G.editing_pane->buffer;
+  BufferData &b = *G.editing_pane->buffer.data;
   for (Range r : b.declarations) {
     Slice s = b.getslice(r);
     printf("%.*s\n", s.length, s.chars);
@@ -1547,14 +1395,14 @@ static void menu_option_chdir() {
 }
 
 static void menu_option_reload() {
-  if (Buffer::reload(G.editing_pane->buffer))
-    status_message_set("Reloaded {}", &G.editing_pane->buffer->filename.slice);
+  if (BufferData::reload(G.editing_pane->buffer.data))
+    status_message_set("Reloaded {}", &G.editing_pane->buffer.data->filename.slice);
   else
-    status_message_set("Failed to reload {}", &G.editing_pane->buffer->filename.slice);
+    status_message_set("Failed to reload {}", &G.editing_pane->buffer.data->filename.slice);
 }
 
 static void menu_option_close() {
-  Buffer *b = G.editing_pane->buffer;
+  BufferData *b = G.editing_pane->buffer.data;
   if (b == &G.null_buffer)
     return;
 
@@ -1572,7 +1420,7 @@ static void menu_option_close() {
 
 static void menu_option_closeall() {
   status_message_set("Closed all buffers");
-  for (Buffer *b : G.buffers)
+  for (BufferData *b : G.buffers)
     util_free(b);
   G.buffers.size = 0;
 }
@@ -1626,34 +1474,34 @@ static void mode_cleanup() {
   G.flags.cursor_dirty = true;
 
   if (G.mode == MODE_FILESEARCH || G.mode == MODE_SEARCH || G.mode == MODE_CWD) {
-    G.menu_buffer.empty();
+    G.menu_pane.buffer.empty();
   }
   G.menu_pane.clear_suggestions();
 
   if (G.mode == MODE_INSERT)
-    G.editing_pane->buffer->action_end();
+    G.editing_pane->buffer.action_end();
 }
 
 static Array<String> get_search_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer->identifiers, slice));
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->identifiers, slice));
 }
 
 static void mode_search() {
   mode_cleanup();
 
-  G.editing_pane->buffer->collapse_cursors();
+  G.editing_pane->buffer.collapse_cursors();
 
   G.mode = MODE_SEARCH;
   G.bottom_pane_highlight.reset();
   G.selected_pane = &G.menu_pane;
-  G.search_begin_pos = G.editing_pane->buffer->cursors[0].pos;
+  G.search_begin_pos = G.editing_pane->buffer.cursors[0].pos;
   G.search_failed = 0;
 
   G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu.get_suggestions = &get_search_suggestions;
   G.menu_pane.menu.prefix = Slice::create("search");
 
-  G.menu_buffer.empty();
+  G.menu_pane.buffer.empty();
 }
 
 static Array<String> get_cwd_suggestions() {
@@ -1724,14 +1572,14 @@ static void mode_cwd() {
   G.menu_pane.menu.get_suggestions = &get_cwd_suggestions;
   G.menu_pane.menu.prefix = Slice::create("chdir");
 
-  G.menu_buffer.empty();
-  G.menu_buffer.insert(G.current_working_directory.string.slice);
-  G.menu_buffer.insert(Utf8char::create(Path::separator));
+  G.menu_pane.buffer.empty();
+  G.menu_pane.buffer.insert(G.current_working_directory.string.slice);
+  G.menu_pane.buffer.insert(Utf8char::create(Path::separator));
   G.menu_pane.update_suggestions();
 }
 
 static Array<String> get_goto_definition_suggestions() {
-  Buffer &b = *G.editing_pane->buffer;
+  BufferData &b = *G.editing_pane->buffer.data;
   Array<Slice> decls = {};
   decls.reserve(b.declarations.size);
   for (Range r : b.declarations)
@@ -1751,7 +1599,7 @@ static void mode_goto_definition() {
   G.menu_pane.menu.get_suggestions = &get_goto_definition_suggestions;
   G.menu_pane.menu.prefix = Slice::create("goto decl");
 
-  G.menu_buffer.empty();
+  G.menu_pane.buffer.empty();
   G.menu_pane.update_suggestions();
 }
 
@@ -1773,7 +1621,7 @@ static void mode_filesearch() {
   G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu.get_suggestions = &get_filesearch_suggestions;
   G.menu_pane.menu.prefix = Slice::create("open");
-  G.menu_buffer.empty();
+  G.menu_pane.buffer.empty();
   G.menu_pane.update_suggestions();
 }
 
@@ -1816,10 +1664,12 @@ static void mode_insert() {
   mode_cleanup();
   G.default_marker_background_color.jump();
 
+  util_free(G.visual_start);
+
   G.mode = MODE_INSERT;
   G.bottom_pane = &G.status_message_pane;
 
-  G.editing_pane->buffer->action_begin();
+  G.editing_pane->buffer.action_begin();
 
   status_message_set("insert");
 }
@@ -1836,7 +1686,7 @@ static void mode_menu() {
   G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu.get_suggestions = &get_menu_suggestions;
   G.menu_pane.menu.prefix = Slice::create("menu");
-  G.menu_buffer.empty();
+  G.menu_pane.buffer.empty();
   G.menu_pane.update_suggestions();
 }
 
@@ -1860,7 +1710,7 @@ static int pixel2chary(int y) {
   return y/G.line_height;
 }
 
-bool Buffer::find_start_of_identifier(Pos pos, Pos *pout) {
+bool BufferData::find_start_of_identifier(Pos pos, Pos *pout) {
   *pout = pos;
   advance_r(*pout);
   Utf8char c = getchar(*pout);
@@ -1879,23 +1729,23 @@ bool Buffer::find_start_of_identifier(Pos pos, Pos *pout) {
   return true;
 }
 
-static bool dropdown_autocomplete(Buffer &b) {
-  if (G.dropdown_buffer.isempty() || G.dropdown_buffer.cursors.size > 1)
+static bool dropdown_autocomplete(BufferView &b) {
+  if (G.dropdown_buffer.isempty())
     return false;
 
   Pos start;
-  if (!b.find_start_of_identifier(b.cursors[0].pos, &start))
+  if (!b.data->find_start_of_identifier(b.cursors[0].pos, &start))
     return false;
   b.action_begin();
   for (int i = b.cursors[0].x - start.x; i; --i)
-    b.delete_char();
-  b.insert(G.dropdown_buffer[G.dropdown_buffer.cursors[0].y].slice);
+    b.data->delete_char(b.cursors);
+  b.insert(G.dropdown_buffer[G.dropdown_pane.buffer.cursors[0].y].slice);
   b.action_end();
   return true;
 }
 
 static void render_dropdown(Pane *pane) {
-  Buffer &b = *pane->buffer;
+  BufferView &b = pane->buffer;
 
   // don't show dropdown unless in edit mode
   if (pane->type == PANETYPE_EDIT && G.mode != MODE_INSERT)
@@ -1903,20 +1753,20 @@ static void render_dropdown(Pane *pane) {
 
   // we have to be on an identifier
   Pos identifier_start;
-  if (!b.find_start_of_identifier(b.cursors[0].pos, &identifier_start))
+  if (!b.data->find_start_of_identifier(b.cursors[0].pos, &identifier_start))
     return;
 
   // since fuzzy matching is expensive, we only update we moved since last time
   if (G.flags.cursor_dirty) {
-    Slice identifier = b.slice(identifier_start, b.cursors[0].x - identifier_start.x);
+    Slice identifier = b.data->slice(identifier_start, b.cursors[0].x - identifier_start.x);
     StackArray<FuzzyMatch, 10> best_matches;
-    View<Slice> input = VIEW(b.identifiers, slice);
+    View<Slice> input = VIEW(b.data->identifiers, slice);
     best_matches.size = fuzzy_match(identifier, input, view(best_matches));
 
-    G.dropdown_buffer.empty();
+    G.dropdown_pane.buffer.empty();
     for (int i = 0; i < best_matches.size; ++i)
-      G.dropdown_buffer.push_line(best_matches[i].str);
-    G.dropdown_buffer.cursors[0] = {};
+      G.dropdown_pane.buffer.push_line(best_matches[i].str);
+    G.dropdown_pane.buffer.cursors[0] = {};
   }
 
   if (G.dropdown_buffer.isempty())
@@ -1947,7 +1797,7 @@ static void render_dropdown(Pane *pane) {
 
 // TODO: use a unified key interface instead of this hack
 static void insert_default(Pane &p, Key key) {
-  Buffer &b = *p.buffer;
+  BufferView &b = p.buffer;
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (key == KEY_ESCAPE) {
@@ -1966,14 +1816,12 @@ static void insert_default(Pane &p, Key key) {
       break;
 
     case KEY_BACKSPACE:
-      b.delete_char();
+      b.data->delete_char(b.cursors);
       break;
   }
 }
 
-static bool movement_default(Pane &pane, int key) {
-  Buffer &buffer = *pane.buffer;
-
+static bool movement_default(BufferView &buffer, int key) {
   switch (key) {
     case 'b': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
@@ -2048,10 +1896,10 @@ static bool movement_default(Pane &pane, int key) {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         Pos p = buffer.cursors[i].pos;
         int depth = 0;
-        TokenInfo *t = buffer.token_find(p);
+        TokenInfo *t = buffer.data->token_find(p);
         if (t && t->token == '{')
           --t;
-        for (; t >= buffer.tokens.begin(); --t) {
+        for (; t >= buffer.data->tokens.begin(); --t) {
           if (t->token == '}')
             ++depth;
           if (t->token == '{') {
@@ -2070,10 +1918,10 @@ static bool movement_default(Pane &pane, int key) {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         Pos p = buffer.cursors[i].pos;
         int depth = 0;
-        TokenInfo *t = buffer.token_find(p);
+        TokenInfo *t = buffer.data->token_find(p);
         if (t && t->token == '}')
           ++t;
-        for (; t < buffer.tokens.end(); ++t) {
+        for (; t < buffer.data->tokens.end(); ++t) {
           if (t->token == '{') 
             ++depth;
           if (t->token == '}') {
@@ -2088,14 +1936,14 @@ static bool movement_default(Pane &pane, int key) {
       break;}
 
     case '*': {
-      TokenInfo *t = buffer.gettoken(buffer.cursors[0].pos);
+      TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
       if (!t)
         break;
       if (t->token != TOKEN_IDENTIFIER)
         break;
       G.search_term_background_color.reset();
       util_free(G.search_term);
-      G.search_term = String::create(buffer.getslice(t->r));
+      G.search_term = String::create(buffer.data->getslice(t->r));
       buffer.find_and_move(G.search_term.slice, false);
       break;}
     default:
@@ -2212,33 +2060,32 @@ static void state_init() {
 
   // @panes
 
-  G.null_buffer.empty();
   Pane *main_pane = new Pane{};
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
 
 
   // search pane
-  G.menu_buffer.empty();
   G.menu_pane.type = PANETYPE_MENU;
-  G.menu_pane.buffer = &G.menu_buffer;
+  G.menu_pane.buffer = BufferView::create(&G.menu_buffer);
+  G.menu_pane.buffer.empty();
   G.menu_pane.background_color = &G.bottom_pane_highlight.color;
   G.menu_pane.text_color = &G.default_text_color;
   G.menu_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
   G.menu_pane.margin = 5;
 
   // dropdown pane
-  G.dropdown_buffer.empty();
   G.dropdown_pane.type = PANETYPE_DROPDOWN;
-  G.dropdown_pane.buffer = &G.dropdown_buffer;
+  G.dropdown_pane.buffer = BufferView::create(&G.dropdown_buffer);
+  G.dropdown_pane.buffer.empty();
   G.dropdown_pane.background_color = &COLOR_GREY;
   G.dropdown_pane.text_color = &COLOR_WHITE;
   G.dropdown_pane.margin = 5;
   G.dropdown_pane.active_highlight_background_color = &COLOR_DEEP_PURPLE;
 
   // status message pane
-  G.status_message_buffer.empty();
   G.status_message_pane.type = PANETYPE_STATUSMESSAGE;
-  G.status_message_pane.buffer = &G.status_message_buffer;
+  G.status_message_pane.buffer = BufferView::create(&G.status_message_buffer);
+  G.status_message_pane.buffer.empty();
   G.status_message_pane.background_color = &G.bottom_pane_highlight.color;
   G.status_message_pane.text_color = &G.default_text_color;
   G.status_message_pane.active_highlight_background_color = &G.active_highlight_background_color.color;
@@ -2291,10 +2138,10 @@ static void handle_menu_insert(int key) {
     case KEY_TAB: {
       Slice *s = G.menu_pane.menu_get_selection();
       if (s) {
-        G.menu_pane.buffer->empty();
-        G.menu_pane.buffer->insert(*s);
+        G.menu_pane.buffer.empty();
+        G.menu_pane.buffer.insert(*s);
       } else {
-        G.menu_pane.buffer->insert_tab();
+        G.menu_pane.buffer.insert_tab();
       }
       break;}
 
@@ -2307,7 +2154,7 @@ static void handle_menu_insert(int key) {
   }
 }
 
-static void range_to_clipboard(Buffer &buffer, View<Pos> from, View<Pos> to) {
+static void range_to_clipboard(BufferData &buffer, View<Pos> from, View<Pos> to) {
   if (from.size != to.size)
     return;
 
@@ -2345,7 +2192,7 @@ static void move_cursor_due_to_remove(Pos a, Pos b, Pos *pos) {
 }
 
 static void handle_input(Key key) { 
-  Buffer &buffer = *G.editing_pane->buffer;
+  BufferView &buffer = G.editing_pane->buffer;
 
   switch (G.mode) {
   case MODE_CWD:
@@ -2384,18 +2231,18 @@ static void handle_input(Key key) {
     else if (key == KEY_BACKSPACE) {
       Path p = Path::create(G.menu_buffer.lines[0](0, -2));
       p.pop();
-      G.menu_buffer.empty();
-      G.menu_buffer.insert(p.string.slice);
-      G.menu_buffer.insert(Utf8char::create(Path::separator));
+      G.menu_pane.buffer.empty();
+      G.menu_pane.buffer.insert(p.string.slice);
+      G.menu_pane.buffer.insert(Utf8char::create(Path::separator));
       util_free(p);
       G.menu_pane.update_suggestions();
     }
     else if (key == KEY_TAB) {
       Slice *s = G.menu_pane.menu_get_selection();
       if (s) {
-        G.menu_buffer.empty();
-        G.menu_buffer.insert(*s);
-        G.menu_buffer.insert(Utf8char::create(Path::separator));
+        G.menu_pane.buffer.empty();
+        G.menu_pane.buffer.insert(*s);
+        G.menu_pane.buffer.insert(Utf8char::create(Path::separator));
       }
       G.menu_pane.update_suggestions();
     }
@@ -2418,17 +2265,17 @@ static void handle_input(Key key) {
         buffer.move_to(0, 0);
         break;
       case 'b':
-        buffer.move_to(0, buffer.num_lines()-1);
+        buffer.move_to(0, buffer.data->num_lines()-1);
         break;
       case 'd': {
         // goto declaration
-        TokenInfo *t = buffer.gettoken(buffer.cursors[0].pos);
+        TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
         if (!t)
           break;
         if (t->token != TOKEN_IDENTIFIER)
           break;
 
-        Range *decl = buffer.getdeclaration(buffer.getslice(t->r));
+        Range *decl = buffer.data->getdeclaration(buffer.data->getslice(t->r));
         if (!decl)
           break;
 
@@ -2485,7 +2332,7 @@ static void handle_input(Key key) {
         break;
       }
 
-      Range *decl = buffer.getdeclaration(*opt);
+      Range *decl = buffer.data->getdeclaration(*opt);
       if (!decl) {
         mode_normal(true);
         break;
@@ -2517,8 +2364,8 @@ static void handle_input(Key key) {
         }
       }
 
-      Buffer *b = 0;
-      for (Buffer *bb : G.buffers) {
+      BufferData *b = 0;
+      for (BufferData *bb : G.buffers) {
         if (filename == bb->filename.slice) {
           b = bb;
           filename = bb->filename.slice;
@@ -2527,20 +2374,20 @@ static void handle_input(Key key) {
       }
       if (b) {
         status_message_set("Switched to {}", &filename);
-        G.editing_pane->buffer = b;
+        G.editing_pane->switch_buffer(b);
       }
       else {
-        b = new Buffer{};
-        if (Buffer::from_file(filename, b)) {
+        b = new BufferData{};
+        if (BufferData::from_file(filename, b)) {
           G.buffers.push(b);
-          G.editing_pane->buffer = b;
+          G.editing_pane->switch_buffer(b);
           status_message_set("Loaded file {} (%s)", &filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
           status_message_set("Failed to load file {}", &filename);
           free(b);
         }
       }
-      G.menu_buffer.empty();
+      G.menu_pane.buffer.empty();
       mode_normal(false);
       break;
     }
@@ -2578,7 +2425,7 @@ static void handle_input(Key key) {
     buffer.action_begin();
 
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
-    if (!movement_default(*G.editing_pane, key))
+    if (!movement_default(buffer, key))
       goto yank_done;
     if (cursors.size != buffer.cursors.size)
       goto yank_done;
@@ -2586,9 +2433,9 @@ static void handle_input(Key key) {
     // some movements we want to include the end position
     if (key == '{' || key == '}')
       for (Cursor &c : cursors)
-        buffer.advance(c.pos);
+        buffer.data->advance(c.pos);
 
-    range_to_clipboard(buffer, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
+    range_to_clipboard(*buffer.data, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
 
     // go back to where we started
     for (int i = 0; i < cursors.size; ++i)
@@ -2604,7 +2451,7 @@ static void handle_input(Key key) {
     // TODO: is it more performant to check if it is a movement command first?
     buffer.action_begin();
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
-    if (movement_default(*G.editing_pane, key)) {
+    if (movement_default(buffer, key)) {
       if (cursors.size == buffer.cursors.size) {
         // delete movement range
         for (int i = 0; i < cursors.size; ++i) {
@@ -2613,7 +2460,7 @@ static void handle_input(Key key) {
           if (b < a)
             swap(a,b);
           if (key == '{' || key == '}')
-            buffer.advance(b);
+            buffer.data->advance(b);
           buffer.remove_range(a, b, i);
         }
       }
@@ -2657,14 +2504,14 @@ static void handle_input(Key key) {
       case CONTROL('j'): {
         // this move should not dirty cursor
         int f = G.flags.cursor_dirty;
-        G.dropdown_buffer.move_y(1);
+        G.dropdown_pane.buffer.move_y(1);
         G.flags.cursor_dirty = f;
         break;}
 
       case CONTROL('k'): {
         // this move should not dirty cursor
         int f = G.flags.cursor_dirty;
-        G.dropdown_buffer.move_y(-1);
+        G.dropdown_pane.buffer.move_y(-1);
         G.flags.cursor_dirty = f;
         break;}
 
@@ -2675,7 +2522,7 @@ static void handle_input(Key key) {
     break;}
 
   case MODE_NORMAL:
-    if (movement_default(*G.editing_pane, key))
+    if (movement_default(buffer, key))
       break;
 
     switch (key) {
@@ -2706,14 +2553,14 @@ static void handle_input(Key key) {
       break;
 
     case 'q':
-      if (buffer.modified())
+      if (buffer.data->modified())
         status_message_set("You have unsaved changes. If you really want to exit, use :quit");
       else
         editor_exit(0);
       break;
 
     case CONTROL('s'):
-      save_buffer(&buffer);
+      save_buffer(buffer.data);
       break;
 
     case 'i':
@@ -2738,7 +2585,7 @@ static void handle_input(Key key) {
 
 
         buffer.action_begin();
-        buffer.raw_begin();
+        buffer.data->raw_begin();
 
         // split clipboard among cursors
         if (num_endlines == buffer.cursors.size-1) {
@@ -2762,7 +2609,7 @@ static void handle_input(Key key) {
           buffer.insert(sl);
         }
 
-        buffer.raw_end();
+        buffer.data->raw_end();
         buffer.action_end();
         SDL_free(s);
       }
@@ -2835,18 +2682,17 @@ static void handle_input(Key key) {
 
     case 'y':
       // visual yank?
-      if (G.editing_pane->buffer == G.visual_start.buffer) {
-        Buffer &b = *G.editing_pane->buffer;
+      if (G.editing_pane->buffer.data == G.visual_start.buffer) {
         Array<Pos> destination;
-        if (b.cursors.size != G.visual_start.cursors.size) {
+        if (buffer.cursors.size != G.visual_start.cursors.size) {
           util_free(G.visual_start);
           goto yank;
         }
 
-        b.action_begin();
+        buffer.action_begin();
 
         destination = {};
-        for (Cursor c : b.cursors)
+        for (Cursor c : buffer.cursors)
           destination += c.pos;
 
         if (G.visual_entire_line) {
@@ -2857,10 +2703,10 @@ static void handle_input(Key key) {
             ++p.y;
         }
 
-        range_to_clipboard(b, view(G.visual_start.cursors), view(destination));
+        range_to_clipboard(*buffer.data, view(G.visual_start.cursors), view(destination));
         util_free(destination);
         util_free(G.visual_start);
-        b.action_end();
+        buffer.action_end();
         break;
       }
 
@@ -2871,7 +2717,7 @@ static void handle_input(Key key) {
     case 'Y': {
       StringBuffer s = {};
       for (int i = 0; i < buffer.cursors.size; ++i) {
-        s += StringBuffer::create(buffer.lines[buffer.cursors[i].y].slice);
+        s += StringBuffer::create(buffer.data->lines[buffer.cursors[i].y].slice);
         s += '\n';
         if (i < buffer.cursors.size-1)
           s += '\n';
@@ -2888,40 +2734,38 @@ static void handle_input(Key key) {
     case 'v':
       G.visual_entire_line = false;
       util_free(G.visual_start.cursors);
-      for (Cursor c : G.editing_pane->buffer->cursors)
+      for (Cursor c : G.editing_pane->buffer.cursors)
         G.visual_start.cursors += c.pos;
-      G.visual_start.buffer = G.editing_pane->buffer;
+      G.visual_start.buffer = G.editing_pane->buffer.data;
       break;
     #endif
 
     case 'd':
       // visual delete?
-      if (G.editing_pane->buffer == G.visual_start.buffer) {
-        Buffer &b = *G.editing_pane->buffer;
-
-        if (b.cursors.size != G.visual_start.cursors.size) {
+      if (G.editing_pane->buffer.data == G.visual_start.buffer) {
+        if (buffer.cursors.size != G.visual_start.cursors.size) {
           util_free(G.visual_start);
           goto del;
         }
 
-        b.action_begin();
+        buffer.action_begin();
 
         for (int i = 0; i < G.visual_start.cursors.size; ++i) {
           Pos pa = G.visual_start.cursors[i];
-          Pos pb = b.cursors[i].pos;
+          Pos pb = buffer.cursors[i].pos;
           if (G.visual_entire_line) {
             pa.x = 0;
             pb.x = 0;
             ++pb.y;
           }
-          b.remove_range(pa, pb, i);
+          buffer.remove_range(pa, pb, i);
           for (Pos &p : G.visual_start.cursors)
             move_cursor_due_to_remove(pa, pb, &p);
         }
 
         util_free(G.visual_start);
 
-        b.action_end();
+        buffer.action_end();
         break;
       }
 
@@ -2932,9 +2776,9 @@ static void handle_input(Key key) {
     case 'V':
       G.visual_entire_line = true;
       util_free(G.visual_start);
-      for (Cursor c : G.editing_pane->buffer->cursors)
+      for (Cursor c : G.editing_pane->buffer.cursors)
         G.visual_start.cursors += c.pos;
-      G.visual_start.buffer = G.editing_pane->buffer;
+      G.visual_start.buffer = G.editing_pane->buffer.data;
       break;
 
     case 'J':
@@ -2963,11 +2807,11 @@ static void handle_rendering(float dt) {
   // boost marker when you move or change modes
   static Pos prev_pos;
   static Mode prev_mode;
-  if (prev_pos != G.editing_pane->buffer->cursors[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
+  if (prev_pos != G.editing_pane->buffer.cursors[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
     G.marker_background_color.reset();
     G.active_highlight_background_color.reset();
   }
-  prev_pos = G.editing_pane->buffer->cursors[0].pos;
+  prev_pos = G.editing_pane->buffer.cursors[0].pos;
   prev_mode = G.mode;
 
   // update colors
@@ -3005,45 +2849,45 @@ static void handle_rendering(float dt) {
   G.bottom_pane->render();
 }
 
-Pos Buffer::to_visual_pos(Pos p) {
+Pos BufferData::to_visual_pos(Pos p) {
   p.x = lines[p.y].visual_offset(p.x, G.tab_width);
   return p;
 }
 
-void Buffer::move_to_y(int marker_idx, int y) {
+void BufferView::move_to_y(int marker_idx, int y) {
   G.flags.cursor_dirty = true;
 
-  y = clamp(y, 0, lines.size-1);
+  y = clamp(y, 0, data->lines.size-1);
   cursors[marker_idx].y = y;
 }
 
-void Buffer::move_to_x(int marker_idx, int x) {
+void BufferView::move_to_x(int marker_idx, int x) {
   G.flags.cursor_dirty = true;
 
-  x = clamp(x, 0, lines[cursors[marker_idx].y].length);
+  x = clamp(x, 0, data->lines[cursors[marker_idx].y].length);
   cursors[marker_idx].x = x;
-  cursors[marker_idx].ghost_x = lines[cursors[marker_idx].y].visual_offset(x, G.tab_width);
+  cursors[marker_idx].ghost_x = data->lines[cursors[marker_idx].y].visual_offset(x, G.tab_width);
 }
 
-void Buffer::move_to(int x, int y) {
+void BufferView::move_to(int x, int y) {
   collapse_cursors();
   move_to_y(0, y);
   move_to_x(0, x);
 }
 
-void Buffer::move_to(Pos p) {
+void BufferView::move_to(Pos p) {
   collapse_cursors();
   move_to_y(0, p.y);
   move_to_x(0, p.x);
 }
 
 // NOTE: you must call deduplicate_cursors after this
-void Buffer::move_to(int marker_idx, Pos p) {
+void BufferView::move_to(int marker_idx, Pos p) {
   move_to_y(marker_idx, p.y);
   move_to_x(marker_idx, p.x);
 }
 
-void Buffer::move_y(int marker_idx, int dy) {
+void BufferView::move_y(int marker_idx, int dy) {
   if (!dy)
     return;
 
@@ -3052,17 +2896,17 @@ void Buffer::move_y(int marker_idx, int dy) {
   Pos &pos = cursors[marker_idx].pos;
   int ghost_x = cursors[marker_idx].ghost_x;
 
-  pos.y = clamp(pos.y + dy, 0, lines.size - 1);
+  pos.y = clamp(pos.y + dy, 0, data->lines.size - 1);
 
   if (ghost_x == GHOST_EOL)
-    pos.x = lines[pos.y].length;
+    pos.x = data->lines[pos.y].length;
   else if (ghost_x == GHOST_BOL)
-    pos.x = begin_of_line(pos.y);
+    pos.x = data->begin_of_line(pos.y);
   else
-    pos.x = lines[pos.y].from_visual_offset(ghost_x, G.tab_width);
+    pos.x = data->lines[pos.y].from_visual_offset(ghost_x, G.tab_width);
 }
 
-void Buffer::move_x(int marker_idx, int dx) {
+void BufferView::move_x(int marker_idx, int dx) {
   if (!dx)
     return;
   G.flags.cursor_dirty = true;
@@ -3070,56 +2914,55 @@ void Buffer::move_x(int marker_idx, int dx) {
   Pos &pos = cursors[marker_idx].pos;
   if (dx > 0)
     for (; dx > 0; --dx)
-      pos.x = lines[pos.y].next(pos.x);
+      pos.x = data->lines[pos.y].next(pos.x);
   if (dx < 0)
     for (; dx < 0; ++dx)
-      pos.x = lines[pos.y].prev(pos.x);
-  pos.x = clamp(pos.x, 0, lines[pos.y].length);
-  cursors[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+      pos.x = data->lines[pos.y].prev(pos.x);
+  pos.x = clamp(pos.x, 0, data->lines[pos.y].length);
+  cursors[marker_idx].ghost_x = data->lines[pos.y].visual_offset(pos.x, G.tab_width);
 }
 
-void Buffer::move_x(int dx) {
+void BufferView::move_x(int dx) {
   for (int i = 0; i < cursors.size; ++i)
     move_x(i, dx);
 }
 
-void Buffer::move_y(int dy) {
+void BufferView::move_y(int dy) {
   for (int i = 0; i < cursors.size; ++i)
     move_y(i, dy);
 }
 
-void util_free(Buffer &b) {
+void util_free(BufferData &b) {
   util_free(b.lines);
   util_free(b.filename);
   util_free(b.tokens);
   util_free(b.identifiers);
-  util_free(b.cursors);
+  util_free(b.declarations);
   util_free(b._undo_actions);
 
   // reset any panes that are using this buffer
   for (int i = 0; i < G.editing_panes.size; ++i) {
-    if (G.editing_panes[i]->buffer == &b) {
+    if (G.editing_panes[i]->buffer.data == &b) {
       util_free(*G.editing_panes[i]);
       Pane::init_edit(*G.editing_panes[i], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
     }
   }
 }
 
-bool Buffer::reload(Buffer *b) {
+bool BufferData::reload(BufferData *b) {
   String filename = String::create(b->filename.slice);
   util_free(b);
-  bool succ = Buffer::from_file(filename.slice, b);
+  bool succ = BufferData::from_file(filename.slice, b);
   util_free(filename);
   return succ;
 }
 
-bool Buffer::from_file(Slice filename, Buffer *buffer) {
+bool BufferData::from_file(Slice filename, BufferData *buffer) {
   FILE* f = 0;
   int num_lines = 0;
   *buffer = {};
-  Buffer &b = *buffer;
+  BufferData &b = *buffer;
   b.endline_string = ENDLINE_UNIX;
-  b.cursors.push({});
 
   b.filename = filename.copy();
   if (file_open(&f, b.filename.chars, "rb"))
@@ -3181,7 +3024,7 @@ bool Buffer::from_file(Slice filename, Buffer *buffer) {
   return false;
 }
 
-StringBuffer Buffer::range_to_string(const Range r) {
+StringBuffer BufferData::range_to_string(const Range r) {
     // turn range into a string with endlines in it
   // TODO: We could probably do some compression on this
   if (r.a.y == r.b.y)
@@ -3201,14 +3044,14 @@ StringBuffer Buffer::range_to_string(const Range r) {
   }
 }
 
-Range* Buffer::getdeclaration(Slice s) {
+Range* BufferData::getdeclaration(Slice s) {
   for (Range &r : declarations)
     if (getslice(r) == s)
       return &r;
   return 0;
 }
 
-TokenInfo* Buffer::gettoken(Pos p) {
+TokenInfo* BufferData::gettoken(Pos p) {
   int a = 0, b = tokens.size-1;
 
   while (a <= b) {
@@ -3223,14 +3066,221 @@ TokenInfo* Buffer::gettoken(Pos p) {
   return 0;
 }
 
-void Buffer::move(int marker_idx, int dx, int dy) {
+void BufferData::push_undo_action(UndoAction a) {
+  if (undo_disabled)
+    return;
+
+  // free actions after _next_undo_action
+  for (int i = _next_undo_action; i < _undo_actions.size; ++i)
+    util_free(_undo_actions[i]);
+  _undo_actions.size = _next_undo_action;
+  _undo_actions += a;
+  ++_next_undo_action;
+}
+
+void BufferData::action_begin(Array<Cursor> &cursors) {
+  if (undo_disabled)
+    return;
+
+  if (_action_group_depth == 0) {
+    push_undo_action({ACTIONTYPE_GROUP_BEGIN});
+    push_undo_action(UndoAction::cursor_snapshot(cursors));
+  }
+  // TODO: check if anything actually happened between begin and end
+  ++_action_group_depth;
+}
+
+void BufferData::action_end(Array<Cursor> &cursors) {
+  if (undo_disabled)
+    return;
+
+  --_action_group_depth;
+  if (_action_group_depth == 0) {
+    // check if something actually happened
+    bool changed = true;
+    bool buffer_changed = true;
+    if (_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT && _undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN) {
+      changed = false;
+      buffer_changed = false;
+      UndoAction a = _undo_actions[_next_undo_action-1];
+      // check if cursors changed
+      if (a.cursors.size != cursors.size)
+        changed = true;
+      else {
+        for (int i = 0; i < a.cursors.size; ++i) {
+          if (cursors[i] == a.cursors[i])
+            continue;
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    // if nothing happened, remove group
+    if (!changed) {
+      assert(_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT);
+      util_free(_undo_actions[_next_undo_action-1]);
+      assert(_undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN);
+      _next_undo_action -= 2;
+      _undo_actions.size -= 2;
+      return;
+    }
+
+
+    push_undo_action(UndoAction::cursor_snapshot(cursors));
+    push_undo_action({ACTIONTYPE_GROUP_END});
+
+    // retokenize
+    if (buffer_changed)
+      tokenize(*this);
+
+    // build up clipboard from removed strings
+    Array<StringBuffer> clips = {};
+    // find start of group
+    UndoAction *a = &_undo_actions[_next_undo_action-1];
+    assert(a->type == ACTIONTYPE_GROUP_END);
+    while (a[-1].type != ACTIONTYPE_GROUP_BEGIN)
+      --a;
+    assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
+    clips.resize(a->cursors.size);
+    clips.zero();
+    // find every delete action, and if there is a cursor for that, add that delete that cursors 
+    bool clip_filled = false;
+    for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
+      if (a->type != ACTIONTYPE_DELETE)
+        continue;
+      if (a->remove.cursor_idx == -1)
+        continue;
+
+      clips[a->remove.cursor_idx] += a->remove.s;
+      clip_filled = true;
+    }
+
+    if (clip_filled) {
+      StringBuffer clip = {};
+      for (int i = 0; i < clips.size; ++i) {
+        clip += clips[i];
+        if (i < clips.size-1)
+          clip += '\n';
+      }
+      clip += '\0';
+      SDL_SetClipboardText(clip.chars);
+      util_free(clip);
+    }
+    util_free(clips);
+  }
+}
+
+void BufferData::undo(Array<Cursor> &cursors) {
+  if (undo_disabled)
+    return;
+  if (!_next_undo_action)
+    return;
+
+  undo_disabled = true;
+  raw_begin();
+  --_next_undo_action;
+  assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_END);
+  --_next_undo_action;
+  for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_BEGIN; --_next_undo_action) {
+    UndoAction a = _undo_actions[_next_undo_action];
+    // printf("undo action: %i\n", a.type);
+    switch (a.type) {
+      case ACTIONTYPE_INSERT:
+        // printf("Removing {%i %i}, {%i %i}\n", a.insert.a.x, a.insert.a.y, a.insert.b.x, a.insert.b.y);
+        remove_range(cursors, a.insert.a, a.insert.b);
+        break;
+      case ACTIONTYPE_DELETE:
+        // printf("Inserting '%.*s' at {%i %i}\n", a.remove.s.slice.length, a.remove.s.slice.chars, a.remove.a.x, a.remove.a.y);
+        insert(cursors, a.remove.a, a.remove.s.slice);
+        break;
+      case ACTIONTYPE_CURSOR_SNAPSHOT:
+        util_free(cursors);
+        cursors = a.cursors.copy_shallow();
+        break;
+      case ACTIONTYPE_GROUP_BEGIN:
+      case ACTIONTYPE_GROUP_END:
+        break;
+    }
+  }
+  // printf("cursors: %i\n", cursors.size);
+  undo_disabled = false;
+
+  // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
+  tokenize(*this);
+  raw_end();
+}
+
+void BufferData::redo(Array<Cursor> &cursors) {
+  if (undo_disabled)
+    return;
+
+  if (_next_undo_action == _undo_actions.size)
+    return;
+
+  undo_disabled = true;
+  raw_begin();
+  assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
+  ++_next_undo_action;
+  for (; _undo_actions[_next_undo_action].type != ACTIONTYPE_GROUP_END; ++_next_undo_action) {
+    UndoAction a = _undo_actions[_next_undo_action];
+    // printf("redo action: %i\n", a.type);
+    switch (a.type) {
+      case ACTIONTYPE_INSERT:
+        // printf("Inserting '%s' at {%i %i}\n", a.insert.s.slice.chars, a.insert.a.x, a.insert.a.y);
+        insert(cursors, a.insert.a, a.insert.s.slice);
+        break;
+      case ACTIONTYPE_DELETE:
+        // printf("Removing {%i %i}, {%i %i}\n", a.remove.a.x, a.remove.a.y, a.remove.b.x, a.remove.b.y);
+        remove_range(cursors, a.remove.a, a.remove.b);
+        break;
+      case ACTIONTYPE_CURSOR_SNAPSHOT:
+        util_free(cursors);
+        cursors = a.cursors.copy_shallow();
+        break;
+      case ACTIONTYPE_GROUP_BEGIN:
+      case ACTIONTYPE_GROUP_END:
+        break;
+    }
+  }
+  ++_next_undo_action;
+  undo_disabled = false;
+  // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
+  tokenize(*this);
+  raw_end();
+}
+
+void BufferData::print_undo_actions() {
+  puts("#########################");
+  for (UndoAction &a : _undo_actions) {
+    switch (a.type) {
+      case ACTIONTYPE_INSERT:
+        puts("   INSERT");
+        break;
+      case ACTIONTYPE_DELETE:
+        puts("   DELETE");
+        break;
+      case ACTIONTYPE_CURSOR_SNAPSHOT:
+        puts("   CURSORS");
+        break;
+      case ACTIONTYPE_GROUP_BEGIN:
+        puts(">>>");
+        break;
+      case ACTIONTYPE_GROUP_END:
+        puts("<<<");
+        break;
+    }
+  }
+}
+
+void BufferView::move(int marker_idx, int dx, int dy) {
   if (dy)
     move_y(marker_idx, dy);
   if (dx)
     move_x(marker_idx, dx);
 }
 
-void Buffer::deduplicate_cursors() {
+void BufferView::deduplicate_cursors() {
   for (int i = 0; i < cursors.size; ++i)
   for (int j = 0; j < cursors.size; ++j)
     if (i != j && cursors[i].pos == cursors[j].pos) {
@@ -3240,16 +3290,16 @@ void Buffer::deduplicate_cursors() {
     }
 }
 
-void Buffer::collapse_cursors() {
+void BufferView::collapse_cursors() {
   cursors.size = 1;
 }
 
-void Buffer::update() {
+void BufferView::update() {
   for (int i = 0; i < cursors.size; ++i)
     move(i, 0, 0);
 }
 
-bool Buffer::find_r(Slice s, int stay, Pos *p) {
+bool BufferData::find_r(Slice s, int stay, Pos *p) {
   if (!s.length)
     return false;
 
@@ -3277,7 +3327,7 @@ bool Buffer::find_r(Slice s, int stay, Pos *p) {
   return false;
 }
 
-bool Buffer::find_r(char s, int stay, Pos *p) {
+bool BufferData::find_r(char s, int stay, Pos *p) {
   int x = p->x;
   int y = p->y;
   if (!stay)
@@ -3302,7 +3352,7 @@ bool Buffer::find_r(char s, int stay, Pos *p) {
   return false;
 }
 
-bool Buffer::find(char s, bool stay, Pos *p) {
+bool BufferData::find(char s, bool stay, Pos *p) {
   int x, y;
 
   x = p->x;
@@ -3330,7 +3380,7 @@ bool Buffer::find(char s, bool stay, Pos *p) {
   return false;
 }
 
-bool Buffer::find(Slice s, bool stay, Pos *p) {
+bool BufferData::find(Slice s, bool stay, Pos *p) {
   int x, y;
   if (!s.length)
     return false;
@@ -3360,50 +3410,50 @@ bool Buffer::find(Slice s, bool stay, Pos *p) {
   return false;
 }
 
-bool Buffer::find_and_move_r(char c, bool stay) {
+bool BufferView::find_and_move_r(char c, bool stay) {
   collapse_cursors();
   Pos p = cursors[0].pos;
-  if (!find_r(c, stay, &p))
+  if (!data->find_r(c, stay, &p))
     return false;
   move_to(p);
   return true;
 }
 
-bool Buffer::find_and_move_r(Slice s, bool stay) {
+bool BufferView::find_and_move_r(Slice s, bool stay) {
   collapse_cursors();
   Pos p = cursors[0].pos;
-  if (!find_r(s, stay, &p))
+  if (!data->find_r(s, stay, &p))
     return false;
   move_to(p);
   return true;
 }
 
-bool Buffer::find_and_move(char c, bool stay) {
+bool BufferView::find_and_move(char c, bool stay) {
   collapse_cursors();
   Pos p = cursors[0].pos;
-  if (!find(c, stay, &p))
+  if (!data->find(c, stay, &p))
     return false;
   move_to(p);
   return true;
 }
 
-bool Buffer::find_and_move(Slice s, bool stay) {
+bool BufferView::find_and_move(Slice s, bool stay) {
   collapse_cursors();
   Pos p = cursors[0].pos;
-  if (!find(s, stay, &p))
+  if (!data->find(s, stay, &p))
     return false;
   move_to(p);
   return true;
 }
 
-void Buffer::remove_trailing_whitespace() {
-  action_begin();
+void BufferView::remove_trailing_whitespace() {
+  data->action_begin(cursors);
   for (int i = 0; i < cursors.size; ++i)
     remove_trailing_whitespace(i);
-  action_end();
+  data->action_end(cursors);
 }
 
-void Buffer::remove_trailing_whitespace(int cursor_idx) {
+void BufferData::remove_trailing_whitespace(Array<Cursor> &cursors, int cursor_idx) {
   int y = cursors[cursor_idx].y;
   if (lines[y].length == 0)
     return;
@@ -3412,32 +3462,28 @@ void Buffer::remove_trailing_whitespace(int cursor_idx) {
   if (!getchar(x,y).isspace())
     return;
 
-  action_begin();
   // TODO: @utf8
   while (x > 0 && getchar(x, y).isspace())
     --x;
-  remove_range({x, y}, {lines[y].length, y}, cursor_idx);
-  goto_endline(cursor_idx);
-
-  action_end();
+  remove_range(cursors, {x, y}, {lines[y].length, y}, cursor_idx);
 }
 
-void Buffer::delete_line(int y) {
-  remove_range({0, y}, {0, y+1});
+void BufferData::delete_line(Array<Cursor> &cursors, int y) {
+  remove_range(cursors, {0, y}, {0, y+1});
 }
 
-void Buffer::delete_line() {
-  action_begin();
+void BufferData::delete_line(Array<Cursor> &cursors) {
+  action_begin(cursors);
   for (int i = 0; i < cursors.size; ++i)
-    remove_range({0, cursors[i].y}, {0, cursors[i].y+1}, i);
-  action_end();
+    remove_range(cursors, {0, cursors[i].y}, {0, cursors[i].y+1}, i);
+  action_end(cursors);
 }
 
-void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
+void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx) {
   if (b <= a)
     return;
 
-  action_begin();
+  action_begin(cursors);
   G.flags.cursor_dirty = true;
 
   if (!undo_disabled) {
@@ -3461,11 +3507,11 @@ void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
     lines.remove_slown(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::delete_char() {
-  action_begin();
+void BufferData::delete_char(Array<Cursor> &cursors) {
+  action_begin(cursors);
   G.flags.cursor_dirty = true;
 
   for (int i = 0; i < cursors.size; ++i) {
@@ -3473,19 +3519,19 @@ void Buffer::delete_char() {
     if (pos.x == 0) {
       if (pos.y == 0)
         return;
-      remove_range({lines[pos.y-1].length, pos.y-1}, {0, pos.y}, i);
+      remove_range(cursors, {lines[pos.y-1].length, pos.y-1}, {0, pos.y}, i);
     }
     else {
       Pos p = pos;
       advance_r(p);
-      remove_range(p, pos, i);
+      remove_range(cursors, p, pos, i);
     }
   }
 
-  action_end();
+  action_end(cursors);
 }
 
-int Buffer::getindent(int y) {
+int BufferData::getindent(int y) {
   if (y < 0 || y > lines.size)
     return 0;
 
@@ -3503,7 +3549,7 @@ int Buffer::getindent(int y) {
   return n/tab_size;
 }
 
-int Buffer::indentdepth(int y, bool *has_statement) {
+int BufferData::indentdepth(int y, bool *has_statement) {
   if (has_statement)
     *has_statement = false;
   if (y < 0)
@@ -3546,17 +3592,17 @@ int Buffer::indentdepth(int y, bool *has_statement) {
   return depth;
 }
 
-void Buffer::autoindent() {
-  action_begin();
+void BufferData::autoindent(Array<Cursor> &cursors) {
+  action_begin(cursors);
 
   for (Cursor c : cursors)
-    autoindent(c.y);
+    autoindent(cursors, c.y);
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::autoindent(const int y) {
-  action_begin();
+void BufferData::autoindent(Array<Cursor> &cursors, const int y) {
+  action_begin(cursors);
 
   const char tab_char = tab_type ? ' ' : '\t';
   const int tab_size = tab_type ? tab_type : 1;
@@ -3606,50 +3652,50 @@ void Buffer::autoindent(const int y) {
     diff = -current_indent*tab_size;
 
   if (diff < 0)
-    remove_range({0, y}, {-diff, y});
+    remove_range(cursors, {0, y}, {-diff, y});
   if (diff > 0)
     for (int i = 0; i < diff; ++i)
-      insert(Pos{0, y}, Utf8char::create(tab_char));
+      insert(cursors, Pos{0, y}, Utf8char::create(tab_char));
 
-  action_end();
+  action_end(cursors);
 }
 
-int Buffer::isempty() {
+int BufferData::isempty() {
   return lines.size == 1 && lines[0].length == 0;
 }
 
-void Buffer::push_line(Slice s) {
-  action_begin();
+void BufferData::push_line(Array<Cursor> &cursors, Slice s) {
+  action_begin(cursors);
 
   if (lines.size > 1 || lines[0].length > 0)
-    insert({lines[lines.size-1].length, lines.size-1}, Utf8char::create('\n'));
-  insert({0, lines.size-1}, s);
+    insert(cursors, {lines[lines.size-1].length, lines.size-1}, Utf8char::create('\n'));
+  insert(cursors, {0, lines.size-1}, s);
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert(Utf8char ch, int cursor_idx) {
-  action_begin();
+void BufferData::insert(Array<Cursor> &cursors, Utf8char ch, int cursor_idx) {
+  action_begin(cursors);
 
   // TODO: @utf8
   char c = ch.ansi();
-  insert(Slice{&c, 1}, cursor_idx);
+  insert(cursors, Slice{&c, 1}, cursor_idx);
 
   if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
-    autoindent(cursors[cursor_idx].y);
+    autoindent(cursors, cursors[cursor_idx].y);
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert(Slice s, int cursor_idx) {
-  insert(cursors[cursor_idx].pos, s, cursor_idx);
+void BufferData::insert(Array<Cursor> &cursors, Slice s, int cursor_idx) {
+  insert(cursors, cursors[cursor_idx].pos, s, cursor_idx);
 }
 
-void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
+void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_idx) {
   if (!s.length)
     return;
 
-  action_begin();
+  action_begin(cursors);
   G.flags.cursor_dirty = true;
 
   int num_lines = 0;
@@ -3667,7 +3713,7 @@ void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
   else
     b = {a.x + s.length, a.y};
 
-  // if (this == G.editing_pane->buffer)
+  // if (this == G.editing_pane->buffer.data)
     // printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   if (!undo_disabled)
@@ -3718,75 +3764,75 @@ void Buffer::insert(const Pos a, Slice s, int cursor_idx) {
     }
   }
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert(Slice s) {
-  action_begin();
+void BufferData::insert(Array<Cursor> &cursors, Slice s) {
+  action_begin(cursors);
 
   for (int i = 0; i < cursors.size; ++i)
-    insert(cursors[i].pos, s);
+    insert(cursors, cursors[i].pos, s);
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert(Pos pos, Utf8char ch) {
-  action_begin();
+void BufferData::insert(Array<Cursor> &cursors, Pos pos, Utf8char ch) {
+  action_begin(cursors);
 
   // TODO: @utf8
   char c = ch.ansi();
-  insert(pos, Slice{&c, 1});
+  insert(cursors, pos, Slice{&c, 1});
 
   if (ch == '}' || ch == ')' || ch == ']' || ch == '>')
-    autoindent(pos.y);
+    autoindent(cursors, pos.y);
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert(Utf8char ch) {
-  action_begin();
+void BufferData::insert(Array<Cursor> &cursors, Utf8char ch) {
+  action_begin(cursors);
 
   for (int i = 0; i < cursors.size; ++i)
-    insert(cursors[i].pos, ch);
+    insert(cursors, cursors[i].pos, ch);
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert_tab() {
-  action_begin();
+void BufferData::insert_tab(Array<Cursor> &cursors) {
+  action_begin(cursors);
 
   if (tab_type == 0)
-    insert(Utf8char::create('\t'));
+    insert(cursors, Utf8char::create('\t'));
   else
     for (int i = 0; i < tab_type; ++i)
-      insert(Utf8char::create(' '));
+      insert(cursors, Utf8char::create(' '));
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert_newline() {
-  action_begin();
+void BufferData::insert_newline(Array<Cursor> &cursors) {
+  action_begin(cursors);
 
   for (int i = 0; i < cursors.size; ++i) {
-    remove_trailing_whitespace(i);
-    insert(cursors[i].pos, Utf8char::create('\n'));
+    remove_trailing_whitespace(cursors, i);
+    insert(cursors, cursors[i].pos, Utf8char::create('\n'));
   }
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::insert_newline_below() {
-  action_begin();
+void BufferData::insert_newline_below(Array<Cursor> &cursors) {
+  action_begin(cursors);
 
   for (Cursor &c : cursors) {
     c.x = lines[c.y].length;
-    insert(c.pos, Utf8char::create('\n'));
+    insert(cursors, c.pos, Utf8char::create('\n'));
   }
 
-  action_end();
+  action_end(cursors);
 }
 
-void Buffer::guess_tab_type() {
+void BufferData::guess_tab_type() {
   int i;
   /* try to figure out tab type */
   /* TODO: use tokens here instead, so we skip comments */
@@ -3844,18 +3890,18 @@ void Buffer::guess_tab_type() {
     tab_type = G.default_tab_type;
 }
 
-void Buffer::goto_endline(int marker_idx) {
+void BufferView::goto_endline(int marker_idx) {
   Pos pos = cursors[marker_idx].pos;
-  move_to_x(marker_idx, lines[pos.y].length);
+  move_to_x(marker_idx, data->lines[pos.y].length);
   cursors[marker_idx].ghost_x = GHOST_EOL;
 }
 
-void Buffer::goto_endline() {
+void BufferView::goto_endline() {
   for (int i = 0; i < cursors.size; ++i)
     goto_endline(i);
 }
 
-int Buffer::begin_of_line(int y) {
+int BufferData::begin_of_line(int y) {
   int x;
 
   x = 0;
@@ -3864,15 +3910,15 @@ int Buffer::begin_of_line(int y) {
   return x;
 }
 
-void Buffer::goto_beginline() {
+void BufferView::goto_beginline() {
   for (int i = 0; i < cursors.size; ++i) {
-    int x = begin_of_line(cursors[i].y);
+    int x = data->begin_of_line(cursors[i].y);
     move_to_x(i, x);
     cursors[i].ghost_x = GHOST_BOL;
   }
 }
 
-void Buffer::empty() {
+void BufferData::empty(Array<Cursor> &cursors) {
   if (cursors.size == 1 && lines.size == 1 && lines[0].length == 0)
     return;
 
@@ -3881,22 +3927,23 @@ void Buffer::empty() {
   if (!cursors.size)
     cursors += {};
 
-  action_begin();
+  action_begin(cursors);
 
-  collapse_cursors();
+  cursors.size = 1;
+
   if (lines.size == 0)
     lines += {};
   while (lines.size > 1)
-    delete_line(0);
+    delete_line(cursors, 0);
   if (lines[0].length > 0)
-    remove_range({0, 0}, {lines[0].length, 0});
+    remove_range(cursors, {0, 0}, {lines[0].length, 0});
 
   cursors[0] = {};
 
-  action_end();
+  action_end(cursors);
 }
 
-int Buffer::advance(int *x, int *y) const {
+int BufferData::advance(int *x, int *y) const {
   if (*x < lines[*y].length)
     *x = lines[*y].next(*x);
   else {
@@ -3911,20 +3958,20 @@ int Buffer::advance(int *x, int *y) const {
   return 0;
 }
 
-int Buffer::advance(Pos &p) const {
+int BufferData::advance(Pos &p) const {
   return advance(&p.x, &p.y);
 }
 
-int Buffer::advance(int marker_idx) {
+int BufferView::advance(int marker_idx) {
   Pos &pos = cursors[marker_idx].pos;
-  int err = advance(&pos.x, &pos.y);
+  int err = data->advance(&pos.x, &pos.y);
   if (err)
     return err;
-  cursors[marker_idx].ghost_x = lines[pos.y].visual_offset(pos.x, G.tab_width);
+  cursors[marker_idx].ghost_x = data->lines[pos.y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
-int Buffer::advance_r(Pos &p) const {
+int BufferData::advance_r(Pos &p) const {
   if (p.x > 0)
     p.x = lines[p.y].prev(p.x);
   else {
@@ -3939,51 +3986,46 @@ int Buffer::advance_r(Pos &p) const {
   return 0;
 }
 
-int Buffer::advance() {
+int BufferView::advance() {
   int r = 1;
   for (int i = 0; i < cursors.size; ++i)
     r &= advance(i);
   return r;
 }
 
-int Buffer::advance_r() {
+int BufferView::advance_r() {
   int r = 1;
   for (int i = 0; i < cursors.size; ++i)
     r &= advance_r(i);
   return r;
 }
 
-int Buffer::advance_r(int marker_idx) {
+int BufferView::advance_r(int marker_idx) {
   Pos &pos = cursors[marker_idx].pos;
-  int err = advance_r(pos);
+  int err = data->advance_r(pos);
   if (err)
     return err;
-  cursors[marker_idx].ghost_x = lines[cursors[marker_idx].y].visual_offset(pos.x, G.tab_width);
+  cursors[marker_idx].ghost_x = data->lines[cursors[marker_idx].y].visual_offset(pos.x, G.tab_width);
   return 0;
 }
 
 // TODO, FIXME: properly implement
-Utf8char Buffer::getchar(int x, int y) {
+Utf8char BufferData::getchar(int x, int y) {
   return Utf8char::create(x >= lines[y].length ? '\n' : lines[y][x]);
 }
 
-Utf8char Buffer::getchar(Pos p) {
+Utf8char BufferData::getchar(Pos p) {
   return getchar(p.x, p.y);
 }
 
-Utf8char Buffer::getchar(int marker_idx) {
-  Pos pos = cursors[marker_idx].pos;
-  return Utf8char::create(pos.x >= lines[pos.y].length ? '\n' : lines[pos.y][pos.x]);
-}
-
-TokenInfo* Buffer::token_find(Pos p) {
+TokenInfo* BufferData::token_find(Pos p) {
   for (int i = 1; i < tokens.size; ++i)
     if (tokens[i-1].a <= p && p < tokens[i].a)
       return &tokens[i-1];
   return tokens.end();
 }
 
-TokenResult Buffer::token_read(Pos *p, int y_end) {
+TokenResult BufferData::token_read(Pos *p, int y_end) {
   TokenResult result = {};
   int x,y;
   x = p->x, y = p->y;
@@ -4248,7 +4290,17 @@ void Canvas::fill_background(Rect r, Color c) {
     r.h = this->h - r.y;
   r.w = at_most(r.w, this->w - r.x);
   r.h = at_most(r.h, this->h - r.y);
-  if (r.w < 0 || r.h < 0)
+  if (r.x < 0) {
+    r.w += r.x;
+    r.x = 0;
+  }
+
+  if (r.y < 0) {
+    r.h += r.y;
+    r.y = 0;
+  }
+
+  if (r.w < 0 || r.h < 0 || r.x > this->w || r.y > this->h)
     return;
 
   for (int y = r.y; y < r.y+r.h; ++y)
@@ -4378,7 +4430,7 @@ void Canvas::render(Pos pos) {
 }
 
 void Pane::render_as_dropdown() {
-  Buffer &b = *buffer;
+  BufferView &b = buffer;
 
   Canvas canvas;
   int y_max = this->numchars_y();
@@ -4390,8 +4442,8 @@ void Pane::render_as_dropdown() {
   canvas.margin = this->margin;
 
   // draw each line 
-  for (int y = 0; y < at_most(b.lines.size, y_max); ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[y].slice);
+  for (int y = 0; y < at_most(b.data->lines.size, y_max); ++y)
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.data->lines[y].slice);
 
   // highlight the line you're on
   if (active_highlight_background_color) {
@@ -4408,14 +4460,14 @@ void Pane::render_as_dropdown() {
 
 void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
   canvas.offset = {x0, y0};
-  #define render_highlight(prev, next, color) canvas.fill_textcolor({b.to_visual_pos(prev), b.to_visual_pos(next)}, Rect{0, 0, -1, -1}, color);
+  #define render_highlight(prev, next, color) canvas.fill_textcolor({b.data->to_visual_pos(prev), b.data->to_visual_pos(next)}, Rect{0, 0, -1, -1}, color);
 
-  Buffer &b = *this->buffer;
+  BufferView &b = this->buffer;
   // syntax @highlighting
   Pos pos = {0, y0};
   for (;;) {
     Pos prev,next;
-    auto t = b.token_read(&pos, y1);
+    auto t = b.data->token_read(&pos, y1);
     prev = t.a;
     next = t.b;
 
@@ -4428,7 +4480,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         break;
 
       case TOKEN_BLOCK_COMMENT_BEGIN:
-        next = {b.lines[y1-1].length, y1-1};
+        next = {b.data->lines[y1-1].length, y1-1};
         render_highlight(prev, next, G.comment_color);
         break;
 
@@ -4459,7 +4511,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
 
       case TOKEN_IDENTIFIER: {
         // check for keywords
-        Slice identifier = b[prev.y](prev.x, next.x+1);
+        Slice identifier = b.data->slice(prev, next.x+1 - prev.x);
         KeywordType kwtype = KEYWORD_NONE;
         for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
           if (identifier == keywords[i].name) {
@@ -4473,7 +4525,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         // we assume "<identifier> [<identifier><operators>]* <identifier>(" is a function declaration
         // TODO: @utf8
         Pos p = pos;
-        t = b.token_read(&p, y1);
+        t = b.data->token_read(&p, y1);
         if (t.tok == TOKEN_IDENTIFIER && (
             identifier == "struct" ||
             identifier == "enum" ||
@@ -4484,19 +4536,19 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         if (kwtype != KEYWORD_TYPE)
           break;
         while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
-          t = b.token_read(&p, y1);
+          t = b.data->token_read(&p, y1);
         if (t.tok != TOKEN_IDENTIFIER)
           break;
         Pos fun_start = t.a;
         Pos fun_end = t.b;
-        t = b.token_read(&p, y1);
+        t = b.data->token_read(&p, y1);
 
         if (t.tok == TOKEN_OPERATOR && t.operator_str == "::") {
-          t = b.token_read(&p, y1);
+          t = b.data->token_read(&p, y1);
           if (t.tok != TOKEN_IDENTIFIER)
             break;
           fun_end = t.b;
-          t = b.token_read(&p, y1);
+          t = b.data->token_read(&p, y1);
         }
 
         if (t.tok == '(')
@@ -4549,7 +4601,7 @@ void Pane::clear_suggestions() {
 }
 
 void Pane::render_single_line() {
-  Buffer &b = *buffer;
+  BufferView &b = buffer;
   // TODO: scrolling in x
   Pos buf_offset = {menu.prefix.length+2, 0};
 
@@ -4564,7 +4616,7 @@ void Pane::render_single_line() {
   canvas.render_strf({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, "{}: ", &menu.prefix);
 
   // draw buffer
-  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.lines[0].slice);
+  canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.data->lines[0].slice);
 
   // draw marker
   if (G.selected_pane == this)
@@ -4616,10 +4668,10 @@ void Pane::render_menu() {
 }
 
 void Pane::render_edit() {
-  Buffer &b = *buffer;
+  BufferView &b = buffer;
   // calc bounds 
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
-  int buf_y1 = at_most(buf_offset.y + this->numchars_y(), b.lines.size);
+  int buf_y1 = at_most(buf_offset.y + this->numchars_y(), b.data->lines.size);
 
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
@@ -4628,7 +4680,7 @@ void Pane::render_edit() {
     gutter.init(_gutter_width, this->numchars_y());
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
-      if (line < b.lines.size)
+      if (line < b.data->lines.size)
         gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
       else
         gutter.render_str({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, Slice::create(" ~"));
@@ -4644,7 +4696,7 @@ void Pane::render_edit() {
 
   // draw each line 
   for (int y = 0, buf_y = buf_offset.y; buf_y < buf_y1; ++buf_y, ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.lines[buf_y].slice);
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.data->lines[buf_y].slice);
 
   this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
 
@@ -4655,19 +4707,19 @@ void Pane::render_edit() {
       canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *highlight_background_color);
 
   // highlight visual start
-  if (G.visual_start.buffer == buffer && G.visual_entire_line)
+  if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
     for (Pos pos : G.visual_start.cursors)
       canvas.fill_background({0, buf2char(pos).y, {-1, 1}}, *this->inactive_highlight_background_color);
 
   // if there is a search term, highlight that as well
   if (G.search_term.length > 0) {
     Pos pos = {0, buf_offset.y};
-    while (b.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
+    while (b.data->find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
       canvas.fill_background({buf2char(pos), G.search_term.length, 1}, G.search_term_background_color.color);
   }
 
   // draw visual start marker
-  if (G.visual_start.buffer == buffer)
+  if (G.visual_start.buffer == buffer.data)
     for (Pos pos : G.visual_start.cursors)
       canvas.fill_background({buf2char(pos), {1, 1}}, G.default_marker_background_color.color);
 
@@ -4690,7 +4742,7 @@ void Pane::render_edit() {
 }
 
 Pos Pane::buf2pixel(Pos p) const {
-  p = buffer->to_visual_pos(p);
+  p = buffer.data->to_visual_pos(p);
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
   p = char2pixel(p) + this->bounds.p;
@@ -4699,19 +4751,19 @@ Pos Pane::buf2pixel(Pos p) const {
 }
 
 Pos Pane::buf2char(Pos p) const {
-  p = buffer->to_visual_pos(p);
+  p = buffer.data->to_visual_pos(p);
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
   return p;
 }
 
 int Pane::calc_top_visible_row() const {
-  return at_least(0, this->buffer->cursors[0].y - this->numchars_y()/2);
+  return at_least(0, this->buffer.cursors[0].y - this->numchars_y()/2);
 }
 
 int Pane::calc_left_visible_column() const {
-  int x = this->buffer->cursors[0].x;
-  x = this->buffer->lines[this->buffer->cursors[0].y].visual_offset(x, G.tab_width);
+  int x = this->buffer.cursors[0].x;
+  x = this->buffer.data->lines[this->buffer.cursors[0].y].visual_offset(x, G.tab_width);
   x -= this->numchars_x()*6/7;
   return at_least(x, 0);
 }
@@ -4910,6 +4962,9 @@ int main(int, const char *[])
     SDL_GL_SwapWindow(G.window);
 
     G.flags.cursor_dirty = false;
+
+    if (G.mode != MODE_INSERT)
+      assert(G.editing_pane->buffer.data->_action_group_depth == 0);
   }
 }
 
