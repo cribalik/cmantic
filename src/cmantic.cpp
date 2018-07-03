@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * 'w' should only jump whitespace
+ * Add description and better spacing to menus
  * recursive panes
  * Jumplist
  * Build system
@@ -1991,7 +1993,7 @@ static void state_init() {
   // initialize graphics library
   if (graphics_init(&G.window))
     exit(1);
-  G.font_height = 14;
+  G.font_height = 16;
   if (graphics_text_init(G.ttf_file.string.chars, G.font_height))
     exit(1);
   if (graphics_quad_init())
