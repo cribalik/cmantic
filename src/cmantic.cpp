@@ -1,12 +1,10 @@
 /*
  * TODO:
- * Better way to have multi-key commands, without having a different mode for each key
  * Build system
  * parse BOM
  * Jumplist
  * Make syntax highlighter use pretokenized list
  * Pane stack
- * Visual mode
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
@@ -243,6 +241,8 @@ struct Pos {
   }
 };
 
+void util_free(Pos) {}
+
 struct Range {
   Pos a;
   Pos b;
@@ -393,7 +393,6 @@ struct Buffer {
   Array<Cursor> cursors;
   Array<StringBuffer> lines;
   int tab_type; /* 0 for tabs, 1+ for spaces */
-  Array<Cursor> visual_start; // starting position of visual mode
 
   // raw_mode is used when inserting text that is not coming from the keyboard, for example when pasting text or doing undo/redo
   // It disables autoindenting and other automatic formatting stuff
@@ -403,7 +402,6 @@ struct Buffer {
   Array<TokenInfo> tokens;
   Array<Range> declarations;
   Array<String> identifiers;
-
 
   // methods
   Range* getdeclaration(Slice s);
@@ -714,6 +712,13 @@ struct Buffer {
   static bool from_file(Slice filename, Buffer *b);
 };
 
+void util_free(Buffer &b);
+void util_free(Buffer *b) {
+  util_free(*b);
+  delete b;
+}
+
+
 static void util_free(UndoAction &a) {
   switch (a.type) {
     case ACTIONTYPE_INSERT:
@@ -732,19 +737,6 @@ static void util_free(UndoAction &a) {
     case ACTIONTYPE_GROUP_END:
       break;
   }
-}
-
-void util_free(Buffer &b) {
-  util_free(b.lines);
-  util_free(b.filename);
-  util_free(b.tokens);
-  util_free(b.identifiers);
-  util_free(b.cursors);
-  util_free(b._undo_actions);
-}
-
-void util_free(Buffer *b) {
-  util_free(*b);
 }
 
 UndoAction UndoAction::delete_range(Range r, String s, int cursor_idx) {
@@ -896,7 +888,6 @@ struct Pane {
 };
 
 void util_free(Pane&) {
-
 }
 
 void util_free(Pane *&p) {
@@ -946,6 +937,16 @@ struct FileNode {
   Array<FileNode> children;
 };
 
+struct Location {
+  Buffer *buffer;
+  Array<Pos> cursors;
+};
+
+void util_free(Location &l) {
+  util_free(l.cursors);
+  l.buffer = 0;
+}
+
 struct State {
   /* @renderer rendering state */
   SDL_Window *window;
@@ -956,7 +957,6 @@ struct State {
   StringBuffer tmp_render_buffer;
   int win_height, win_width;
   Path ttf_file;
-
 
   /* settings */
   Color default_background_color;
@@ -1014,6 +1014,11 @@ struct State {
 
   /* file tree state */
   Array<Path> files;
+
+  
+  /* visual mode state */
+  Location visual_start; // starting position of visual mode
+  bool visual_entire_line;
 
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
@@ -1548,6 +1553,30 @@ static void menu_option_reload() {
     status_message_set("Failed to reload {}", &G.editing_pane->buffer->filename.slice);
 }
 
+static void menu_option_close() {
+  Buffer *b = G.editing_pane->buffer;
+  if (b == &G.null_buffer)
+    return;
+
+  status_message_set("Closed {}", &b->filename.slice);
+  // remove from buffer list
+  for (int i = 0; i < G.buffers.size; ++i) {
+    if (G.buffers[i] == b) {
+      util_free(G.buffers[i]);
+      G.buffers[i] = G.buffers[--G.buffers.size];
+      break;
+    }
+  }
+  puts("a");
+}
+
+static void menu_option_closeall() {
+  status_message_set("Closed all buffers");
+  for (Buffer *b : G.buffers)
+    util_free(b);
+  G.buffers.size = 0;
+}
+
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   {
     Slice::create("quit"),
@@ -1578,6 +1607,16 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("reload"),
     Slice::create("Reload current buffer"),
     menu_option_reload
+  },
+  {
+    Slice::create("close"),
+    Slice::create("Close current buffer"),
+    menu_option_close
+  },
+  {
+    Slice::create("closeall"),
+    Slice::create("Close all open buffers"),
+    menu_option_closeall
   },
 };
 
@@ -2268,6 +2307,43 @@ static void handle_menu_insert(int key) {
   }
 }
 
+static void range_to_clipboard(Buffer &buffer, View<Pos> from, View<Pos> to) {
+  if (from.size != to.size)
+    return;
+
+  StringBuffer sb = {};
+  for (int i = 0; i < from.size; ++i) {
+    Pos a = from[i];
+    Pos b = to[i];
+    if (b < a)
+      swap(a,b);
+
+    StringBuffer s = buffer.range_to_string({a,b});
+    sb += s;
+    if (i < to.size-1)
+      sb += '\n';
+    util_free(s);
+  }
+  SDL_SetClipboardText(sb.chars);
+  util_free(sb);
+}
+
+static void move_cursor_due_to_remove(Pos a, Pos b, Pos *pos) {
+  if (b <= a)
+    return;
+  // All cursors that are inside range should be moved to beginning of range
+  if (a <= *pos && *pos <= b)
+    *pos = a;
+  // If lines were deleted, all cursors below b.y should move up
+  else if (b.y > a.y && pos->y > b.y)
+    pos->y -= b.y-a.y;
+  // All cursors that are on the same row as b, but after b should be merged onto line a
+  else if (pos->y == b.y && pos->x >= b.x-1) {
+    pos->y = a.y;
+    pos->x = a.x + pos->x - b.x;
+  }
+}
+
 static void handle_input(Key key) { 
   Buffer &buffer = *G.editing_pane->buffer;
 
@@ -2500,31 +2576,25 @@ static void handle_input(Key key) {
   case MODE_YANK: {
     // TODO: is it more performant to check if it is a movement command first?
     buffer.action_begin();
+
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
-    if (movement_default(*G.editing_pane, key)) {
-      if (cursors.size == buffer.cursors.size) {
-        StringBuffer sb = {};
-        for (int i = 0; i < cursors.size; ++i) {
-          Pos a = cursors[i].pos;
-          Pos b = buffer.cursors[i].pos;
-          if (b < a)
-            swap(a,b);
+    if (!movement_default(*G.editing_pane, key))
+      goto yank_done;
+    if (cursors.size != buffer.cursors.size)
+      goto yank_done;
 
-          if (key == '{' || key == '}')
-            buffer.advance(b);
-          StringBuffer s = buffer.range_to_string({a,b});
-          sb += s;
-          if (i < cursors.size-1)
-            sb += '\n';
-          util_free(s);
+    // some movements we want to include the end position
+    if (key == '{' || key == '}')
+      for (Cursor &c : cursors)
+        buffer.advance(c.pos);
 
-          buffer.cursors[i].pos = a;
-        }
-        SDL_SetClipboardText(sb.chars);
-        util_free(sb);
-      }
-    }
+    range_to_clipboard(buffer, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
 
+    // go back to where we started
+    for (int i = 0; i < cursors.size; ++i)
+      buffer.cursors[i].pos = cursors[i].pos;
+
+    yank_done:;
     buffer.action_end();
     util_free(cursors);
     mode_normal(true);
@@ -2612,6 +2682,7 @@ static void handle_input(Key key) {
 
     case KEY_ESCAPE:
       buffer.collapse_cursors();
+      util_free(G.visual_start.cursors);
       break;
 
     case CONTROL('g'):
@@ -2763,6 +2834,37 @@ static void handle_input(Key key) {
       break;
 
     case 'y':
+      // visual yank?
+      if (G.editing_pane->buffer == G.visual_start.buffer) {
+        Buffer &b = *G.editing_pane->buffer;
+        Array<Pos> destination;
+        if (b.cursors.size != G.visual_start.cursors.size) {
+          util_free(G.visual_start);
+          goto yank;
+        }
+
+        b.action_begin();
+
+        destination = {};
+        for (Cursor c : b.cursors)
+          destination += c.pos;
+
+        if (G.visual_entire_line) {
+          for (Pos &p : G.visual_start.cursors)
+            p.x = 0;
+          for (Pos &p : destination)
+            p.x = 0,
+            ++p.y;
+        }
+
+        range_to_clipboard(b, view(G.visual_start.cursors), view(destination));
+        util_free(destination);
+        util_free(G.visual_start);
+        b.action_end();
+        break;
+      }
+
+      yank:
       mode_yank();
       break;
 
@@ -2782,17 +2884,57 @@ static void handle_input(Key key) {
       mode_menu();
       break;
 
+    #if 1
     case 'v':
-      G.editing_pane->buffer->visual_start = G.editing_pane->buffer->cursors.copy_shallow();
+      G.visual_entire_line = false;
+      util_free(G.visual_start.cursors);
+      for (Cursor c : G.editing_pane->buffer->cursors)
+        G.visual_start.cursors += c.pos;
+      G.visual_start.buffer = G.editing_pane->buffer;
       break;
+    #endif
 
     case 'd':
+      // visual delete?
+      if (G.editing_pane->buffer == G.visual_start.buffer) {
+        Buffer &b = *G.editing_pane->buffer;
+
+        if (b.cursors.size != G.visual_start.cursors.size) {
+          util_free(G.visual_start);
+          goto del;
+        }
+
+        b.action_begin();
+
+        for (int i = 0; i < G.visual_start.cursors.size; ++i) {
+          Pos pa = G.visual_start.cursors[i];
+          Pos pb = b.cursors[i].pos;
+          if (G.visual_entire_line) {
+            pa.x = 0;
+            pb.x = 0;
+            ++pb.y;
+          }
+          b.remove_range(pa, pb, i);
+          for (Pos &p : G.visual_start.cursors)
+            move_cursor_due_to_remove(pa, pb, &p);
+        }
+
+        util_free(G.visual_start);
+
+        b.action_end();
+        break;
+      }
+
+      del:
       mode_delete();
       break;
 
     case 'V':
-      util_free(G.editing_pane->buffer->visual_start);
-      G.editing_pane->buffer->visual_start = G.editing_pane->buffer->cursors.copy_shallow();
+      G.visual_entire_line = true;
+      util_free(G.visual_start);
+      for (Cursor c : G.editing_pane->buffer->cursors)
+        G.visual_start.cursors += c.pos;
+      G.visual_start.buffer = G.editing_pane->buffer;
       break;
 
     case 'J':
@@ -2944,6 +3086,23 @@ void Buffer::move_x(int dx) {
 void Buffer::move_y(int dy) {
   for (int i = 0; i < cursors.size; ++i)
     move_y(i, dy);
+}
+
+void util_free(Buffer &b) {
+  util_free(b.lines);
+  util_free(b.filename);
+  util_free(b.tokens);
+  util_free(b.identifiers);
+  util_free(b.cursors);
+  util_free(b._undo_actions);
+
+  // reset any panes that are using this buffer
+  for (int i = 0; i < G.editing_panes.size; ++i) {
+    if (G.editing_panes[i]->buffer == &b) {
+      util_free(*G.editing_panes[i]);
+      Pane::init_edit(*G.editing_panes[i], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+    }
+  }
 }
 
 bool Buffer::reload(Buffer *b) {
@@ -3274,7 +3433,6 @@ void Buffer::delete_line() {
   action_end();
 }
 
-// returns the string of what was removed
 void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
   if (b <= a)
     return;
@@ -3288,20 +3446,8 @@ void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
   }
 
   for (Cursor &c : cursors) {
-    // All cursors that are inside range should be moved to beginning of range
-    if (a <= c.pos && c.pos <= b) {
-      c.pos = a;
-      c.ghost_x = c.x;
-    }
-    // If lines were deleted, all cursors below b.y should move up
-    else if (b.y > a.y && c.y > b.y)
-      c.y -= b.y-a.y;
-    // All cursors that are on the same row as b, but after b should be merged onto line a
-    else if (c.y == b.y && c.x >= b.x-1) {
-      c.y = a.y;
-      c.x = a.x + c.x - b.x;
-      c.ghost_x = c.x;
-    }
+    move_cursor_due_to_remove(a, b, &c.pos);
+    c.ghost_x = c.x;
   }
 
   if (a.y == b.y)
@@ -3314,10 +3460,6 @@ void Buffer::remove_range(Pos a, Pos b, int cursor_idx) {
     // delete lines a+1 to and including b
     lines.remove_slown(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
-  // not sure if this is really needed..
-  for (Cursor &c : cursors)
-	  if (c.y >= lines.size)
-		  c.y = lines.size - 1;
 
   action_end();
 }
@@ -4512,6 +4654,11 @@ void Pane::render_edit() {
     for (int i = 0; i < b.cursors.size; ++i)
       canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *highlight_background_color);
 
+  // highlight visual start
+  if (G.visual_start.buffer == buffer && G.visual_entire_line)
+    for (Pos pos : G.visual_start.cursors)
+      canvas.fill_background({0, buf2char(pos).y, {-1, 1}}, *this->inactive_highlight_background_color);
+
   // if there is a search term, highlight that as well
   if (G.search_term.length > 0) {
     Pos pos = {0, buf_offset.y};
@@ -4519,14 +4666,18 @@ void Pane::render_edit() {
       canvas.fill_background({buf2char(pos), G.search_term.length, 1}, G.search_term_background_color.color);
   }
 
+  // draw visual start marker
+  if (G.visual_start.buffer == buffer)
+    for (Pos pos : G.visual_start.cursors)
+      canvas.fill_background({buf2char(pos), {1, 1}}, G.default_marker_background_color.color);
+
   // draw marker
-  for (int i = 0; i < b.cursors.size; ++i) {
-    Pos pos = b.cursors[i].pos;
+  for (Cursor c : b.cursors) {
     if (G.selected_pane == this)
       // canvas.fill_background({buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
-      canvas.fill_background({buf2char(pos), {1, 1}}, G.default_marker_background_color.color);
+      canvas.fill_background({buf2char(c.pos), {1, 1}}, G.default_marker_background_color.color);
     else if (G.bottom_pane != this)
-      canvas.fill_background({buf2char(pos), {1, 1}}, G.marker_inactive_color);
+      canvas.fill_background({buf2char(c.pos), {1, 1}}, G.marker_inactive_color);
   }
 
   canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
