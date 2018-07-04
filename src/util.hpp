@@ -922,9 +922,13 @@ union StringBuffer {
     int neg = i < 0;
     *b-- = 0;
     if (neg) i *= -1;
-    while (i) {
-    *b-- = '0' + i%10;
-    i /= 10;
+    if (i == 0)
+      *b-- = '0';
+    else {
+      while (i) {
+        *b-- = '0' + i%10;
+        i /= 10;
+      }
     }
     if (neg) *b-- = '-';
     append(b+1, buf+31-(b+1));

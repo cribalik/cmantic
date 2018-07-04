@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * project-wide grep
  * 'w' should only jump whitespace
  * Add description and better spacing to menus
  * recursive panes
@@ -253,6 +254,14 @@ struct Range {
   Pos b;
 };
 
+void swap_range(Pos &a, Pos &b) {
+  Pos tmp = a;
+  a = b;
+  b = tmp;
+  ++a.x;
+  ++b.x;
+}
+
 struct TokenInfo {
   Token token;
   union {
@@ -492,10 +501,7 @@ struct BufferData {
 };
 
 void util_free(BufferData &b);
-void util_free(BufferData *b) {
-  util_free(*b);
-  delete b;
-}
+void util_free(BufferData *b);
 
 static void util_free(UndoAction &a) {
   switch (a.type) {
@@ -701,7 +707,7 @@ struct Pane {
   void render_menu();
   void render_single_line();
   void render_menu_popup();
-  void render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1);
+  void render_syntax_highlight(Canvas &canvas, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
 
@@ -954,7 +960,7 @@ static const Color COLOR_BLUEGREY = {84, 110, 122, 255};
 static const Color COLOR_GREY = {51, 51, 51, 255};
 static const Color COLOR_LIGHT_GREY = {76, 76, 76, 255};
 static const Color COLOR_BLACK = {25, 25, 25, 255};
-static const Color COLOR_WHITE = {230, 230, 230, 255};
+static const Color COLOR_WHITE = {240, 240, 240, 255};
 static const Color COLOR_BLUE = {79,195,247, 255};
 static const Color COLOR_DARK_BLUE = {124, 173, 213, 255};
 
@@ -1059,6 +1065,10 @@ static Keyword keywords[] = {
   {"private", KEYWORD_SPECIFIER},
   {"in", KEYWORD_SPECIFIER},
   {"delegate", KEYWORD_SPECIFIER},
+  {"protected", KEYWORD_SPECIFIER},
+  {"override", KEYWORD_SPECIFIER},
+  {"virtual", KEYWORD_SPECIFIER},
+  {"abstract", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -1401,10 +1411,19 @@ static void menu_option_chdir() {
 }
 
 static void menu_option_reload() {
+  if (G.editing_pane->buffer.data == &G.null_buffer)
+    return;
+
   if (BufferData::reload(G.editing_pane->buffer.data))
     status_message_set("Reloaded {}", &G.editing_pane->buffer.data->filename.slice);
   else
     status_message_set("Failed to reload {}", &G.editing_pane->buffer.data->filename.slice);
+}
+
+static void menu_option_reloadall() {
+  for (BufferData *b : G.buffers)
+    BufferData::reload(b);
+  status_message_set("Reloaded %i files", G.buffers.size);
 }
 
 static void menu_option_close() {
@@ -1461,6 +1480,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("reload"),
     Slice::create("Reload current buffer"),
     menu_option_reload
+  },
+  {
+    Slice::create("reloadall"),
+    Slice::create("Reload all buffers"),
+    menu_option_reloadall
   },
   {
     Slice::create("close"),
@@ -1827,6 +1851,52 @@ static void insert_default(Pane &p, Key key) {
   }
 }
 
+static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace) {
+  for (int i = 0; i < buffer.cursors.size; ++i) {
+    Pos p = buffer.cursors[i].pos;
+    int depth = 0;
+    TokenInfo *t = buffer.data->token_find(p);
+    if (t && t->token == leftbrace)
+      --t;
+    for (; t >= buffer.data->tokens.begin(); --t) {
+      if (t->token == rightbrace)
+        ++depth;
+      if (t->token == leftbrace) {
+        --depth;
+        if (depth <= 0) {
+          buffer.move_to(i, t->a);
+          if (depth < 0)
+            buffer.advance(i);
+          break;
+        }
+      }
+    }
+  }
+}
+
+static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbrace) {
+  for (int i = 0; i < buffer.cursors.size; ++i) {
+    Pos p = buffer.cursors[i].pos;
+    int depth = 0;
+    TokenInfo *t = buffer.data->token_find(p);
+    if (t && t->token == rightbrace)
+      ++t;
+    for (; t < buffer.data->tokens.end(); ++t) {
+      if (t->token == leftbrace) 
+        ++depth;
+      if (t->token == rightbrace) {
+        --depth;
+        if (depth <= 0) {
+          buffer.move_to(i, t->a);
+          if (depth < 0)
+            buffer.advance_r(i);
+          break;
+        }
+      }
+    }
+  }
+}
+
 static bool movement_default(BufferView &buffer, int key) {
   switch (key) {
     case 'b': {
@@ -1854,7 +1924,7 @@ static bool movement_default(BufferView &buffer, int key) {
           while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
             if (buffer.advance(i))
               break;
-        while (c = buffer.getchar(i), !is_identifier_head(c))
+        while (c = buffer.getchar(i), !is_identifier_tail(c))
           if (buffer.advance(i))
             break;
       }
@@ -1898,48 +1968,29 @@ static bool movement_default(BufferView &buffer, int key) {
       /*jumplist_push(prev);*/
       break;
 
-    case '{': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        Pos p = buffer.cursors[i].pos;
-        int depth = 0;
-        TokenInfo *t = buffer.data->token_find(p);
-        if (t && t->token == '{')
-          --t;
-        for (; t >= buffer.data->tokens.begin(); --t) {
-          if (t->token == '}')
-            ++depth;
-          if (t->token == '{') {
-            --depth;
-            if (depth <= 0) {
-              buffer.move_to(i, t->a);
-              break;
-            }
-          }
-        }
-      }
-      // buffer.find_and_move_r('{', false);
-      break;}
+    case '{':
+      move_to_left_brace(buffer, '{', '}');
+      break;
 
-    case '}': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        Pos p = buffer.cursors[i].pos;
-        int depth = 0;
-        TokenInfo *t = buffer.data->token_find(p);
-        if (t && t->token == '}')
-          ++t;
-        for (; t < buffer.data->tokens.end(); ++t) {
-          if (t->token == '{') 
-            ++depth;
-          if (t->token == '}') {
-            --depth;
-            if (depth <= 0) {
-              buffer.move_to(i, t->a);
-              break;
-            }
-          }
-        }
-      }
-      break;}
+    case '}':
+      move_to_right_brace(buffer, '{', '}');
+      break;
+
+    case '[':
+      move_to_left_brace(buffer, '[', ']');
+      break;
+
+    case ']':
+      move_to_right_brace(buffer, '[', ']');
+      break;
+
+    case '(':
+      move_to_left_brace(buffer, '(', ')');
+      break;
+
+    case ')':
+      move_to_right_brace(buffer, '(', ')');
+      break;
 
     case '*': {
       TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
@@ -1952,6 +2003,19 @@ static bool movement_default(BufferView &buffer, int key) {
       G.search_term = String::create(buffer.data->getslice(t->r));
       buffer.find_and_move(G.search_term.slice, false);
       break;}
+
+    case '#': {
+      TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
+      if (!t)
+        break;
+      if (t->token != TOKEN_IDENTIFIER)
+        break;
+      G.search_term_background_color.reset();
+      util_free(G.search_term);
+      G.search_term = String::create(buffer.data->getslice(t->r));
+      buffer.find_and_move_r(G.search_term.slice, false);
+      break;}
+
     default:
       return false;
   }
@@ -2173,7 +2237,7 @@ static void range_to_clipboard(BufferData &buffer, View<Pos> from, View<Pos> to)
     Pos a = from[i];
     Pos b = to[i];
     if (b < a)
-      swap(a,b);
+      swap_range(a,b);
 
     StringBuffer s = buffer.range_to_string({a,b});
     sb += s;
@@ -2441,9 +2505,8 @@ static void handle_input(Key key) {
       goto yank_done;
 
     // some movements we want to include the end position
-    if (key == '{' || key == '}')
-      for (Cursor &c : cursors)
-        buffer.data->advance(c.pos);
+    for (Cursor &c : cursors)
+      buffer.data->advance(c.pos);
 
     range_to_clipboard(*buffer.data, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
 
@@ -2468,9 +2531,8 @@ static void handle_input(Key key) {
           Pos a = cursors[i].pos;
           Pos b = buffer.cursors[i].pos;
           if (b < a)
-            swap(a,b);
-          if (key == '{' || key == '}')
-            buffer.data->advance(b);
+            swap_range(a,b);
+          buffer.data->advance(b);
           buffer.remove_range(a, b, i);
         }
       }
@@ -2766,7 +2828,7 @@ static void handle_input(Key key) {
           Pos pa = G.visual_start.cursors[i];
           Pos pb = buffer.cursors[i].pos;
           if (pb < pa)
-            swap(pa, pb);
+            swap_range(pa, pb);
           if (G.visual_entire_line) {
             pa.x = 0;
             pb.x = 0;
@@ -2953,19 +3015,23 @@ void util_free(BufferData &b) {
   util_free(b.identifiers);
   util_free(b.declarations);
   util_free(b._undo_actions);
+}
 
+void util_free(BufferData *b) {
+  util_free(*b);
   // reset any panes that are using this buffer
   for (int i = 0; i < G.editing_panes.size; ++i) {
-    if (G.editing_panes[i]->buffer.data == &b) {
+    if (G.editing_panes[i]->buffer.data == b) {
       util_free(*G.editing_panes[i]);
       Pane::init_edit(*G.editing_panes[i], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
     }
   }
+  delete b;
 }
 
 bool BufferData::reload(BufferData *b) {
   String filename = String::create(b->filename.slice);
-  util_free(b);
+  util_free(*b);
   bool succ = BufferData::from_file(filename.slice, b);
   util_free(filename);
   return succ;
@@ -4326,7 +4392,8 @@ void Canvas::render_str(Pos p, const Color *text_color, const Color *background_
   if (!s.length)
     return;
 
-  p = p + offset;
+  p.x -= offset.x;
+  p.y -= offset.y;
 
   if (xclip1 == -1)
     xclip1 = this->w;
@@ -4472,13 +4539,12 @@ void Pane::render_as_dropdown() {
   render_text();
 }
 
-void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
-  canvas.offset = {x0, y0};
+void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
   #define render_highlight(prev, next, color) canvas.fill_textcolor({b.data->to_visual_pos(prev), b.data->to_visual_pos(next)}, Rect{0, 0, -1, -1}, color);
 
   BufferView &b = this->buffer;
   // syntax @highlighting
-  Pos pos = {0, y0};
+  Pos pos = {0, canvas.offset.y};
   for (;;) {
     Pos prev,next;
     auto t = b.data->token_read(&pos, y1);
@@ -4503,7 +4569,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
         break;
 
       case TOKEN_BLOCK_COMMENT_END:
-        prev = {x0, y0};
+        prev = canvas.offset;
         render_highlight(prev, next, G.comment_color);
         break;
 
@@ -4579,7 +4645,6 @@ void Pane::render_syntax_highlight(Canvas &canvas, int x0, int y0, int y1) {
     if (pos.y > y1)
       break;
   }
-  canvas.offset = {};
 }
 
 void Pane::render() {
@@ -4707,43 +4772,44 @@ void Pane::render_edit() {
   canvas.fill(*this->text_color, *this->background_color);
   canvas.background = *this->background_color;
   canvas.margin = this->margin;
+  canvas.offset = buf_offset;
 
   // draw each line 
-  for (int y = 0, buf_y = buf_offset.y; buf_y < buf_y1; ++buf_y, ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.data->lines[buf_y].slice);
+  for (int y = buf_offset.y; y < buf_y1; ++y)
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.data->lines[y].slice);
 
-  this->render_syntax_highlight(canvas, buf_offset.x, buf_offset.y, buf_y1);
+  this->render_syntax_highlight(canvas, buf_y1);
 
   // highlight the line you're on
   const Color *highlight_background_color = G.editing_pane == this ? this->active_highlight_background_color : this->inactive_highlight_background_color;
   if (highlight_background_color)
-    for (int i = 0; i < b.cursors.size; ++i)
-      canvas.fill_background({0, buf2char(b.cursors[i].pos).y, {-1, 1}}, *highlight_background_color);
+    for (Cursor c : b.cursors)
+      canvas.fill_background({0, c.y, {-1, 1}}, *highlight_background_color);
 
   // highlight visual start
   if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
     for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({0, buf2char(pos).y, {-1, 1}}, *this->inactive_highlight_background_color);
+      canvas.fill_background({0, pos.y, {-1, 1}}, *this->inactive_highlight_background_color);
 
   // if there is a search term, highlight that as well
   if (G.search_term.length > 0) {
     Pos pos = {0, buf_offset.y};
     while (b.data->find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
-      canvas.fill_background({buf2char(pos), G.search_term.length, 1}, G.search_term_background_color.color);
+      canvas.fill_background({pos, G.search_term.length, 1}, G.search_term_background_color.color);
   }
 
   // draw visual start marker
   if (G.visual_start.buffer == buffer.data)
     for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({buf2char(pos), {1, 1}}, G.default_marker_background_color.color);
+      canvas.fill_background({pos, {1, 1}}, G.default_marker_background_color.color);
 
   // draw marker
   for (Cursor c : b.cursors) {
     if (G.selected_pane == this)
       // canvas.fill_background({buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
-      canvas.fill_background({buf2char(c.pos), {1, 1}}, G.default_marker_background_color.color);
+      canvas.fill_background({c.pos, {1, 1}}, G.default_marker_background_color.color);
     else if (G.bottom_pane != this)
-      canvas.fill_background({buf2char(c.pos), {1, 1}}, G.marker_inactive_color);
+      canvas.fill_background({c.pos, {1, 1}}, G.marker_inactive_color);
   }
 
   canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
@@ -4752,7 +4818,8 @@ void Pane::render_edit() {
   render_quads();
   render_text();
 
-  render_dropdown(this);
+  if (G.editing_pane == this)
+    render_dropdown(this);
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -4802,7 +4869,10 @@ int Pane::numchars_y() const {
   return (this->bounds.h - 2*this->margin) / G.line_height + 1;
 }
 
-static Key get_input() {
+static Key get_input(bool *window_active) {
+  if (!*window_active)
+    SDL_WaitEvent(NULL);
+
   for (SDL_Event event; SDL_PollEvent(&event);) {
     Utf8char input = {};
     SpecialKey special_key = KEY_NONE;
@@ -4810,8 +4880,21 @@ static Key get_input() {
 
     switch (event.type) {
     case SDL_WINDOWEVENT:
-      if (event.window.event == SDL_WINDOWEVENT_CLOSE)
-        editor_exit(0);
+      switch (event.window.event) {
+        case SDL_WINDOWEVENT_CLOSE:
+          editor_exit(0);
+          break;
+        case SDL_WINDOWEVENT_FOCUS_GAINED:
+          puts("Focus gained");
+          *window_active = true;
+          break;
+        case SDL_WINDOWEVENT_FOCUS_LOST:
+          puts("Focus lost");
+          *window_active = false;
+          break;
+        default:
+          break;
+      }
       break;
 
     case SDL_KEYDOWN:
@@ -4958,12 +5041,16 @@ int main(int, const char *[])
 
   test();
 
+  bool window_active = true;
   for (;;) {
     static u32 ticks = SDL_GetTicks();
     float dt = (float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f;
     ticks = SDL_GetTicks();
 
-    Key key = get_input();
+    Key key = get_input(&window_active);
+    if (!window_active)
+      continue;
+
     if (key)
       handle_input(key);
     handle_rendering(dt);
