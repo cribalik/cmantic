@@ -255,14 +255,6 @@ struct Range {
   Pos b;
 };
 
-void swap_range(Pos &a, Pos &b) {
-  Pos tmp = a;
-  a = b;
-  b = tmp;
-  ++a.x;
-  ++b.x;
-}
-
 struct TokenInfo {
   Token token;
   union {
@@ -653,6 +645,15 @@ struct BufferView {
     return b;
   }
 };
+
+void swap_range(BufferData &, Pos &a, Pos &b) {
+  Pos tmp = a;
+  a = b;
+  b = tmp;
+  // buffer.advance(a);
+  // buffer.advance(b);
+}
+
 
 static void util_free(BufferView &b) {
   util_free(b.cursors);
@@ -1923,10 +1924,18 @@ static bool movement_default(BufferView &buffer, int key) {
 
     case 'w': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
-        Pos p = buffer.cursors[i].pos;
-        TokenInfo *t = buffer.data->token_find(p);
-        if (t && t < &buffer.data->tokens.last())
-          buffer.move_to(i, t[1].a);
+        if (buffer.advance(i))
+          break;
+        // if in word, keep going to end of word
+        Utf8char c = buffer.getchar(i);
+        if (!c.isspace())
+          while (c = buffer.getchar(i), !c.isspace())
+            if (buffer.advance(i))
+              break;
+        // go to start of next word
+        while (c = buffer.getchar(i), c.isspace())
+          if (buffer.advance(i))
+            break;
       }
       break;}
 
@@ -2237,7 +2246,7 @@ static void range_to_clipboard(BufferData &buffer, View<Pos> from, View<Pos> to)
     Pos a = from[i];
     Pos b = to[i];
     if (b < a)
-      swap_range(a,b);
+      swap_range(buffer,a,b);
 
     StringBuffer s = buffer.range_to_string({a,b});
     sb += s;
@@ -2506,8 +2515,8 @@ static void handle_input(Key key) {
       goto yank_done;
 
     // some movements we want to include the end position
-    for (Cursor &c : cursors)
-      buffer.data->advance(c.pos);
+    // for (Cursor &c : cursors)
+      // buffer.data->advance(c.pos);
 
     range_to_clipboard(*buffer.data, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
 
@@ -2539,9 +2548,12 @@ static void handle_input(Key key) {
         for (int i = 0; i < cursors.size; ++i) {
           Pos a = cursors[i].pos;
           Pos b = buffer.cursors[i].pos;
-          if (b < a)
-            swap_range(a,b);
-          buffer.data->advance(b);
+          if (b < a) {
+            swap_range(*buffer.data,a,b);
+          }
+          // else
+          //   if (b.x != buffer.data->lines[b.y].length)
+          //     buffer.advance(b);
           buffer.remove_range(a, b, i);
         }
         break;
@@ -2827,7 +2839,7 @@ static void handle_input(Key key) {
           Pos pa = G.visual_start.cursors[i];
           Pos pb = buffer.cursors[i].pos;
           if (pb < pa)
-            swap_range(pa, pb);
+            swap_range(*buffer.data, pa, pb);
           if (G.visual_entire_line) {
             pa.x = 0;
             pb.x = 0;
