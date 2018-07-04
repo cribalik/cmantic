@@ -1,6 +1,7 @@
 /*
  * TODO:
  * project-wide grep
+ * project-wide goto definition
  * 'w' should only jump whitespace
  * Add description and better spacing to menus
  * recursive panes
@@ -415,11 +416,11 @@ struct BufferData {
 
   /* parser stuff */
   Array<TokenInfo> tokens;
-  Array<Range> declarations;
+  Array<Range> definitions;
   Array<String> identifiers;
 
   // methods
-  Range* getdeclaration(Slice s);
+  Range* getdefinition(Slice s);
   TokenInfo* gettoken(Pos p);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
@@ -619,8 +620,10 @@ struct BufferView {
   bool find_and_move_r(Slice s, bool stay);
   bool find_and_move_r(char c, bool stay);
   int advance();
+  int advance(Pos &p) {return data->advance(p);}
   int advance(int marker_idx);
   int advance_r();
+  int advance_r(Pos &p) {return data->advance_r(p);}
   int advance_r(int marker_idx);
   void goto_endline();
   void goto_endline(int marker_idx);
@@ -969,7 +972,7 @@ enum KeywordType {
   KEYWORD_CONTROL, // control flow
   KEYWORD_TYPE,
   KEYWORD_SPECIFIER,
-  KEYWORD_DECLARATION,
+  KEYWORD_DEFINITION,
   KEYWORD_FUNCTION,
   KEYWORD_MACRO,
   KEYWORD_CONSTANT,
@@ -1072,14 +1075,14 @@ static Keyword keywords[] = {
 
   // declarations
 
-  {"struct", KEYWORD_DECLARATION},
-  {"class", KEYWORD_DECLARATION},
-  {"union", KEYWORD_DECLARATION},
-  {"enum", KEYWORD_DECLARATION},
-  {"typedef", KEYWORD_DECLARATION},
-  {"template", KEYWORD_DECLARATION},
-  {"operator", KEYWORD_DECLARATION},
-  {"namespace", KEYWORD_DECLARATION},
+  {"struct", KEYWORD_DEFINITION},
+  {"class", KEYWORD_DEFINITION},
+  {"union", KEYWORD_DEFINITION},
+  {"enum", KEYWORD_DEFINITION},
+  {"typedef", KEYWORD_DEFINITION},
+  {"template", KEYWORD_DEFINITION},
+  {"operator", KEYWORD_DEFINITION},
+  {"namespace", KEYWORD_DEFINITION},
 
   // macro
 
@@ -1108,6 +1111,7 @@ static Keyword keywords[] = {
   {"goto", KEYWORD_CONTROL},
   {"yield", KEYWORD_CONTROL},
   {"foreach", KEYWORD_CONTROL},
+  {"default", KEYWORD_CONTROL},
 
 };
 
@@ -1253,31 +1257,31 @@ static void tokenize(BufferData &b) {
   b.tokens = tokens;
 
   // TODO: find definitions
-  Array<Range> declarations = b.declarations;
-  util_free(declarations);
+  Array<Range> definitions = b.definitions;
+  util_free(definitions);
   for (int i = 0; i < tokens.size; ++i) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER: {
         Slice s = b.getslice(ti.r);
         if (i+1 < tokens.size && s == "#define") {
-          declarations += tokens[i+1].r;
+          definitions += tokens[i+1].r;
           break;
         }
 
         if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
             tokens[i+2].token == '{') {
-          declarations += tokens[i+1].r;
+          definitions += tokens[i+1].r;
           break;
         }
 
-        // check for function declaration
+        // check for function definition
         {
-          // is it a keyword, then ignore (things like else if (..) is not a declaration)
+          // is it a keyword, then ignore (things like else if (..) is not a definition)
           for (int j = 0; j < (int)ARRAY_LEN(keywords); ++j)
             if (s == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
-              goto no_declaration;
+              goto no_definition;
 
           {
             int j = i;
@@ -1288,13 +1292,13 @@ static void tokenize(BufferData &b) {
               op = b.getslice(tokens[j].r);
               if (op == "*" || op == "&")
                 continue;
-              goto no_declaration;
+              goto no_definition;
             }
 
             if (j+1 < tokens.size &&
                 tokens[j].token == TOKEN_IDENTIFIER &&
                 tokens[j+1].token == '(') {
-              declarations += {tokens[j].a, tokens[j].b};
+              definitions += {tokens[j].a, tokens[j].b};
             }
             else if (j+3 < tokens.size &&
                      tokens[j].token == TOKEN_IDENTIFIER &&
@@ -1302,17 +1306,17 @@ static void tokenize(BufferData &b) {
                      b.getslice(tokens[j+1].r) == "::" &&
                      tokens[j+2].token == TOKEN_IDENTIFIER &&
                      tokens[j+3].token == '(') {
-              declarations += {tokens[j].a, tokens[j+2].b};
+              definitions += {tokens[j].a, tokens[j+2].b};
             }
           }
-          no_declaration:;
+          no_definition:;
         }
         break;}
       default:
         break;
     }
   }
-  b.declarations = declarations;
+  b.definitions = definitions;
 }
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
@@ -1397,9 +1401,9 @@ static void menu_option_show_tab_type() {
     status_message_set("Tabs is %i spaces", G.editing_pane->buffer.data->tab_type);
 }
 
-static void menu_option_print_declarations() {
+static void menu_option_print_definitions() {
   BufferData &b = *G.editing_pane->buffer.data;
-  for (Range r : b.declarations) {
+  for (Range r : b.definitions) {
     Slice s = b.getslice(r);
     printf("%.*s\n", s.length, s.chars);
   }
@@ -1467,9 +1471,9 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     menu_option_show_tab_type
   },
   {
-    Slice::create("show_declarations"),
-    Slice::create("Show all declarations in current buffer"),
-    menu_option_print_declarations
+    Slice::create("show_definitions"),
+    Slice::create("Show all definitions in current buffer"),
+    menu_option_print_definitions
   },
   {
     Slice::create("chdir"),
@@ -1610,13 +1614,13 @@ static void mode_cwd() {
 
 static Array<String> get_goto_definition_suggestions() {
   BufferData &b = *G.editing_pane->buffer.data;
-  Array<Slice> decls = {};
-  decls.reserve(b.declarations.size);
-  for (Range r : b.declarations)
-    decls += b.getslice(r);
+  Array<Slice> defs = {};
+  defs.reserve(b.definitions.size);
+  for (Range r : b.definitions)
+    defs += b.getslice(r);
 
-  Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(decls));
-  util_free(decls);
+  Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs));
+  util_free(defs);
   return result;
 }
 
@@ -1627,7 +1631,7 @@ static void mode_goto_definition() {
 
   G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu.get_suggestions = &get_goto_definition_suggestions;
-  G.menu_pane.menu.prefix = Slice::create("goto decl");
+  G.menu_pane.menu.prefix = Slice::create("goto def");
 
   G.menu_pane.buffer.empty();
   G.menu_pane.update_suggestions();
@@ -1919,14 +1923,10 @@ static bool movement_default(BufferView &buffer, int key) {
 
     case 'w': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
-        Utf8char c = buffer.getchar(i);
-        if (is_identifier_tail(c) || is_identifier_head(c))
-          while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
-            if (buffer.advance(i))
-              break;
-        while (c = buffer.getchar(i), !is_identifier_tail(c))
-          if (buffer.advance(i))
-            break;
+        Pos p = buffer.cursors[i].pos;
+        TokenInfo *t = buffer.data->token_find(p);
+        if (t && t < &buffer.data->tokens.last())
+          buffer.move_to(i, t[1].a);
       }
       break;}
 
@@ -2090,7 +2090,7 @@ static void state_init() {
   keyword_colors[KEYWORD_CONTROL]     = COLOR_DARK_BLUE;
   keyword_colors[KEYWORD_TYPE]        = COLOR_DARK_BLUE;
   keyword_colors[KEYWORD_SPECIFIER]   = COLOR_DARK_BLUE;
-  keyword_colors[KEYWORD_DECLARATION] = COLOR_PINK;
+  keyword_colors[KEYWORD_DEFINITION] = COLOR_PINK;
   keyword_colors[KEYWORD_FUNCTION]    = COLOR_BLUE;
   keyword_colors[KEYWORD_MACRO]       = COLOR_DEEP_ORANGE;
   keyword_colors[KEYWORD_CONSTANT]    = G.number_color;
@@ -2326,7 +2326,7 @@ static void handle_input(Key key) {
 
   case MODE_GOTO:
     buffer.collapse_cursors();
-    if (isdigit(key)) {
+    if (key >= '0' && key <= '9') {
       G.goto_line_number *= 10;
       G.goto_line_number += key - '0';
       buffer.move_to_y(0, G.goto_line_number-1);
@@ -2342,20 +2342,21 @@ static void handle_input(Key key) {
         buffer.move_to(0, buffer.data->num_lines()-1);
         break;
       case 'd': {
-        // goto declaration
+        // goto definition
         TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
         if (!t)
           break;
         if (t->token != TOKEN_IDENTIFIER)
           break;
 
-        Range *decl = buffer.data->getdeclaration(buffer.data->getslice(t->r));
-        if (!decl)
+        Range *def = buffer.data->getdefinition(buffer.data->getslice(t->r));
+        if (!def)
           break;
 
-        buffer.move_to(decl->a);
+        buffer.move_to(def->a);
         break;}
     }
+    G.goto_line_number = 0;
     mode_normal(true);
     break;
 
@@ -2406,13 +2407,13 @@ static void handle_input(Key key) {
         break;
       }
 
-      Range *decl = buffer.data->getdeclaration(*opt);
-      if (!decl) {
+      Range *def = buffer.data->getdefinition(*opt);
+      if (!def) {
         mode_normal(true);
         break;
       }
 
-      buffer.move_to(decl->a);
+      buffer.move_to(def->a);
       mode_normal(true);
       break;
     }
@@ -2524,8 +2525,16 @@ static void handle_input(Key key) {
     // TODO: is it more performant to check if it is a movement command first?
     buffer.action_begin();
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
-    if (movement_default(buffer, key)) {
-      if (cursors.size == buffer.cursors.size) {
+    switch (key) {
+      case 'd':
+        buffer.delete_line();
+        break;
+
+      default:
+        if (!movement_default(buffer, key))
+          break;
+        if (cursors.size != buffer.cursors.size)
+          break;
         // delete movement range
         for (int i = 0; i < cursors.size; ++i) {
           Pos a = cursors[i].pos;
@@ -2535,17 +2544,7 @@ static void handle_input(Key key) {
           buffer.data->advance(b);
           buffer.remove_range(a, b, i);
         }
-      }
-    }
-    else {
-      switch (key) {
-        case 'd':
-          buffer.delete_line();
-          break;
-
-        default:
-          break;
-      }
+        break;
     }
     buffer.action_end();
 
@@ -3013,7 +3012,7 @@ void util_free(BufferData &b) {
   util_free(b.filename);
   util_free(b.tokens);
   util_free(b.identifiers);
-  util_free(b.declarations);
+  util_free(b.definitions);
   util_free(b._undo_actions);
 }
 
@@ -3124,8 +3123,8 @@ StringBuffer BufferData::range_to_string(const Range r) {
   }
 }
 
-Range* BufferData::getdeclaration(Slice s) {
-  for (Range &r : declarations)
+Range* BufferData::getdefinition(Slice s) {
+  for (Range &r : definitions)
     if (getslice(r) == s)
       return &r;
   return 0;
@@ -4602,7 +4601,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
         }
 
         // check for functions
-        // we assume "<identifier> [<identifier><operators>]* <identifier>(" is a function declaration
+        // we assume "<identifier> [<identifier><operators>]* <identifier>(" is a function definition
         // TODO: @utf8
         Pos p = pos;
         t = b.data->token_read(&p, y1);
