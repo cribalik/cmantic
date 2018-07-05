@@ -1870,8 +1870,6 @@ static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbra
         --depth;
         if (depth <= 0) {
           buffer.move_to(i, t->a);
-          if (depth < 0)
-            buffer.advance(i);
           break;
         }
       }
@@ -1893,8 +1891,6 @@ static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbr
         --depth;
         if (depth <= 0) {
           buffer.move_to(i, t->a);
-          if (depth < 0)
-            buffer.advance_r(i);
           break;
         }
       }
@@ -1928,14 +1924,18 @@ static bool movement_default(BufferView &buffer, int key) {
           break;
         // if in word, keep going to end of word
         Utf8char c = buffer.getchar(i);
-        if (!c.isspace())
-          while (c = buffer.getchar(i), !c.isspace())
+        if (is_identifier_tail(c)) {
+          while (c = buffer.getchar(i), is_identifier_tail(c))
             if (buffer.advance(i))
               break;
-        // go to start of next word
-        while (c = buffer.getchar(i), c.isspace())
-          if (buffer.advance(i))
-            break;
+          break;
+        }
+        else {
+          // go to start of next word
+          while (c = buffer.getchar(i), c.isspace())
+            if (buffer.advance(i))
+              break;
+        }
       }
       break;}
 
@@ -2274,6 +2274,32 @@ static void move_cursor_due_to_remove(Pos a, Pos b, Pos *pos) {
   }
 }
 
+// frees visual_start if invalid
+static bool check_visual_start(BufferView &buffer) {
+  if (G.editing_pane->buffer.data != G.visual_start.buffer)
+    return false;
+  if (buffer.cursors.size != G.visual_start.cursors.size) {
+    util_free(G.visual_start);
+    return false;
+  }
+  return true;
+}
+
+static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
+  for (int y = y0; y <= y1; ++y) {
+    Pos a = {0, y};
+    if (buffer.data->lines[y].find(Slice::create("//"), &a.x)) {
+      Pos b = a;
+      b.x += 2;
+      while (b.x < buffer.data->lines[y].length && buffer.data->getchar(b).isspace())
+        ++b.x;
+      buffer.remove_range(a, b, cursor_idx);
+    }
+    else
+      buffer.insert({buffer.data->begin_of_line(y), y}, Slice::create("// "), cursor_idx);
+  }
+}
+
 static void handle_input(Key key) { 
   BufferView &buffer = G.editing_pane->buffer;
 
@@ -2535,9 +2561,26 @@ static void handle_input(Key key) {
     buffer.action_begin();
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
     switch (key) {
+      // delete line
       case 'd':
         buffer.delete_line();
         break;
+
+      // delete block
+      case 'b': {
+        buffer.action_begin();
+        Array<Cursor> prev = buffer.cursors.copy_shallow();
+        move_to_right_brace(buffer, '{', '}');
+        buffer.advance();
+        for (int i = 0; i < buffer.cursors.size; ++i) {
+          if (buffer.getchar(i) == ';')
+            buffer.advance(i);
+          if (buffer.cursors[i].x == buffer.data->lines[buffer.cursors[i].y].length)
+            buffer.advance(i);
+          buffer.remove_range(prev[i].pos, buffer.cursors[i].pos, i);
+        }
+        buffer.action_end();
+        break;}
 
       default:
         if (!movement_default(buffer, key))
@@ -2619,9 +2662,41 @@ static void handle_input(Key key) {
       mode_goto_definition();
       break;
 
+    case 'D':
+      buffer.delete_line();
+      break;
+
     case '=':
+      buffer.action_begin();
+      if (check_visual_start(buffer)) {
+        for (int i = 0; i < buffer.cursors.size; ++i) {
+          int y0 = min(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          int y1 = max(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          for (int y = y0; y <= y1; ++y)
+            buffer.autoindent(y);
+        }
+        util_free(G.visual_start);
+      }
+      buffer.action_end();
       buffer.autoindent();
       break;
+
+    case '/': {
+      buffer.action_begin();
+      if (check_visual_start(buffer)) {
+        for (int i = 0; i < buffer.cursors.size; ++i) {
+          int y0 = min(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          int y1 = max(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          toggle_comment(buffer, y0, y1, i);
+        }
+        util_free(G.visual_start);
+      }
+      else
+        for (int i = 0; i < buffer.cursors.size; ++i)
+          toggle_comment(buffer, buffer.cursors[i].y, buffer.cursors[i].y, i);
+      buffer.action_end();
+
+      break;}
 
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
@@ -2765,13 +2840,8 @@ static void handle_input(Key key) {
 
     case 'y':
       // visual yank?
-      if (G.editing_pane->buffer.data == G.visual_start.buffer) {
+      if (check_visual_start(buffer)) {
         Array<Pos> destination;
-        if (buffer.cursors.size != G.visual_start.cursors.size) {
-          util_free(G.visual_start);
-          goto yank;
-        }
-
         buffer.action_begin();
 
         destination = {};
@@ -2795,7 +2865,6 @@ static void handle_input(Key key) {
         break;
       }
 
-      yank:
       mode_yank();
       break;
 
@@ -2827,12 +2896,7 @@ static void handle_input(Key key) {
 
     case 'd':
       // visual delete?
-      if (G.editing_pane->buffer.data == G.visual_start.buffer) {
-        if (buffer.cursors.size != G.visual_start.cursors.size) {
-          util_free(G.visual_start);
-          goto del;
-        }
-
+      if (check_visual_start(buffer)) {
         buffer.action_begin();
 
         for (int i = 0; i < G.visual_start.cursors.size; ++i) {
@@ -2856,7 +2920,6 @@ static void handle_input(Key key) {
         break;
       }
 
-      del:
       mode_delete();
       break;
 
@@ -4759,9 +4822,10 @@ void Pane::render_menu() {
 
 void Pane::render_edit() {
   BufferView &b = buffer;
+  BufferData &d = *buffer.data;
   // calc bounds 
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
-  int buf_y1 = at_most(buf_offset.y + this->numchars_y(), b.data->lines.size);
+  int buf_y1 = at_most(buf_offset.y + this->numchars_y(), d.lines.size);
 
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
@@ -4770,7 +4834,7 @@ void Pane::render_edit() {
     gutter.init(_gutter_width, this->numchars_y());
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
-      if (line < b.data->lines.size)
+      if (line < d.lines.size)
         gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
       else
         gutter.render_str({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, Slice::create(" ~"));
@@ -4787,7 +4851,7 @@ void Pane::render_edit() {
 
   // draw each line 
   for (int y = buf_offset.y; y < buf_y1; ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, b.data->lines[y].slice);
+    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
 
   this->render_syntax_highlight(canvas, buf_y1);
 
@@ -4795,32 +4859,32 @@ void Pane::render_edit() {
   const Color *highlight_background_color = G.editing_pane == this ? this->active_highlight_background_color : this->inactive_highlight_background_color;
   if (highlight_background_color)
     for (Cursor c : b.cursors)
-      canvas.fill_background({0, c.y, {-1, 1}}, *highlight_background_color);
+      canvas.fill_background({d.to_visual_pos(Pos{0, c.y}), {-1, 1}}, *highlight_background_color);
 
   // highlight visual start
   if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
     for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({0, pos.y, {-1, 1}}, *this->inactive_highlight_background_color);
+      canvas.fill_background({d.to_visual_pos({0, pos.y}), {-1, 1}}, *this->inactive_highlight_background_color);
 
   // if there is a search term, highlight that as well
   if (G.search_term.length > 0) {
     Pos pos = {0, buf_offset.y};
-    while (b.data->find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
-      canvas.fill_background({pos, G.search_term.length, 1}, G.search_term_background_color.color);
+    while (d.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
+      canvas.fill_background({d.to_visual_pos(pos), G.search_term.length, 1}, G.search_term_background_color.color);
   }
 
   // draw visual start marker
   if (G.visual_start.buffer == buffer.data)
     for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({pos, {1, 1}}, G.default_marker_background_color.color);
+      canvas.fill_background({d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
 
   // draw marker
   for (Cursor c : b.cursors) {
     if (G.selected_pane == this)
       // canvas.fill_background({buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
-      canvas.fill_background({c.pos, {1, 1}}, G.default_marker_background_color.color);
+      canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
     else if (G.bottom_pane != this)
-      canvas.fill_background({c.pos, {1, 1}}, G.marker_inactive_color);
+      canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.marker_inactive_color);
   }
 
   canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});

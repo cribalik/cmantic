@@ -509,6 +509,7 @@ struct Utf8Iter {
   bool find(int offset, Slice s, int *result) const; \
   bool find(int offset, char c, int *result) const; \
   bool find(char c, int *result) const; \
+  bool find(Slice s, int *result) const; \
   bool find_r(String s, int *result) const; \
   bool find_r(Slice s, int *result) const; \
   bool find_r(StringBuffer s, int *result) const; \
@@ -536,6 +537,7 @@ struct Utf8Iter {
   bool classname::find(int offset, Slice s, int *result) const {return Slice::find(chars, length, offset, s, result);} \
   bool classname::find(int offset, char c, int *result) const {return Slice::find(chars, length, offset, c, result);} \
   bool classname::find(char c, int *result) const {return Slice::find(chars, length, c, result);} \
+  bool classname::find(Slice s, int *result) const {return Slice::find(chars, length, s, result);} \
   bool classname::find_r(String s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
   bool classname::find_r(Slice s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
   bool classname::find_r(StringBuffer s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
@@ -628,6 +630,10 @@ struct Slice {
       return false;
     *result = (char*)p - chars;
     return true;
+  }
+
+  static bool find(const char *chars, int length, Slice s, int *result) {
+    return find(chars, length, 0, s, result);
   }
 
   static bool find(const char *chars, int length, int offset, char c, int *result) {
@@ -848,6 +854,10 @@ union StringBuffer {
 
   void insert(int i, StringBuffer s) {
     insert(i, s.chars, s.length);
+  }
+
+  void remove(int i) {
+    return remove(i, 1);
   }
 
   void remove(int i, int n) {
