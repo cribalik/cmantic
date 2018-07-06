@@ -1190,6 +1190,8 @@ static void tokenize(BufferData &b) {
         // EOL
         if (x >= line.length) {
           ++y;
+          if (y == b.lines.size)
+            break;
           line = b.lines[y].slice;
           x = 0;
           continue;
