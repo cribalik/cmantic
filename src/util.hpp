@@ -1,4 +1,14 @@
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           COMMON                           **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
 #ifdef OS_LINUX
   #include <errno.h>
   #include <sys/types.h>
@@ -56,7 +66,7 @@ template<class T> void util_free(Array<T> &);
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
 
-#define at_least(a,b) max((a),(b))
+#define at_least(a, b) max((a),(b))
 #define at_most(a, b) min((a),(b))
 
 /* a,b inclusive */

@@ -1,11 +1,11 @@
 /*
  * TODO:
+ * Buffer::advance should return success instead of err
+ * Jumplist
  * project-wide grep
  * project-wide goto definition
- * 'w' should only jump whitespace
  * Add description and better spacing to menus
  * recursive panes
- * Jumplist
  * Build system
  * parse BOM
  * Make syntax highlighter use pretokenized list
@@ -416,7 +416,7 @@ struct BufferData {
   TokenInfo* gettoken(Pos p);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
-  bool modified() {return _next_undo_action > 0;}
+  bool modified() {return _next_undo_action != _last_save_undo_action;}
   void raw_begin() {++_raw_mode_depth;}
   void raw_end() {--_raw_mode_depth;}
   bool raw_mode() {return _raw_mode_depth;}
@@ -443,10 +443,13 @@ struct BufferData {
   void remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx = -1);
   void delete_char(Array<Cursor>& cursors);
   void insert_tab(Array<Cursor> &cursors);
+  void insert_tab(Array<Cursor> &cursors, Pos pos);
   int getindent(int y);
   int indentdepth(int y, bool *has_statement);
   void autoindent(Array<Cursor> &cursors, const int y);
   void autoindent(Array<Cursor> &cursors);
+  void add_indent(Array<Cursor> &cursors, int y, int diff);
+  void set_indent(Array<Cursor> &cursors, int y, int target);
   int isempty();
   int advance_r(Pos &p) const;
   int advance(Pos &p) const;
@@ -480,6 +483,7 @@ struct BufferData {
   bool undo_disabled;
   Array<UndoAction> _undo_actions;
   int _next_undo_action;
+  int _last_save_undo_action;
   int _action_group_depth;
 
   void print_undo_actions();
@@ -589,7 +593,12 @@ struct MenuOption {
 struct BufferView {
   BufferData *data;
   Array<Cursor> cursors;
+  Array<Pos> jumplist;
+  int jumplist_pos;
 
+  void jumplist_push();
+  void jumplist_prev();
+  void jumplist_next();
   void move_to_y(int marker_idx, int y);
   void move_to_x(int marker_idx, int x);
   void move_to(int marker_idx, Pos p);
@@ -636,8 +645,11 @@ struct BufferView {
   void insert_newline() {data->insert_newline(cursors);}
   void insert_newline_below() {data->insert_newline_below(cursors);}
   void insert_tab() {data->insert_tab(cursors);}
+  void insert_tab(Pos p) {data->insert_tab(cursors, p);}
   void empty() {data->empty(cursors);}
+  void delete_char() {data->delete_char(cursors);}
   Utf8char getchar(int cursor_idx) {return data->getchar(cursors[cursor_idx].pos);}
+  Utf8char getchar(Pos p) {return data->getchar(p);}
 
   static BufferView create(BufferData *data) {
     BufferView b = {data, {}};
@@ -646,11 +658,11 @@ struct BufferView {
   }
 };
 
-void swap_range(BufferData &, Pos &a, Pos &b) {
+void swap_range(BufferData &buffer, Pos &a, Pos &b) {
   Pos tmp = a;
   a = b;
   b = tmp;
-  // buffer.advance(a);
+  buffer.advance(a);
   // buffer.advance(b);
 }
 
@@ -858,6 +870,8 @@ struct State {
   Pane dropdown_pane;
   BufferData dropdown_buffer;
   BufferData null_buffer;
+
+  float activation_meter;
 
   String search_term;
 
@@ -1375,6 +1389,8 @@ static void save_buffer(BufferData *b) {
 
   status_message_set("Wrote %i lines to %s", b->num_lines(), b->filename);
 
+  b->_last_save_undo_action = b->_next_undo_action;
+
   err:
   fclose(f);
 }
@@ -1856,19 +1872,19 @@ static void insert_default(Pane &p, Key key) {
   }
 }
 
-static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace) {
+static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace, bool allow_inner_blocks = false) {
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
     TokenInfo *t = buffer.data->token_find(p);
-    if (t && t->token == leftbrace)
+    if (t && (t->token == leftbrace || t->token == rightbrace))
       --t;
     for (; t >= buffer.data->tokens.begin(); --t) {
       if (t->token == rightbrace)
         ++depth;
       if (t->token == leftbrace) {
         --depth;
-        if (depth <= 0) {
+        if (depth < 0 || (allow_inner_blocks && depth == 0)) {
           buffer.move_to(i, t->a);
           break;
         }
@@ -1877,19 +1893,19 @@ static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbra
   }
 }
 
-static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbrace) {
+static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbrace, bool allow_inner_blocks = false) {
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
     TokenInfo *t = buffer.data->token_find(p);
-    if (t && t->token == rightbrace)
+    if (t && (t->token == leftbrace || t->token == rightbrace))
       ++t;
     for (; t < buffer.data->tokens.end(); ++t) {
       if (t->token == leftbrace) 
         ++depth;
       if (t->token == rightbrace) {
         --depth;
-        if (depth <= 0) {
+        if (depth < 0 || (allow_inner_blocks && depth == 0)) {
           buffer.move_to(i, t->a);
           break;
         }
@@ -1920,18 +1936,27 @@ static bool movement_default(BufferView &buffer, int key) {
 
     case 'w': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
-        if (buffer.advance(i))
-          break;
         // if in word, keep going to end of word
         Utf8char c = buffer.getchar(i);
         if (is_identifier_tail(c)) {
           while (c = buffer.getchar(i), is_identifier_tail(c))
             if (buffer.advance(i))
               break;
+          while (c = buffer.getchar(i), c.isspace())
+            if (buffer.advance(i))
+              break;
           break;
         }
-        else {
+        else if (c.isspace()) {
           // go to start of next word
+          while (c = buffer.getchar(i), c.isspace())
+            if (buffer.advance(i))
+              break;
+        }
+        else {
+          while (c = buffer.getchar(i), (!is_identifier_head(c) && !c.isspace()))
+            if (buffer.advance(i))
+              break;
           while (c = buffer.getchar(i), c.isspace())
             if (buffer.advance(i))
               break;
@@ -1941,9 +1966,9 @@ static bool movement_default(BufferView &buffer, int key) {
 
     case 'n':
       G.search_term_background_color.reset();
+      buffer.jumplist_push();
       if (!buffer.find_and_move(G.search_term.slice, false))
         status_message_set("'{}' not found", &G.menu_buffer[0]);
-      /*jumplist_push(prev);*/
       break;
 
     case 'j':
@@ -1972,9 +1997,9 @@ static bool movement_default(BufferView &buffer, int key) {
 
     case 'N':
       G.search_term_background_color.reset();
+      buffer.jumplist_push();
       if (!buffer.find_and_move_r(G.search_term.slice, false))
         status_message_set("'{}' not found", &G.search_term.slice);
-      /*jumplist_push(prev);*/
       break;
 
     case '{':
@@ -2287,8 +2312,9 @@ static bool check_visual_start(BufferView &buffer) {
 
 static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
   for (int y = y0; y <= y1; ++y) {
-    Pos a = {0, y};
-    if (buffer.data->lines[y].find(Slice::create("//"), &a.x)) {
+    int x  = buffer.data->begin_of_line(y);
+    Pos a = {x, y};
+    if (buffer.data->lines[y].begins_with(x, Slice::create("//"))) {
       Pos b = a;
       b.x += 2;
       while (b.x < buffer.data->lines[y].length && buffer.data->getchar(b).isspace())
@@ -2296,7 +2322,7 @@ static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
       buffer.remove_range(a, b, cursor_idx);
     }
     else
-      buffer.insert({buffer.data->begin_of_line(y), y}, Slice::create("// "), cursor_idx);
+      buffer.insert(a, Slice::create("// "), cursor_idx);
   }
 }
 
@@ -2448,6 +2474,7 @@ static void handle_input(Key key) {
         break;
       }
 
+      buffer.jumplist_push();
       buffer.move_to(def->a);
       mode_normal(true);
       break;
@@ -2570,14 +2597,51 @@ static void handle_input(Key key) {
       case 'b': {
         buffer.action_begin();
         Array<Cursor> prev = buffer.cursors.copy_shallow();
-        move_to_right_brace(buffer, '{', '}');
+        move_to_right_brace(buffer, '{', '}', true);
         buffer.advance();
         for (int i = 0; i < buffer.cursors.size; ++i) {
           if (buffer.getchar(i) == ';')
             buffer.advance(i);
-          if (buffer.cursors[i].x == buffer.data->lines[buffer.cursors[i].y].length)
-            buffer.advance(i);
           buffer.remove_range(prev[i].pos, buffer.cursors[i].pos, i);
+        }
+        buffer.action_end();
+        break;}
+
+      case 'p': {
+        buffer.action_begin();
+        for (int i = 0; i < buffer.cursors.size; ++i) {
+          int depth = 0;
+          Utf8char c;
+          // find beginning
+          Pos a = buffer.cursors[i].pos;
+          depth = 0;
+          while (!buffer.advance_r(a)) {
+            c = buffer.getchar(a);
+            if (c == ')' || c == ']' || c == '}')
+              --depth;
+            else if (c == '(' || c == '[' || c == '{')
+              ++depth;
+            else if (c == ',')
+              break;
+            if (depth > 0)
+              break;
+          }
+          // find end
+          Pos b = buffer.cursors[i].pos;
+          depth = 0;
+          while (!buffer.advance(b)) {
+            c = buffer.getchar(b);
+            if (c == ')' || c == ']' || c == '}')
+              --depth;
+            else if (c == '(' || c == '[' || c == '{')
+              ++depth;
+            else if (c == ',')
+              break;
+            if (depth < 0)
+              break;
+          }
+
+          buffer.remove_range(a, b, i);
         }
         buffer.action_end();
         break;}
@@ -2662,6 +2726,13 @@ static void handle_input(Key key) {
       mode_goto_definition();
       break;
 
+    case 'x':
+      buffer.action_begin();
+      buffer.advance();
+      buffer.delete_char();
+      buffer.action_end();
+      break;
+
     case 'D':
       buffer.delete_line();
       break;
@@ -2679,6 +2750,21 @@ static void handle_input(Key key) {
       }
       buffer.action_end();
       buffer.autoindent();
+      break;
+
+    case CONTROL('o'):
+      buffer.jumplist_prev();
+      break;
+
+    case CONTROL('i'):
+      buffer.jumplist_next();
+      break;
+
+    case '>':
+      buffer.action_begin();
+      for (int i = 0; i < buffer.cursors.size; ++i)
+        buffer.insert_tab({0, buffer.cursors[i].y});
+      buffer.action_end();
       break;
 
     case '/': {
@@ -3224,9 +3310,12 @@ void BufferData::push_undo_action(UndoAction a) {
   if (undo_disabled)
     return;
 
-  // free actions after _next_undo_action
-  for (int i = _next_undo_action; i < _undo_actions.size; ++i)
-    util_free(_undo_actions[i]);
+  // remove any redos we might have
+  if (_next_undo_action < _undo_actions.size) {
+    for (int i = _next_undo_action; i < _undo_actions.size; ++i)
+      util_free(_undo_actions[i]);
+    _last_save_undo_action = -1;
+  }
   _undo_actions.size = _next_undo_action;
   _undo_actions += a;
   ++_next_undo_action;
@@ -3280,6 +3369,8 @@ void BufferData::action_end(Array<Cursor> &cursors) {
       return;
     }
 
+    if (this == G.editing_pane->buffer.data)
+      G.activation_meter += 1.0f;
 
     push_undo_action(UndoAction::cursor_snapshot(cursors));
     push_undo_action({ACTIONTYPE_GROUP_END});
@@ -3425,6 +3516,30 @@ void BufferData::print_undo_actions() {
         break;
     }
   }
+}
+
+void BufferView::jumplist_push() {
+  jumplist.resize(++jumplist_pos);
+  jumplist.last() = cursors[0].pos;
+}
+
+void BufferView::jumplist_prev() {
+  if (!jumplist.size || !jumplist_pos)
+    return;
+
+  collapse_cursors();
+  cursors[0].pos = jumplist[--jumplist_pos];
+  cursors[0].ghost_x = cursors[0].x;
+}
+
+void BufferView::jumplist_next() {
+  if (jumplist_pos == jumplist.size)
+    return;
+
+  printf("%i\n", jumplist_pos);
+  collapse_cursors();
+  cursors[0].pos = jumplist[jumplist_pos++];
+  cursors[0].ghost_x = cursors[0].x;
 }
 
 void BufferView::move(int marker_idx, int dx, int dy) {
@@ -3758,13 +3873,6 @@ void BufferData::autoindent(Array<Cursor> &cursors) {
 void BufferData::autoindent(Array<Cursor> &cursors, const int y) {
   action_begin(cursors);
 
-  const char tab_char = tab_type ? ' ' : '\t';
-  const int tab_size = tab_type ? tab_type : 1;
-
-  int diff = 0;
-
-  const int current_indent = getindent(y);
-
   int y_above = y-1;
   // skip empty lines
   while (y_above >= 0 && lines[y_above].length == 0)
@@ -3800,7 +3908,17 @@ void BufferData::autoindent(Array<Cursor> &cursors, const int y) {
     }
   }
 
-  diff = tab_size * (target_indent - current_indent);
+  set_indent(cursors, y, target_indent);
+  action_end(cursors);
+}
+
+void BufferData::add_indent(Array<Cursor> &cursors, int y, int diff) {
+  action_begin(cursors);
+  const char tab_char = tab_type ? ' ' : '\t';
+  const int tab_size = tab_type ? tab_type : 1;
+  const int current_indent = getindent(y);
+
+  diff *= tab_size;
 
   if (diff < -current_indent*tab_size)
     diff = -current_indent*tab_size;
@@ -3812,6 +3930,10 @@ void BufferData::autoindent(Array<Cursor> &cursors, const int y) {
       insert(cursors, Pos{0, y}, Utf8char::create(tab_char));
 
   action_end(cursors);
+}
+
+void BufferData::set_indent(Array<Cursor> &cursors, int y, int target) {
+  add_indent(cursors, y, target - getindent(y));
 }
 
 int BufferData::isempty() {
@@ -3948,6 +4070,18 @@ void BufferData::insert(Array<Cursor> &cursors, Utf8char ch) {
 
   for (int i = 0; i < cursors.size; ++i)
     insert(cursors, cursors[i].pos, ch);
+
+  action_end(cursors);
+}
+
+void BufferData::insert_tab(Array<Cursor> &cursors, Pos p) {
+  action_begin(cursors);
+
+  if (tab_type == 0)
+    insert(cursors, p, Utf8char::create('\t'));
+  else
+    for (int i =0 ; i < tab_type; ++i)
+      insert(cursors, p, Utf8char::create(' '));
 
   action_end(cursors);
 }
@@ -5130,9 +5264,28 @@ int main(int, const char *[])
       handle_input(key);
     handle_rendering(dt);
 
-    // the quad and text buffers should be empty, but we flush them just to be safe
+    // draw activation meter
+    {
+      StringBuffer sb = {};
+      sb.appendf("%i", (int)G.activation_meter);
+      Color c = COLOR_WHITE;
+      if (G.activation_meter < 10.0f)
+        c = COLOR_WHITE;
+      else if (G.activation_meter < 20.0f)
+        c = COLOR_BLUE;
+      else if ( G.activation_meter < 30.0f)
+        c = COLOR_ORANGE;
+      else
+        c = COLOR_DEEP_ORANGE;
+
+      push_text(sb.chars, G.win_width - G.font_width*3, G.win_height - G.font_height*2, true, c);
+      util_free(sb);
+    }
+
     render_quads();
     render_text();
+
+    G.activation_meter = at_least(G.activation_meter - dt / 5000.0f, 0.0f);
 
     SDL_GL_SwapWindow(G.window);
 
