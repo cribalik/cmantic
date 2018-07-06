@@ -597,6 +597,7 @@ struct BufferView {
   int jumplist_pos;
 
   void jumplist_push();
+  void jumplist_pop();
   void jumplist_prev();
   void jumplist_next();
   void move_to_y(int marker_idx, int y);
@@ -666,8 +667,8 @@ void swap_range(BufferData &buffer, Pos &a, Pos &b) {
   // buffer.advance(b);
 }
 
-
 static void util_free(BufferView &b) {
+  util_free(b.jumplist);
   util_free(b.cursors);
   b.data = 0;
 }
@@ -763,7 +764,8 @@ struct Pane {
 };
 
 void util_free(Pane &p) {
-  util_free(p.buffer.cursors);
+  util_free(p.buffer);
+  util_free(p.buffer.jumplist);
 }
 
 void util_free(Pane *&p) {
@@ -1935,17 +1937,17 @@ static bool movement_default(BufferView &buffer, int key) {
       break;}
 
     case 'w': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
+      int i;
+      for (i = 0; i < buffer.cursors.size; ++i) {
         // if in word, keep going to end of word
         Utf8char c = buffer.getchar(i);
-        if (is_identifier_tail(c)) {
-          while (c = buffer.getchar(i), is_identifier_tail(c))
+        if (is_identifier_tail(c) || is_identifier_head(c)) {
+          while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
             if (buffer.advance(i))
               break;
           while (c = buffer.getchar(i), c.isspace())
             if (buffer.advance(i))
               break;
-          break;
         }
         else if (c.isspace()) {
           // go to start of next word
@@ -1969,6 +1971,8 @@ static bool movement_default(BufferView &buffer, int key) {
       buffer.jumplist_push();
       if (!buffer.find_and_move(G.search_term.slice, false))
         status_message_set("'{}' not found", &G.menu_buffer[0]);
+      else
+        buffer.jumplist_push();
       break;
 
     case 'j':
@@ -2000,6 +2004,8 @@ static bool movement_default(BufferView &buffer, int key) {
       buffer.jumplist_push();
       if (!buffer.find_and_move_r(G.search_term.slice, false))
         status_message_set("'{}' not found", &G.search_term.slice);
+      else
+        buffer.jumplist_push();
       break;
 
     case '{':
@@ -2414,7 +2420,9 @@ static void handle_input(Key key) {
         if (!def)
           break;
 
+        buffer.jumplist_push();
         buffer.move_to(def->a);
+        buffer.jumplist_push();
         break;}
     }
     G.goto_line_number = 0;
@@ -2476,6 +2484,7 @@ static void handle_input(Key key) {
 
       buffer.jumplist_push();
       buffer.move_to(def->a);
+      buffer.jumplist_push();
       mode_normal(true);
       break;
     }
@@ -2535,14 +2544,19 @@ static void handle_input(Key key) {
 
   case MODE_SEARCH: {
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
+      buffer.jumplist_push();
       G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
       if (G.search_failed) {
         buffer.move_to(G.search_begin_pos);
         status_message_set("'{}' not found", &G.search_term.slice);
         mode_normal(false);
-      } else
+      }
+      else {
+        buffer.jumplist_push();
         mode_normal(true);
-    } else {
+      }
+    }
+    else {
       G.search_term_background_color.reset();
       handle_menu_insert(key);
 
@@ -3519,6 +3533,8 @@ void BufferData::print_undo_actions() {
 }
 
 void BufferView::jumplist_push() {
+  if (jumplist_pos > 0 && jumplist[jumplist_pos-1] == cursors[0].pos)
+    return;
   jumplist.resize(++jumplist_pos);
   jumplist.last() = cursors[0].pos;
 }
@@ -3528,17 +3544,22 @@ void BufferView::jumplist_prev() {
     return;
 
   collapse_cursors();
-  cursors[0].pos = jumplist[--jumplist_pos];
+  Pos p = jumplist[--jumplist_pos];
+  while (p == cursors[0].pos && jumplist_pos > 0)
+    p = jumplist[--jumplist_pos];
+  cursors[0].pos = p;
   cursors[0].ghost_x = cursors[0].x;
 }
 
 void BufferView::jumplist_next() {
-  if (jumplist_pos == jumplist.size)
+  if (jumplist_pos >= jumplist.size)
     return;
 
-  printf("%i\n", jumplist_pos);
   collapse_cursors();
-  cursors[0].pos = jumplist[jumplist_pos++];
+  Pos p = jumplist[jumplist_pos++];
+  while (p == cursors[0].pos && jumplist_pos < jumplist.size)
+    p = jumplist[jumplist_pos++];
+  cursors[0].pos = p;
   cursors[0].ghost_x = cursors[0].x;
 }
 
@@ -4297,7 +4318,7 @@ int BufferView::advance_r(int marker_idx) {
   return 0;
 }
 
-// TODO, FIXME: properly implement
+// TODO, FIXME: properly implement @utf8
 Utf8char BufferData::getchar(int x, int y) {
   return Utf8char::create(x >= lines[y].length ? '\n' : lines[y][x]);
 }
