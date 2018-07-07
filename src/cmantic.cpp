@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * dropdown_autocomplete should not delete characters (it ruins paste)
  * Buffer::advance should return success instead of err
  * project-wide grep
  * project-wide goto definition
@@ -118,6 +119,8 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
 
   for (int i = 0; i < strings.size; ++i) {
     Slice identifier = strings[i];
+    if (string == identifier)
+      continue;
 
     const int test_len = identifier.length;
     if (string.length > test_len)
@@ -1721,6 +1724,10 @@ static void mode_insert() {
 
   G.editing_pane->buffer.action_begin();
 
+  // so even if the caller did some changes, and commits them with action_end, it will not have an effect
+  // since we do action_begin here. So we need to do things that action_end do manually here
+  tokenize(*G.editing_pane->buffer.data);
+
   status_message_set("insert");
 }
 
@@ -1846,29 +1853,31 @@ static void render_dropdown(Pane *pane) {
 #define CONTROL(c) ((c)|KEY_CONTROL)
 
 // TODO: use a unified key interface instead of this hack
-static void insert_default(Pane &p, Key key) {
+static bool insert_default(Pane &p, Key key) {
   BufferView &b = p.buffer;
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (key == KEY_ESCAPE) {
     mode_normal(true);
-    return;
+    return false;
   }
 
   if (key >= 0 && key <= 125) {
     b.insert(Utf8char::create((char)key));
-    return;
+    return true;
   }
 
   switch (key) {
     case KEY_TAB:
       b.insert_tab();
-      break;
+      return true;
 
     case KEY_BACKSPACE:
       b.data->delete_char(b.cursors);
-      break;
+      return true;
   }
+
+  return false;
 }
 
 static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace, bool allow_inner_blocks = false) {
@@ -1876,6 +1885,10 @@ static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbra
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
     TokenInfo *t = buffer.data->token_find(p);
+    if (t && t->token == leftbrace && t->a < p) {
+      buffer.move_to(i, t->a);
+      continue;
+    }
     if (t && (t->token == leftbrace || t->token == rightbrace))
       --t;
     for (; t >= buffer.data->tokens.begin(); --t) {
@@ -1897,6 +1910,10 @@ static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbr
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
     TokenInfo *t = buffer.data->token_find(p);
+    if (t && t->token == rightbrace && p < t->a) {
+      buffer.move_to(i, t->a);
+      continue;
+    }
     if (t && (t->token == leftbrace || t->token == rightbrace))
       ++t;
     for (; t < buffer.data->tokens.end(); ++t) {
@@ -2730,6 +2747,7 @@ static void handle_input(Key key) {
     break;}
 
   case MODE_INSERT: {
+    bool insert_occured = true;
     switch (key) {
       case KEY_RETURN:
         buffer.action_begin();
@@ -2754,6 +2772,7 @@ static void handle_input(Key key) {
         int f = G.flags.cursor_dirty;
         G.dropdown_pane.buffer.move_y(1);
         G.flags.cursor_dirty = f;
+        insert_occured = false;
         break;}
 
       case CONTROL('k'): {
@@ -2761,12 +2780,15 @@ static void handle_input(Key key) {
         int f = G.flags.cursor_dirty;
         G.dropdown_pane.buffer.move_y(-1);
         G.flags.cursor_dirty = f;
+        insert_occured = false;
         break;}
 
       default:
-        insert_default(*G.editing_pane, key);
+        insert_occured = insert_default(*G.editing_pane, key);
         break;
     }
+    if (insert_occured)
+      tokenize(*buffer.data);
     break;}
 
   case MODE_NORMAL:
@@ -4380,9 +4402,9 @@ Utf8char BufferData::getchar(Pos p) {
 }
 
 TokenInfo* BufferData::token_find(Pos p) {
-  for (int i = 1; i < tokens.size; ++i)
-    if (tokens[i-1].a <= p && p < tokens[i].a)
-      return &tokens[i-1];
+  for (int i = 0; i < tokens.size; ++i)
+    if (p < tokens[i].b)
+      return &tokens[i];
   return tokens.end();
 }
 
