@@ -1,6 +1,7 @@
 /*
  * TODO:
  * dropdown_autocomplete should not delete characters (it ruins paste)
+ * Folding
  * Buffer::advance should return success instead of err
  * project-wide grep
  * project-wide goto definition
@@ -22,7 +23,6 @@
  *       To do this fast, have a hashmap of refcounts for each identifier
  *       if identifier disappears, remove from autocomplete list
  *
- * Folding
  * Multiuser editing
  * TODO stack
  * Optimize autocompletion using some sort of A*
@@ -415,7 +415,6 @@ struct BufferData {
 
   // methods
   Range* getdefinition(Slice s);
-  TokenInfo* gettoken(Pos p);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
   bool modified() {return _next_undo_action != _last_save_undo_action;}
@@ -466,7 +465,7 @@ struct BufferData {
   Utf8char getchar(int x, int y);
   StringBuffer range_to_string(Range r);
   // Finds the token at or before given position
-  TokenInfo* token_find(Pos p);
+  TokenInfo* gettoken(Pos p);
   TokenResult token_read(Pos *p, int y_end);
 
   // Undo functionality:
@@ -1884,7 +1883,7 @@ static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbra
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
-    TokenInfo *t = buffer.data->token_find(p);
+    TokenInfo *t = buffer.data->gettoken(p);
     if (t && t->token == leftbrace && t->a < p) {
       buffer.move_to(i, t->a);
       continue;
@@ -1909,7 +1908,7 @@ static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbr
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
-    TokenInfo *t = buffer.data->token_find(p);
+    TokenInfo *t = buffer.data->gettoken(p);
     if (t && t->token == rightbrace && p < t->a) {
       buffer.move_to(i, t->a);
       continue;
@@ -3380,6 +3379,14 @@ Range* BufferData::getdefinition(Slice s) {
 }
 
 TokenInfo* BufferData::gettoken(Pos p) {
+  for (int i = 0; i < tokens.size; ++i)
+    if (p < tokens[i].b)
+      return &tokens[i];
+  return tokens.end();
+}
+
+#if 0
+TokenInfo* BufferData::gettoken(Pos p) {
   int a = 0, b = tokens.size-1;
 
   while (a <= b) {
@@ -3393,6 +3400,7 @@ TokenInfo* BufferData::gettoken(Pos p) {
   }
   return 0;
 }
+#endif
 
 void BufferData::push_undo_action(UndoAction a) {
   if (undo_disabled)
@@ -4401,13 +4409,6 @@ Utf8char BufferData::getchar(Pos p) {
   return getchar(p.x, p.y);
 }
 
-TokenInfo* BufferData::token_find(Pos p) {
-  for (int i = 0; i < tokens.size; ++i)
-    if (p < tokens[i].b)
-      return &tokens[i];
-  return tokens.end();
-}
-
 TokenResult BufferData::token_read(Pos *p, int y_end) {
   TokenResult result = {};
   int x,y;
@@ -4623,25 +4624,34 @@ void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
   bounds.y = clamp(bounds.y, 0, h-1);
   bounds.h = clamp(bounds.h, 0, h-bounds.y);
 
-  a.x = clamp(a.x, bounds.x, bounds.w-1);
-  a.y = clamp(a.y, bounds.y, bounds.h-1);
-  b.x = clamp(b.x, bounds.x, bounds.w-1);
-  b.y = clamp(b.y, bounds.y, bounds.h-1);
+  if (a.y >= bounds.y + bounds.h || b.y < bounds.y)
+    return;
+
+  a.x = clamp(a.x, bounds.x, bounds.w);
+  if (a.y < bounds.y) {
+    a.y = bounds.y;
+    a.x = 0;
+  }
+
+  b.x = clamp(b.x, bounds.x, bounds.w);
+  if (b.y >= bounds.y + bounds.h) {
+    b.y = bounds.y + bounds.h - 1;
+    b.x = bounds.x + bounds.w - 1;
+  }
 
   if (a.y == b.y) {
-    for (int x = a.x; x <= b.x; ++x)
+    for (int x = a.x; x < b.x; ++x)
       this->text_colors[a.y*this->w + x] = c;
     return;
   }
 
   int y = a.y;
-  if (y < b.y)
-    for (int x = a.x; x < bounds.x+bounds.w; ++x)
-      this->text_colors[y*this->w + x] = c;
+  for (int x = a.x; x < bounds.x+bounds.w; ++x)
+    this->text_colors[y*this->w + x] = c;
   for (++y; y < b.y; ++y)
     for (int x = bounds.x; x < bounds.x+bounds.w; ++x)
       this->text_colors[y*this->w + x] = c;
-  for (int x = bounds.x; x <= b.x; ++x)
+  for (int x = bounds.x; x < b.x; ++x)
     this->text_colors[y*this->w + x] = c;
 }
 
@@ -4843,79 +4853,62 @@ void Pane::render_as_dropdown() {
 }
 
 void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
-  #define render_highlight(prev, next, color) canvas.fill_textcolor({b.data->to_visual_pos(prev), b.data->to_visual_pos(next)}, Rect{0, 0, -1, -1}, color);
+  #define render_highlight(color) canvas.fill_textcolor({b.data->to_visual_pos(t->a), b.data->to_visual_pos(t->b)}, Rect{0, 0, -1, -1}, color)
 
   BufferView &b = this->buffer;
   // syntax @highlighting
   int y0 = canvas.offset.y;
   Pos pos = {0, canvas.offset.y};
-  for (;;) {
-    Pos prev,next;
-    auto t = b.data->token_read(&pos, y1);
-    prev = t.a;
-    next = t.b;
+  TokenInfo *t = b.data->gettoken(pos);
 
-    if (t.tok == TOKEN_NULL)
-      break;
-    switch (t.tok) {
-
-      case TOKEN_NUMBER:
-        render_highlight(prev, next, G.number_color);
+  if (t) {
+    for (; t < b.data->tokens.end() && t->a.y <= y1; ++t) {
+      if (t->token == TOKEN_NULL)
         break;
+      switch (t->token) {
 
-      case TOKEN_BLOCK_COMMENT_BEGIN:
-        next = {b.data->lines[y1-1].length, y1-1};
-        render_highlight(prev, next, G.comment_color);
-        break;
+        case TOKEN_NUMBER:
+          render_highlight(G.number_color);
+          break;
 
-      case TOKEN_BLOCK_COMMENT:
-        render_highlight(prev, next, G.comment_color);
-        break;
+        case TOKEN_BLOCK_COMMENT_BEGIN:
+          render_highlight(G.comment_color);
+          break;
 
-      case TOKEN_BLOCK_COMMENT_END:
-        prev = canvas.offset;
-        render_highlight(prev, next, G.comment_color);
-        break;
+        case TOKEN_BLOCK_COMMENT:
+        case TOKEN_BLOCK_COMMENT_END:
+        case TOKEN_LINE_COMMENT:
+          render_highlight(G.comment_color);
+          break;
 
-      case TOKEN_LINE_COMMENT:
-        render_highlight(prev, next, G.comment_color);
-        break;
+        case TOKEN_STRING:
+        case TOKEN_STRING_BEGIN:
+          render_highlight(G.string_color);
+          break;
 
-      case TOKEN_STRING:
-        render_highlight(prev, next, G.string_color);
-        break;
+        case TOKEN_OPERATOR:
+          render_highlight(G.operator_color);
+          break;
 
-      case TOKEN_STRING_BEGIN:
-        render_highlight(prev, next, G.string_color);
-        break;
-
-      case TOKEN_OPERATOR:
-        render_highlight(prev, next, G.operator_color);
-        break;
-
-      case TOKEN_IDENTIFIER: {
-        // check for keywords
-        Slice identifier = b.data->slice(prev, next.x+1 - prev.x);
-        KeywordType kwtype = KEYWORD_NONE;
-        for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-          if (identifier == keywords[i].name) {
-            render_highlight(prev, next, keyword_colors[keywords[i].type]);
-            kwtype = keywords[i].type;
-            break;
+        case TOKEN_IDENTIFIER: {
+          // check for keywords
+          Slice identifier = b.data->getslice(t->r);
+          if (identifier.length > 0 && identifier[0] == '#')
+            render_highlight(keyword_colors[KEYWORD_MACRO]);
+          else {
+            for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
+              if (identifier == keywords[i].name) {
+                render_highlight(keyword_colors[keywords[i].type]);
+                break;
+              }
+            }
           }
-        }
-      } break;
+        break;}
 
-      case '#':
-        render_highlight(prev, next, keyword_colors[KEYWORD_MACRO]);
-        break;
-
-      default:
-        break;
+        default:
+          break;
+      }
     }
-    if (pos.y > y1)
-      break;
-
   }
 
   // syntax highlight definitions
@@ -4924,8 +4917,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
       break;
     if (r.b.y < y0)
       continue;
-    buffer.advance_r(r.b);
-    render_highlight(r.a, r.b, G.identifier_color);
+    canvas.fill_textcolor({b.data->to_visual_pos(r.a), b.data->to_visual_pos(r.b)}, Rect{0, 0, -1, -1}, G.identifier_color);
   }
 }
 
