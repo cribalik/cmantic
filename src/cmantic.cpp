@@ -1,14 +1,13 @@
 /*
  * TODO:
  * Buffer::advance should return success instead of err
- * Jumplist
  * project-wide grep
  * project-wide goto definition
  * Add description and better spacing to menus
  * recursive panes
  * Build system
+ * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * parse BOM
- * Make syntax highlighter use pretokenized list
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
@@ -651,6 +650,7 @@ struct BufferView {
   void delete_char() {data->delete_char(cursors);}
   Utf8char getchar(int cursor_idx) {return data->getchar(cursors[cursor_idx].pos);}
   Utf8char getchar(Pos p) {return data->getchar(p);}
+  int getindent(int y) {return data->getindent(y);}
 
   static BufferView create(BufferData *data) {
     BufferView b = {data, {}};
@@ -1233,7 +1233,6 @@ static void tokenize(BufferData &b) {
       t.token = TOKEN_STRING;
       const char str_char = c;
       NEXT(1);
-      #if 1
       while (1) {
         if (x >= line.length)
           break;
@@ -1241,10 +1240,6 @@ static void tokenize(BufferData &b) {
           break;
         NEXT(1);
       }
-      #else
-      while (x < line.length && c != str_char)
-        NEXT(1);
-      #endif
       if (x < line.length)
         NEXT(1);
       goto token_done;
@@ -1921,19 +1916,29 @@ static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbr
 static bool movement_default(BufferView &buffer, int key) {
   switch (key) {
     case 'b': {
-      for (int i = 0; i < buffer.cursors.size; ++i) {
+      int i;
+      for (i = 0; i < buffer.cursors.size; ++i) {
         if (buffer.advance_r(i))
           break;
-        // if not in word, back to word
+
         Utf8char c = buffer.getchar(i);
-        if (!(is_identifier_tail(c) || is_identifier_head(c)))
-          while (c = buffer.getchar(i), !(is_identifier_tail(c) || is_identifier_head(c)))
+        if (c.isspace()) {
+          while (c = buffer.getchar(i), c.isspace())
             if (buffer.advance_r(i))
               break;
-        // go to beginning of word
-        while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
-          if (buffer.advance_r(i))
-            break;
+        }
+
+        if (is_identifier_tail(c) || is_identifier_head(c)) {
+          while (c = buffer.getchar(i), is_identifier_tail(c) || is_identifier_head(c))
+            if (buffer.advance_r(i))
+              break;
+        }
+        else {
+          while (c = buffer.getchar(i), (!is_identifier_head(c) && !c.isspace()))
+            if (buffer.advance_r(i))
+              break;
+        }
+
         buffer.advance(i);
       }
       break;}
@@ -1975,6 +1980,42 @@ static bool movement_default(BufferView &buffer, int key) {
         status_message_set("'{}' not found", &G.menu_buffer[0]);
       else
         buffer.jumplist_push();
+      break;
+
+    case CONTROL('j'):
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        int prev_indent = buffer.getindent(buffer.cursors[i].y);
+        status_message_set("jumping to next line of indent %i", prev_indent);
+        bool different_indent_encountered = false;
+        for (int y = buffer.cursors[i].y+1; y < buffer.data->lines.size; ++y) {
+          if (buffer.data->lines[y].length == 0 || buffer.getindent(y) != prev_indent) {
+            different_indent_encountered = true;
+            continue;
+          }
+          if (different_indent_encountered) {
+            buffer.move_to_y(i, y);
+            break;
+          }
+        }
+      }
+      break;
+
+    case CONTROL('k'):
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        int prev_indent = buffer.getindent(buffer.cursors[i].y);
+        status_message_set("jumping to next line of indent %i", prev_indent);
+        bool different_indent_encountered = false;
+        for (int y = buffer.cursors[i].y-1; y >= 0; --y) {
+          if (buffer.data->lines[y].length == 0 || buffer.getindent(y) != prev_indent) {
+            different_indent_encountered = true;
+            continue;
+          }
+          if (different_indent_encountered) {
+            buffer.move_to_y(i, y);
+            break;
+          }
+        }
+      }
       break;
 
     case 'j':
@@ -2642,6 +2683,7 @@ static void handle_input(Key key) {
             if (depth > 0)
               break;
           }
+          buffer.advance(a);
           // find end
           Pos b = buffer.cursors[i].pos;
           depth = 0;
@@ -3110,7 +3152,15 @@ void BufferView::move_to_y(int marker_idx, int y) {
   G.flags.cursor_dirty = true;
 
   y = clamp(y, 0, data->lines.size-1);
+  int x = cursors[marker_idx].ghost_x;
+  if (x == GHOST_EOL)
+    x = data->lines[y].length;
+  else if (x == GHOST_BOL)
+    x = data->begin_of_line(y);
+
+  x = clamp(x, 0, data->lines[y].length);
   cursors[marker_idx].y = y;
+  cursors[marker_idx].x = x;
 }
 
 void BufferView::move_to_x(int marker_idx, int x) {
@@ -3824,7 +3874,7 @@ void BufferData::delete_char(Array<Cursor> &cursors) {
 }
 
 int BufferData::getindent(int y) {
-  if (y < 0 || y > lines.size)
+  if (y < 0 || y >= lines.size)
     return 0;
 
   int n = 0;
@@ -4775,6 +4825,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
 
   BufferView &b = this->buffer;
   // syntax @highlighting
+  int y0 = canvas.offset.y;
   Pos pos = {0, canvas.offset.y};
   for (;;) {
     Pos prev,next;
@@ -4831,39 +4882,6 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
             break;
           }
         }
-
-        // check for functions
-        // we assume "<identifier> [<identifier><operators>]* <identifier>(" is a function definition
-        // TODO: @utf8
-        Pos p = pos;
-        t = b.data->token_read(&p, y1);
-        if (t.tok == TOKEN_IDENTIFIER && (
-            identifier == "struct" ||
-            identifier == "enum" ||
-            identifier == "#define" ||
-            identifier == "class"))
-          render_highlight(t.a, t.b, G.identifier_color);
-
-        if (kwtype != KEYWORD_TYPE)
-          break;
-        while (t.tok == TOKEN_OPERATOR && (t.operator_str == "*" || t.operator_str == "&"))
-          t = b.data->token_read(&p, y1);
-        if (t.tok != TOKEN_IDENTIFIER)
-          break;
-        Pos fun_start = t.a;
-        Pos fun_end = t.b;
-        t = b.data->token_read(&p, y1);
-
-        if (t.tok == TOKEN_OPERATOR && t.operator_str == "::") {
-          t = b.data->token_read(&p, y1);
-          if (t.tok != TOKEN_IDENTIFIER)
-            break;
-          fun_end = t.b;
-          t = b.data->token_read(&p, y1);
-        }
-
-        if (t.tok == '(')
-          render_highlight(fun_start, fun_end, G.identifier_color);
       } break;
 
       case '#':
@@ -4875,6 +4893,17 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
     }
     if (pos.y > y1)
       break;
+
+  }
+
+  // syntax highlight definitions
+  for (Range r : buffer.data->definitions) {
+    if (r.a.y > y1)
+      break;
+    if (r.b.y < y0)
+      continue;
+    buffer.advance_r(r.b);
+    render_highlight(r.a, r.b, G.identifier_color);
   }
 }
 
