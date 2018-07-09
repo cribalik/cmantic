@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * Create an easy-to-use token iterator
+ * make 'dp' use tokens instead of chars
  * dropdown_autocomplete should not delete characters (it ruins paste)
  * Folding
  * Buffer::advance should return success instead of err
@@ -107,7 +109,7 @@ static int fuzzy_cmp(const void *aa, const void *bb) {
 }
 
 // returns number of found matches
-static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> result) {
+static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> result, bool ignore_identical_strings) {
   int num_results = 0;
 
   if (string.length == 0) {
@@ -119,7 +121,7 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
 
   for (int i = 0; i < strings.size; ++i) {
     Slice identifier = strings[i];
-    if (string == identifier)
+    if (ignore_identical_strings && string == identifier)
       continue;
 
     const int test_len = identifier.length;
@@ -175,10 +177,10 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
   return num_results;
 }
 
-static Array<String> easy_fuzzy_match(Slice input, View<Slice> options) {
+static Array<String> easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings) {
   StackArray<FuzzyMatch, 15> matches = {};
 
-  int n = fuzzy_match(input, options, view(matches));
+  int n = fuzzy_match(input, options, view(matches), ignore_identical_strings);
 
   Array<String> result = {};
   for (int i = 0; i < n; ++i)
@@ -199,14 +201,6 @@ enum Mode {
   MODE_CWD,
   MODE_COUNT
 };
-
-bool operator==(Utf8char uc, char c) {
-  return !(uc.code & 0xFF00) && (uc.code & 0xFF) == (u32)c;
-}
-
-bool operator==(char c, Utf8char uc) {
-  return uc == c;
-}
 
 enum Token {
   TOKEN_NULL                =  0,
@@ -1520,7 +1514,7 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   },
 };
 
-static Array<String> easy_fuzzy_match(Slice input, View<Slice> options);
+static Array<String> easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings);
 
 static void mode_cleanup() {
   G.flags.cursor_dirty = true;
@@ -1535,7 +1529,7 @@ static void mode_cleanup() {
 }
 
 static Array<String> get_search_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->identifiers, slice));
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->identifiers, slice), false);
 }
 
 static void mode_search() {
@@ -1594,7 +1588,7 @@ static Array<String> get_cwd_suggestions() {
     match_queries += path.name();
 
   StackArray<FuzzyMatch, 15> matches = {};
-  int n = fuzzy_match(p->name(), view(match_queries), view(matches));
+  int n = fuzzy_match(p->name(), view(match_queries), view(matches), false);
   Array<String> result = {};
 
   // StringBuffer sb = {};
@@ -1637,7 +1631,7 @@ static Array<String> get_goto_definition_suggestions() {
   for (Range r : b.definitions)
     defs += b.getslice(r);
 
-  Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs));
+  Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs), false);
   util_free(defs);
   return result;
 }
@@ -1660,7 +1654,7 @@ static Array<String> get_filesearch_suggestions() {
   filenames.reserve(G.files.size);
   for (Path p : G.files)
     filenames += p.name();
-  Array<String> match = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(filenames));
+  Array<String> match = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(filenames), false);
   util_free(filenames);
   return match;
 }
@@ -1731,7 +1725,7 @@ static void mode_insert() {
 }
 
 static Array<String> get_menu_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW_FROM_ARRAY(menu_options, opt.name));
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW_FROM_ARRAY(menu_options, opt.name), false);
 }
 
 static void mode_menu() {
@@ -1817,7 +1811,7 @@ static void render_dropdown(Pane *pane) {
     Slice identifier = b.data->slice(identifier_start, b.cursors[0].x - identifier_start.x);
     StackArray<FuzzyMatch, 10> best_matches;
     View<Slice> input = VIEW(b.data->identifiers, slice);
-    best_matches.size = fuzzy_match(identifier, input, view(best_matches));
+    best_matches.size = fuzzy_match(identifier, input, view(best_matches), true);
 
     G.dropdown_pane.buffer.empty();
     for (int i = 0; i < best_matches.size; ++i)
@@ -2688,31 +2682,54 @@ static void handle_input(Key key) {
           // find beginning
           Pos a = buffer.cursors[i].pos;
           depth = 0;
-          while (!buffer.advance_r(a)) {
-            c = buffer.getchar(a);
-            if (c == ')' || c == ']' || c == '}')
-              --depth;
-            else if (c == '(' || c == '[' || c == '{')
-              ++depth;
-            else if (c == ',')
-              break;
-            if (depth > 0)
-              break;
+          c = buffer.getchar(a);
+          bool left_was_brace = false;
+          if (c == '(' || c == '[' || c == '{') {
+            buffer.advance(a);
+            left_was_brace = true;
           }
-          buffer.advance(a);
+          else if (c == ',') {}
+          else {
+            while(!buffer.advance_r(a)) {
+              c = buffer.getchar(a);
+              if (c == ')' || c == ']' || c == '}')
+                --depth;
+              else if (c == '(' || c == '[' || c == '{')
+                ++depth;
+              else if (c == ',' && depth == 0)
+                break;
+              if (depth > 0) {
+                left_was_brace = true;
+                buffer.advance(a);
+                break;
+              }
+            }
+          }
+
           // find end
           Pos b = buffer.cursors[i].pos;
           depth = 0;
-          while (!buffer.advance(b)) {
-            c = buffer.getchar(b);
-            if (c == ')' || c == ']' || c == '}')
-              --depth;
-            else if (c == '(' || c == '[' || c == '{')
-              ++depth;
-            else if (c == ',')
-              break;
-            if (depth < 0)
-              break;
+          c = buffer.getchar(b);
+          if (c != ')' && c != ']' && c != '}') {
+            while (!buffer.advance(b)) {
+              c = buffer.getchar(b);
+              if (c == ')' || c == ']' || c == '}')
+                --depth;
+              else if (c == '(' || c == '[' || c == '{')
+                ++depth;
+              else if (c == ',' && depth == 0) {
+                // if left was brace, consume comma
+                if (left_was_brace) {
+                  buffer.advance(b);
+                  while (c = buffer.getchar(b), c.isspace())
+                    if (buffer.advance(b))
+                      break;
+                }
+                break;
+              }
+              if (depth < 0)
+                break;
+            }
           }
 
           buffer.remove_range(a, b, i);

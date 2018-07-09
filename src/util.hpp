@@ -453,6 +453,23 @@ struct Utf8char {
   static Utf8char create(char c) {return Utf8char{(u32)c};}
 };
 
+bool operator==(Utf8char uc, char c) {
+  return !(uc.code & 0xFF00) && (uc.code & 0xFF) == (u32)c;
+}
+
+bool operator==(char c, Utf8char uc) {
+  return uc == c;
+}
+
+bool operator!=(Utf8char uc, char c) {
+  return !(uc == c);
+}
+
+bool operator!=(char c, Utf8char uc) {
+  return !(uc == c);
+}
+
+
 static const void *memmem(const void *needle, int needle_len, const void *haystack, int haystack_len) {
   char *h, *hend;
   if (!needle_len || haystack_len < needle_len)
