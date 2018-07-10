@@ -409,6 +409,7 @@ struct BufferData {
   Array<String> identifiers;
 
   // methods
+  void init();
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
@@ -670,6 +671,12 @@ static void util_free(BufferView &b) {
   b.data = 0;
 }
 
+struct Pane;
+struct SubPane {
+  Pos anchor_pos;
+  Pane *pane;
+};
+
 struct Pane {
   PaneType type;
   BufferView buffer;
@@ -680,6 +687,9 @@ struct Pane {
   const Color *inactive_highlight_background_color;
   const Color *text_color;
   int _gutter_width;
+
+  Array<SubPane> subpanes;
+  Pane *parent;
 
   // visual settings
   int margin;
@@ -706,6 +716,7 @@ struct Pane {
   };
 
   // methods
+  void add_subpane(BufferData *buffer, Pos p);
   void render();
   void update_suggestions();
   void clear_suggestions();
@@ -756,13 +767,13 @@ struct Pane {
     p.text_color = text_color;
     p.active_highlight_background_color = active_highlight_background_color;
     p.inactive_highlight_background_color = inactive_highlight_background_color;
-    p.buffer.empty();
   }
 };
 
 void util_free(Pane &p) {
   util_free(p.buffer);
   util_free(p.buffer.jumplist);
+  util_free(p.subpanes);
 }
 
 void util_free(Pane *&p) {
@@ -771,6 +782,12 @@ void util_free(Pane *&p) {
   util_free(*p);
   delete p;
   p = 0;
+}
+
+void util_free(SubPane &p) {
+  util_free(p.pane);
+  p.anchor_pos = {};
+  p.pane = 0;
 }
 
 struct PoppedColor {
@@ -838,7 +855,6 @@ struct State {
   Color default_background_color;
   Color default_text_color;
   Color default_gutter_text_color;
-  Color default_gutter_background_color;
   Color default_highlight_background_color;
   Color number_color;
   Color comment_color;
@@ -1452,22 +1468,13 @@ static void menu_option_close() {
     return;
 
   status_message_set("Closed {}", &b->filename.slice);
-  // remove from buffer list
-  for (int i = 0; i < G.buffers.size; ++i) {
-    if (G.buffers[i] == b) {
-      util_free(G.buffers[i]);
-      G.buffers[i] = G.buffers[--G.buffers.size];
-      break;
-    }
-  }
-  puts("a");
+  G.buffers_to_remove += b;
 }
 
 static void menu_option_closeall() {
   status_message_set("Closed all buffers");
   for (BufferData *b : G.buffers)
-    util_free(b);
-  G.buffers.size = 0;
+    G.buffers_to_remove += b;
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1558,7 +1565,6 @@ static Array<String> get_cwd_suggestions() {
   // get folder
 
   // first try relative path, and then try absolute
-  // TODO: Fix .push and Path::create so that they consolidate '..'
   Path rel = G.current_working_directory.copy(); rel.push(G.menu_buffer.lines[0].slice);
   Path rel_dir = rel.copy();
   Path abs = Path::create(G.menu_buffer.lines[0].slice);
@@ -2173,7 +2179,6 @@ static void state_init() {
   G.default_text_color = COLOR_WHITE;
   G.default_background_color = {33, 33, 33, 255};
   G.default_gutter_text_color = {127, 127, 127, 255};
-  G.default_gutter_background_color = G.default_background_color;
   G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
   G.operator_color =                        COLOR_WHITE; // COLOR_RED;
@@ -2227,6 +2232,7 @@ static void state_init() {
 
   // @panes
 
+  G.null_buffer.init();
   Pane *main_pane = new Pane{};
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
 
@@ -2477,9 +2483,10 @@ static void handle_input(Key key) {
         if (!def)
           break;
 
-        buffer.jumplist_push();
-        buffer.move_to(def->a);
-        buffer.jumplist_push();
+        G.editing_pane->add_subpane(buffer.data, def->a);
+        // buffer.jumplist_push();
+        // buffer.move_to(def->a);
+        // buffer.jumplist_push();
         break;}
     }
     G.goto_line_number = 0;
@@ -2982,6 +2989,16 @@ static void handle_input(Key key) {
       break;}
 
     case CONTROL('l'): {
+      if (G.editing_pane->subpanes.size > 0) {
+        G.editing_pane = G.editing_pane->subpanes[0].pane;
+        G.selected_pane = G.editing_pane;
+        break;
+      }
+
+      // fallthrough
+      }
+
+    case CONTROL('L'): {
       int i;
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
@@ -2992,6 +3009,16 @@ static void handle_input(Key key) {
       break;}
 
     case CONTROL('h'): {
+      if (G.editing_pane->parent) {
+        G.editing_pane = G.editing_pane->parent;
+        G.selected_pane = G.editing_pane;
+        break;
+      }
+
+      // fallthrough
+      }
+
+    case CONTROL('H'): {
       int i;
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
@@ -3175,7 +3202,7 @@ static void handle_rendering(float dt) {
     p->bounds = {x, 0, w, h};
     x += w;
   }
-  G.bottom_pane->bounds = {0, G.editing_pane->bounds.y + G.editing_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
+  G.bottom_pane->bounds = {0, G.win_height - G.bottom_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
   for (Pane *p : G.editing_panes)
     p->render();
@@ -3347,7 +3374,7 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
     last_line:;
     assert(feof(f));
   } else {
-    b.lines.push();
+    b.lines += {};
   }
 
   // token type
@@ -4327,6 +4354,11 @@ void BufferView::goto_beginline() {
   }
 }
 
+void BufferData::init() {
+  *this = {};
+  lines += {};
+}
+
 void BufferData::empty(Array<Cursor> &cursors) {
   if (cursors.size == 1 && lines.size == 1 && lines[0].length == 0)
     return;
@@ -4938,6 +4970,14 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
   }
 }
 
+void Pane::add_subpane(BufferData *b, Pos pos) {
+  Pane *p = new Pane{};
+  Pane::init_edit(*p, b, (Color*)&COLOR_GREY, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+  p->buffer.move_to(pos);
+  p->parent = this;
+  subpanes += {buffer.cursors[0].pos, p};
+}
+
 void Pane::render() {
   switch (type) {
     case PANETYPE_NULL:
@@ -5052,9 +5092,9 @@ void Pane::render_edit() {
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
       if (line < d.lines.size)
-        gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
+        gutter.render_strf({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, " %i", line + 1);
       else
-        gutter.render_str({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, Slice::create(" ~"));
+        gutter.render_str({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, Slice::create(" ~"));
     gutter.render(this->bounds.p);
     util_free(gutter);
   }
@@ -5112,6 +5152,41 @@ void Pane::render_edit() {
 
   if (G.editing_pane == this)
     render_dropdown(this);
+
+  // reflow and render subpanes
+  {
+    float w,h,x,y;
+    int num_panes_in_sight = 0;
+    int margin;
+    int total_margin;
+    #if 0
+    for (SubPane p : subpanes)
+      if (p.anchor_pos.y >= buf_offset.y && p.anchor_pos.y <= buf_y1)
+        ++num_panes_in_sight;
+    #else
+    num_panes_in_sight = subpanes.size;
+    #endif
+    if (!num_panes_in_sight)
+      goto subpanes_done;
+
+    margin = G.font_height;
+    total_margin = margin*(num_panes_in_sight+1);
+    // margin = total_margin / (num_panes_in_sight+1);
+
+    w = bounds.w/3;
+    h = (bounds.h - total_margin)/num_panes_in_sight;
+    x = bounds.x + bounds.w - w;
+    y = margin;
+    for (SubPane p : subpanes) {
+      // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
+        // continue;
+      p.pane->bounds = {(int)x, (int)y, (int)w, (int)h};
+      p.pane->render();
+      y += h + margin;
+    }
+
+    subpanes_done:;
+  }
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -5324,6 +5399,7 @@ STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 #endif
 
 static void handle_pending_removes() {
+  // remove panes
   for (Pane *pp : G.panes_to_remove) {
     Pane **p = G.editing_panes.find(pp);
     if (!p)
@@ -5336,6 +5412,18 @@ static void handle_pending_removes() {
       G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
   }
   G.panes_to_remove.size = 0;
+
+  // remove buffers
+  for (BufferData *b : G.buffers_to_remove) {
+    for (int i = 0; i < G.buffers.size; ++i) {
+      if (G.buffers[i] == b) {
+        util_free(G.buffers[i]);
+        G.buffers[i] = G.buffers[--G.buffers.size];
+        break;
+      }
+    }
+  }
+  G.buffers_to_remove.size = 0;
 }
 
 #ifdef OS_WINDOWS
