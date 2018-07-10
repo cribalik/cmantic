@@ -260,6 +260,7 @@ struct TokenInfo {
     };
     Range r;
   };
+  Slice str;
 };
 
 void util_free(TokenInfo) {}
@@ -767,6 +768,7 @@ void util_free(Pane &p) {
 void util_free(Pane *&p) {
   if (!p)
     return;
+  util_free(*p);
   delete p;
   p = 0;
 }
@@ -874,6 +876,10 @@ struct State {
   String search_term;
 
   Array<BufferData*> buffers;
+
+  // instead of removing stuff on the spot, which can cause issues, we push them to these lists and delete them at the end of the frame
+  Array<BufferData*> buffers_to_remove;
+  Array<Pane*> panes_to_remove;
 
   Mode mode;
 
@@ -1257,6 +1263,8 @@ static void tokenize(BufferData &b) {
     token_done:;
     if (t.token != TOKEN_NULL) {
       t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = b.getslice(t.r);
       tokens += t;
     }
     #undef NEXT
@@ -1273,13 +1281,12 @@ static void tokenize(BufferData &b) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER: {
-        Slice s = b.getslice(ti.r);
-        if (i+1 < tokens.size && s == "#define") {
+        if (i+1 < tokens.size && ti.str == "#define") {
           definitions += tokens[i+1].r;
           break;
         }
 
-        if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class") &&
+        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
             tokens[i+2].token == '{') {
           definitions += tokens[i+1].r;
@@ -1290,17 +1297,14 @@ static void tokenize(BufferData &b) {
         {
           // is it a keyword, then ignore (things like else if (..) is not a definition)
           for (int j = 0; j < (int)ARRAY_LEN(keywords); ++j)
-            if (s == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
+            if (ti.str == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
               goto no_definition;
 
           {
             int j = i;
-            Slice op;
-
             // skip pointer and references
             for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
-              op = b.getslice(tokens[j].r);
-              if (op == "*" || op == "&")
+              if (tokens[j].str == "*" || tokens[j].str == "&")
                 continue;
               goto no_definition;
             }
@@ -1313,7 +1317,7 @@ static void tokenize(BufferData &b) {
             else if (j+3 < tokens.size &&
                      tokens[j].token == TOKEN_IDENTIFIER &&
                      tokens[j+1].token == TOKEN_OPERATOR &&
-                     b.getslice(tokens[j+1].r) == "::" &&
+                     tokens[j+1].str == "::" &&
                      tokens[j+2].token == TOKEN_IDENTIFIER &&
                      tokens[j+3].token == '(') {
               definitions += {tokens[j].a, tokens[j+2].b};
@@ -2093,7 +2097,7 @@ static bool movement_default(BufferView &buffer, int key) {
         break;
       G.search_term_background_color.reset();
       util_free(G.search_term);
-      G.search_term = String::create(buffer.data->getslice(t->r));
+      G.search_term = String::create(t->str);
       buffer.find_and_move(G.search_term.slice, false);
       break;}
 
@@ -2105,7 +2109,7 @@ static bool movement_default(BufferView &buffer, int key) {
         break;
       G.search_term_background_color.reset();
       util_free(G.search_term);
-      G.search_term = String::create(buffer.data->getslice(t->r));
+      G.search_term = String::create(t->str);
       buffer.find_and_move_r(G.search_term.slice, false);
       break;}
 
@@ -2469,7 +2473,7 @@ static void handle_input(Key key) {
         if (t->token != TOKEN_IDENTIFIER)
           break;
 
-        Range *def = buffer.data->getdefinition(buffer.data->getslice(t->r));
+        Range *def = buffer.data->getdefinition(t->str);
         if (!def)
           break;
 
@@ -2973,10 +2977,7 @@ static void handle_input(Key key) {
 
       Pane **p = G.editing_panes.find(G.editing_pane);
       if (p) {
-        int i = p - G.editing_panes.items;
-        G.editing_panes.remove_slow(i);
-        G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-        G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+        G.panes_to_remove += *p;
       }
       break;}
 
@@ -4909,12 +4910,11 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
 
         case TOKEN_IDENTIFIER: {
           // check for keywords
-          Slice identifier = b.data->getslice(t->r);
-          if (identifier.length > 0 && identifier[0] == '#')
+          if (t->str.length > 0 && t->str[0] == '#')
             render_highlight(keyword_colors[KEYWORD_MACRO]);
           else {
             for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-              if (identifier == keywords[i].name) {
+              if (t->str == keywords[i].name) {
                 render_highlight(keyword_colors[keywords[i].type]);
                 break;
               }
@@ -5323,6 +5323,21 @@ static void test() {
 STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 #endif
 
+static void handle_pending_removes() {
+  for (Pane *pp : G.panes_to_remove) {
+    Pane **p = G.editing_panes.find(pp);
+    if (!p)
+      continue;
+    int i = p - G.editing_panes.items;
+    G.editing_panes.remove_slow(i);
+    if (G.editing_pane == pp)
+      G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+    if (G.selected_pane == pp)
+      G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+  }
+  G.panes_to_remove.size = 0;
+}
+
 #ifdef OS_WINDOWS
 int wmain(int, const wchar_t *[], wchar_t *[])
 #else
@@ -5371,6 +5386,8 @@ int main(int, const char *[])
     G.activation_meter = at_least(G.activation_meter - dt / 5000.0f, 0.0f);
 
     SDL_GL_SwapWindow(G.window);
+
+    handle_pending_removes();
 
     G.flags.cursor_dirty = false;
 
