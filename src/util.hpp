@@ -279,6 +279,10 @@ union Array {
     memmove(items+size-n, items, n*sizeof(T));
   }
 
+  void remove(T *t) {
+    remove((int)(t - items));
+  }
+
   void remove(int i) {
     items[i] = items[size-1];
     --size;

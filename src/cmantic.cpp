@@ -2978,15 +2978,9 @@ static void handle_input(Key key) {
       G.editing_panes += p;
       break;}
 
-    case CONTROL('q'): {
-      if (G.editing_panes.size == 1)
-        break;
-
-      Pane **p = G.editing_panes.find(G.editing_pane);
-      if (p) {
-        G.panes_to_remove += *p;
-      }
-      break;}
+    case CONTROL('q'):
+      G.panes_to_remove += G.editing_pane;
+      break;
 
     case CONTROL('l'): {
       if (G.editing_pane->subpanes.size > 0) {
@@ -5400,16 +5394,32 @@ STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 
 static void handle_pending_removes() {
   // remove panes
-  for (Pane *pp : G.panes_to_remove) {
-    Pane **p = G.editing_panes.find(pp);
-    if (!p)
-      continue;
-    int i = p - G.editing_panes.items;
-    G.editing_panes.remove_slow(i);
-    if (G.editing_pane == pp)
-      G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-    if (G.selected_pane == pp)
-      G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+  for (Pane *p : G.panes_to_remove) {
+    if (p->parent) {
+      for (int i = 0; i < p->parent->subpanes.size; ++i) {
+        if (p->parent->subpanes[i].pane == p) {
+          p->parent->subpanes.remove(i);
+          break;
+        }
+      }
+      if (G.editing_pane == p)
+        G.editing_pane = p->parent;
+      if (G.selected_pane == p)
+        G.selected_pane = p->parent;
+    }
+    else {
+      if (G.editing_panes.size == 1)
+        continue;
+      Pane **e = G.editing_panes.find(p);
+      if (!e)
+        continue;
+      int i = e - G.editing_panes.items;
+      G.editing_panes.remove_slow(i);
+      if (G.editing_pane == p)
+        G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+      if (G.selected_pane == p)
+        G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+    }
   }
   G.panes_to_remove.size = 0;
 
