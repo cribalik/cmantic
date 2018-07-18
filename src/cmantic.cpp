@@ -770,6 +770,13 @@ struct Pane {
   }
 };
 
+void util_free(Pane *&p);
+void util_free(SubPane &p) {
+  util_free(p.pane);
+  p.anchor_pos = {};
+  p.pane = 0;
+}
+
 void util_free(Pane &p) {
   util_free(p.buffer);
   util_free(p.buffer.jumplist);
@@ -782,12 +789,6 @@ void util_free(Pane *&p) {
   util_free(*p);
   delete p;
   p = 0;
-}
-
-void util_free(SubPane &p) {
-  util_free(p.pane);
-  p.anchor_pos = {};
-  p.pane = 0;
 }
 
 struct PoppedColor {
@@ -2002,7 +2003,7 @@ static bool movement_default(BufferView &buffer, int key) {
         buffer.jumplist_push();
       break;
 
-    case CONTROL('j'):
+    case 'J':
       for (int i = 0; i < buffer.cursors.size; ++i) {
         int prev_indent = buffer.getindent(buffer.cursors[i].y);
         status_message_set("jumping to next line of indent %i", prev_indent);
@@ -2020,7 +2021,7 @@ static bool movement_default(BufferView &buffer, int key) {
       }
       break;
 
-    case CONTROL('k'):
+    case 'K':
       for (int i = 0; i < buffer.cursors.size; ++i) {
         int prev_indent = buffer.getindent(buffer.cursors[i].y);
         status_message_set("jumping to next line of indent %i", prev_indent);
@@ -2989,8 +2990,7 @@ static void handle_input(Key key) {
         break;
       }
 
-      // fallthrough
-      }
+      /*fallthrough*/}
 
     case CONTROL('L'): {
       int i;
@@ -3002,6 +3002,38 @@ static void handle_input(Key key) {
       G.selected_pane = G.editing_pane;
       break;}
 
+    case CONTROL('j'): {
+      // Find sibling below
+      Pane *p = G.editing_pane;
+      while (p->parent) {
+        for (int i = 0; i < p->parent->subpanes.size-1; ++i) {
+          if (p->parent->subpanes[i].pane == p) {
+            G.editing_pane = p->parent->subpanes[i+1].pane;
+            G.selected_pane = p->parent->subpanes[i+1].pane;
+            goto sibling_below_done;
+          }
+        }
+        p = p->parent;
+      }
+      sibling_below_done:
+      break;}
+
+    case CONTROL('k'): {
+      // Find sibling above
+      Pane *p = G.editing_pane;
+      while (p->parent) {
+        for (int i = 1; i < p->parent->subpanes.size; ++i) {
+          if (p->parent->subpanes[i].pane == p) {
+            G.editing_pane = p->parent->subpanes[i-1].pane;
+            G.selected_pane = p->parent->subpanes[i-1].pane;
+            goto sibling_above_done;
+          }
+        }
+        p = p->parent;
+      }
+      sibling_above_done:
+      break;}
+
     case CONTROL('h'): {
       if (G.editing_pane->parent) {
         G.editing_pane = G.editing_pane->parent;
@@ -3009,8 +3041,7 @@ static void handle_input(Key key) {
         break;
       }
 
-      // fallthrough
-      }
+      /*fallthrough*/}
 
     case CONTROL('H'): {
       int i;
@@ -3133,14 +3164,6 @@ static void handle_input(Key key) {
       for (Cursor c : G.editing_pane->buffer.cursors)
         G.visual_start.cursors += c.pos;
       G.visual_start.buffer = G.editing_pane->buffer.data;
-      break;
-
-    case 'J':
-      buffer.move_y(G.editing_pane->numchars_y()/2);
-      break;
-
-    case 'K':
-      buffer.move_y(-G.editing_pane->numchars_y()/2);
       break;
 
     case CONTROL('z'):
@@ -5396,16 +5419,18 @@ static void handle_pending_removes() {
   // remove panes
   for (Pane *p : G.panes_to_remove) {
     if (p->parent) {
-      for (int i = 0; i < p->parent->subpanes.size; ++i) {
-        if (p->parent->subpanes[i].pane == p) {
-          p->parent->subpanes.remove(i);
+      Pane *parent = p->parent;
+      for (int i = 0; i < parent->subpanes.size; ++i) {
+        if (parent->subpanes[i].pane == p) {
+          parent->subpanes.remove_slow(i);
+          Pane *next = parent->subpanes.size == 0 ? parent : parent->subpanes[clamp(i, 0, parent->subpanes.size-1)].pane;
+          if (G.editing_pane == p)
+            G.editing_pane = next;
+          if (G.selected_pane == p)
+            G.selected_pane = next;
           break;
         }
       }
-      if (G.editing_pane == p)
-        G.editing_pane = p->parent;
-      if (G.selected_pane == p)
-        G.selected_pane = p->parent;
     }
     else {
       if (G.editing_panes.size == 1)
