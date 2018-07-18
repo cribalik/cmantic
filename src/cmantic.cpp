@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
  * make 'dp' use tokens instead of chars
  * dropdown_autocomplete should not delete characters (it ruins paste)
@@ -10,7 +11,6 @@
  * Add description and better spacing to menus
  * recursive panes
  * Build system
- * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * parse BOM
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
