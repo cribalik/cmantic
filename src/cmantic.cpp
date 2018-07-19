@@ -5202,8 +5202,8 @@ void Pane::render_edit() {
 
     w = total_width - bounds.w;
     h = (bounds.h - total_margin)/num_panes_in_sight;
-    x = bounds.w;
-    y = margin;
+    x = bounds.x + bounds.w;
+    y = bounds.y + margin;
     for (SubPane p : subpanes) {
       // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
         // continue;
