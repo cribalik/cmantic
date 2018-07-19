@@ -288,17 +288,23 @@ union Array {
     --size;
   }
 
-  void remove_slown(int i, int n) {
+  void remove_slow(int i, int n) {
     if (!n)
       return;
-    for (int j = 0; j < n; ++j)
-      util_free(items[i+j]);
+    memmove(items+i, items+i+n, (size-i-n)*sizeof(T));
+    size -= n;
+  }
+
+  void remove_slow_and_free(int i, int n) {
+    if (!n)
+      return;
+    for (int j = i; j < i+n; ++j)
+      util_free(items[j]);
     memmove(items+i, items+i+n, (size-i-n)*sizeof(T));
     size -= n;
   }
 
   void remove_slow(int i) {
-    util_free(items[i]);
     memmove(items+i, items+i+1, (size-i-1)*sizeof(T));
     --size;
   }

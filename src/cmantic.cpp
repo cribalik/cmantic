@@ -735,6 +735,7 @@ struct Pane {
   void render_syntax_highlight(Canvas &canvas, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
+  int calc_max_subpane_depth() const;
 
   Slice* menu_get_selection() {
     if (!menu.suggestions.size)
@@ -1819,7 +1820,7 @@ static void render_dropdown(Pane *pane) {
 
   // since fuzzy matching is expensive, we only update we moved since last time
   if (G.flags.cursor_dirty) {
-    Slice identifier = b.data->slice(identifier_start, b.cursors[0].x - identifier_start.x);
+    Slice identifier = b.data->gettoken(identifier_start)->str;
     StackArray<FuzzyMatch, 10> best_matches;
     View<Slice> input = VIEW(b.data->identifiers, slice);
     best_matches.size = fuzzy_match(identifier, input, view(best_matches), true);
@@ -2547,9 +2548,10 @@ static void handle_input(Key key) {
         break;
       }
 
-      buffer.jumplist_push();
-      buffer.move_to(def->a);
-      buffer.jumplist_push();
+      G.editing_pane->add_subpane(buffer.data, def->a);
+      // buffer.jumplist_push();
+      // buffer.move_to(def->a);
+      // buffer.jumplist_push();
       mode_normal(true);
       break;
     }
@@ -2683,6 +2685,7 @@ static void handle_input(Key key) {
             buffer.advance(i);
           buffer.remove_range(prev[i].pos, buffer.cursors[i].pos, i);
         }
+        util_free(prev);
         buffer.action_end();
         break;}
 
@@ -3938,7 +3941,7 @@ void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_i
     if (b.y < lines.size)
       lines[a.y] += lines[b.y](b.x, -1);
     // delete lines a+1 to and including b
-    lines.remove_slown(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
+    lines.remove_slow_and_free(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
 
   action_end(cursors);
@@ -5097,9 +5100,16 @@ void Pane::render_menu() {
 void Pane::render_edit() {
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
-  // calc bounds 
+
+  // recalculate the bounds of this pane depending on the number of subpanes
+  int subpane_depth = calc_max_subpane_depth();
+  int total_width = bounds.w;
+  bounds.w = total_width/(subpane_depth+1);
+
+  // calc buffer bound
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
   int buf_y1 = at_most(buf_offset.y + this->numchars_y(), d.lines.size);
+
 
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
@@ -5186,13 +5196,13 @@ void Pane::render_edit() {
     if (!num_panes_in_sight)
       goto subpanes_done;
 
-    margin = G.font_height;
+    margin = 0; // G.font_height;
     total_margin = margin*(num_panes_in_sight+1);
     // margin = total_margin / (num_panes_in_sight+1);
 
-    w = bounds.w/3;
+    w = total_width - bounds.w;
     h = (bounds.h - total_margin)/num_panes_in_sight;
-    x = bounds.x + bounds.w - w;
+    x = bounds.w;
     y = margin;
     for (SubPane p : subpanes) {
       // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
@@ -5204,6 +5214,8 @@ void Pane::render_edit() {
 
     subpanes_done:;
   }
+
+  bounds.w = total_width;
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -5232,6 +5244,16 @@ int Pane::calc_left_visible_column() const {
   x -= this->numchars_x()*6/7;
   return at_least(x, 0);
 }
+
+int Pane::calc_max_subpane_depth() const {
+  int result = 0;
+  for (SubPane p : subpanes) {
+    int d = p.pane->calc_max_subpane_depth()+1;
+    result = max(result, d);
+  }
+  return result;
+}
+
 
 Pos Pane::slot2pixel(Pos p) const {
   return {this->bounds.x + p.x*G.font_width, this->bounds.y + p.y*G.line_height};
@@ -5418,6 +5440,8 @@ STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 static void handle_pending_removes() {
   // remove panes
   for (Pane *p : G.panes_to_remove) {
+    bool remove_pane = false;
+    // The pane should either be a subpane or a dynamically allocated pane (i.e. exists in editing_pane)
     if (p->parent) {
       Pane *parent = p->parent;
       for (int i = 0; i < parent->subpanes.size; ++i) {
@@ -5428,6 +5452,7 @@ static void handle_pending_removes() {
             G.editing_pane = next;
           if (G.selected_pane == p)
             G.selected_pane = next;
+          remove_pane = true;
           break;
         }
       }
@@ -5444,7 +5469,10 @@ static void handle_pending_removes() {
         G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
       if (G.selected_pane == p)
         G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+      remove_pane = true;
     }
+    if (remove_pane)
+      util_free(p);
   }
   G.panes_to_remove.size = 0;
 
