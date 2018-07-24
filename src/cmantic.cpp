@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
  * make 'dp' use tokens instead of chars
  * dropdown_autocomplete should not delete characters (it ruins paste)
@@ -10,7 +11,6 @@
  * Add description and better spacing to menus
  * recursive panes
  * Build system
- * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * parse BOM
  * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
@@ -232,6 +232,7 @@ struct TokenInfo {
     };
     Range r;
   };
+  Slice str;
 };
 
 void util_free(TokenInfo) {}
@@ -380,6 +381,7 @@ struct BufferData {
   Array<String> identifiers;
 
   // methods
+  void init();
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
@@ -641,6 +643,12 @@ static void util_free(BufferView &b) {
   b.data = 0;
 }
 
+struct Pane;
+struct SubPane {
+  Pos anchor_pos;
+  Pane *pane;
+};
+
 struct Pane {
   PaneType type;
   BufferView buffer;
@@ -651,6 +659,9 @@ struct Pane {
   const Color *inactive_highlight_background_color;
   const Color *text_color;
   int _gutter_width;
+
+  Array<SubPane> subpanes;
+  Pane *parent;
 
   // visual settings
   int margin;
@@ -677,6 +688,7 @@ struct Pane {
   };
 
   // methods
+  void add_subpane(BufferData *buffer, Pos p);
   void render();
   void update_suggestions();
   void clear_suggestions();
@@ -695,6 +707,7 @@ struct Pane {
   void render_syntax_highlight(Canvas &canvas, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
+  int calc_max_subpane_depth() const;
 
   Slice* menu_get_selection() {
     if (!menu.suggestions.size)
@@ -727,18 +740,26 @@ struct Pane {
     p.text_color = text_color;
     p.active_highlight_background_color = active_highlight_background_color;
     p.inactive_highlight_background_color = inactive_highlight_background_color;
-    p.buffer.empty();
   }
 };
+
+void util_free(Pane *&p);
+void util_free(SubPane &p) {
+  util_free(p.pane);
+  p.anchor_pos = {};
+  p.pane = 0;
+}
 
 void util_free(Pane &p) {
   util_free(p.buffer);
   util_free(p.buffer.jumplist);
+  util_free(p.subpanes);
 }
 
 void util_free(Pane *&p) {
   if (!p)
     return;
+  util_free(*p);
   delete p;
   p = 0;
 }
@@ -808,7 +829,6 @@ struct State {
   Color default_background_color;
   Color default_text_color;
   Color default_gutter_text_color;
-  Color default_gutter_background_color;
   Color default_highlight_background_color;
   Color number_color;
   Color comment_color;
@@ -846,6 +866,10 @@ struct State {
   String search_term;
 
   Array<BufferData*> buffers;
+
+  // instead of removing stuff on the spot, which can cause issues, we push them to these lists and delete them at the end of the frame
+  Array<BufferData*> buffers_to_remove;
+  Array<Pane*> panes_to_remove;
 
   Mode mode;
 
@@ -1229,6 +1253,8 @@ static void tokenize(BufferData &b) {
     token_done:;
     if (t.token != TOKEN_NULL) {
       t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = b.getslice(t.r);
       tokens += t;
     }
     #undef NEXT
@@ -1245,13 +1271,12 @@ static void tokenize(BufferData &b) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER: {
-        Slice s = b.getslice(ti.r);
-        if (i+1 < tokens.size && s == "#define") {
+        if (i+1 < tokens.size && ti.str == "#define") {
           definitions += tokens[i+1].r;
           break;
         }
 
-        if (i+2 < tokens.size && (s == "struct" || s == "enum" || s == "class") &&
+        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
             tokens[i+2].token == '{') {
           definitions += tokens[i+1].r;
@@ -1262,17 +1287,14 @@ static void tokenize(BufferData &b) {
         {
           // is it a keyword, then ignore (things like else if (..) is not a definition)
           for (int j = 0; j < (int)ARRAY_LEN(keywords); ++j)
-            if (s == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
+            if (ti.str == keywords[j].name && keywords[j].type != KEYWORD_TYPE)
               goto no_definition;
 
           {
             int j = i;
-            Slice op;
-
             // skip pointer and references
             for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
-              op = b.getslice(tokens[j].r);
-              if (op == "*" || op == "&")
+              if (tokens[j].str == "*" || tokens[j].str == "&")
                 continue;
               goto no_definition;
             }
@@ -1285,7 +1307,7 @@ static void tokenize(BufferData &b) {
             else if (j+3 < tokens.size &&
                      tokens[j].token == TOKEN_IDENTIFIER &&
                      tokens[j+1].token == TOKEN_OPERATOR &&
-                     b.getslice(tokens[j+1].r) == "::" &&
+                     tokens[j+1].str == "::" &&
                      tokens[j+2].token == TOKEN_IDENTIFIER &&
                      tokens[j+3].token == '(') {
               definitions += {tokens[j].a, tokens[j+2].b};
@@ -1420,22 +1442,13 @@ static void menu_option_close() {
     return;
 
   status_message_set("Closed {}", &b->filename.slice);
-  // remove from buffer list
-  for (int i = 0; i < G.buffers.size; ++i) {
-    if (G.buffers[i] == b) {
-      util_free(G.buffers[i]);
-      G.buffers[i] = G.buffers[--G.buffers.size];
-      break;
-    }
-  }
-  puts("a");
+  G.buffers_to_remove += b;
 }
 
 static void menu_option_closeall() {
   status_message_set("Closed all buffers");
   for (BufferData *b : G.buffers)
-    util_free(b);
-  G.buffers.size = 0;
+    G.buffers_to_remove += b;
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1526,7 +1539,6 @@ static Array<String> get_cwd_suggestions() {
   // get folder
 
   // first try relative path, and then try absolute
-  // TODO: Fix .push and Path::create so that they consolidate '..'
   Path rel = G.current_working_directory.copy(); rel.push(G.menu_buffer.lines[0].slice);
   Path rel_dir = rel.copy();
   Path abs = Path::create(G.menu_buffer.lines[0].slice);
@@ -1780,7 +1792,7 @@ static void render_dropdown(Pane *pane) {
 
   // since fuzzy matching is expensive, we only update we moved since last time
   if (G.flags.cursor_dirty) {
-    Slice identifier = b.data->slice(identifier_start, b.cursors[0].x - identifier_start.x);
+    Slice identifier = b.data->gettoken(identifier_start)->str;
     StackArray<FuzzyMatch, 10> best_matches;
     View<Slice> input = VIEW(b.data->identifiers, slice);
     best_matches.size = fuzzy_match(identifier, input, view(best_matches), true);
@@ -1964,7 +1976,7 @@ static bool movement_default(BufferView &buffer, int key) {
         buffer.jumplist_push();
       break;
 
-    case CONTROL('j'):
+    case 'J':
       for (int i = 0; i < buffer.cursors.size; ++i) {
         int prev_indent = buffer.getindent(buffer.cursors[i].y);
         status_message_set("jumping to next line of indent %i", prev_indent);
@@ -1982,7 +1994,7 @@ static bool movement_default(BufferView &buffer, int key) {
       }
       break;
 
-    case CONTROL('k'):
+    case 'K':
       for (int i = 0; i < buffer.cursors.size; ++i) {
         int prev_indent = buffer.getindent(buffer.cursors[i].y);
         status_message_set("jumping to next line of indent %i", prev_indent);
@@ -2065,7 +2077,7 @@ static bool movement_default(BufferView &buffer, int key) {
         break;
       G.search_term_background_color.reset();
       util_free(G.search_term);
-      G.search_term = String::create(buffer.data->getslice(t->r));
+      G.search_term = String::create(t->str);
       buffer.find_and_move(G.search_term.slice, false);
       break;}
 
@@ -2077,7 +2089,7 @@ static bool movement_default(BufferView &buffer, int key) {
         break;
       G.search_term_background_color.reset();
       util_free(G.search_term);
-      G.search_term = String::create(buffer.data->getslice(t->r));
+      G.search_term = String::create(t->str);
       buffer.find_and_move_r(G.search_term.slice, false);
       break;}
 
@@ -2141,7 +2153,6 @@ static void state_init() {
   G.default_text_color = COLOR_WHITE;
   G.default_background_color = {33, 33, 33, 255};
   G.default_gutter_text_color = {127, 127, 127, 255};
-  G.default_gutter_background_color = G.default_background_color;
   G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
   G.operator_color =                        COLOR_WHITE; // COLOR_RED;
@@ -2195,6 +2206,7 @@ static void state_init() {
 
   // @panes
 
+  G.null_buffer.init();
   Pane *main_pane = new Pane{};
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
 
@@ -2441,13 +2453,14 @@ static void handle_input(Key key) {
         if (t->token != TOKEN_IDENTIFIER)
           break;
 
-        Range *def = buffer.data->getdefinition(buffer.data->getslice(t->r));
+        Range *def = buffer.data->getdefinition(t->str);
         if (!def)
           break;
 
-        buffer.jumplist_push();
-        buffer.move_to(def->a);
-        buffer.jumplist_push();
+        G.editing_pane->add_subpane(buffer.data, def->a);
+        // buffer.jumplist_push();
+        // buffer.move_to(def->a);
+        // buffer.jumplist_push();
         break;}
     }
     G.goto_line_number = 0;
@@ -2507,9 +2520,10 @@ static void handle_input(Key key) {
         break;
       }
 
-      buffer.jumplist_push();
-      buffer.move_to(def->a);
-      buffer.jumplist_push();
+      G.editing_pane->add_subpane(buffer.data, def->a);
+      // buffer.jumplist_push();
+      // buffer.move_to(def->a);
+      // buffer.jumplist_push();
       mode_normal(true);
       break;
     }
@@ -2643,6 +2657,7 @@ static void handle_input(Key key) {
             buffer.advance(i);
           buffer.remove_range(prev[i].pos, buffer.cursors[i].pos, i);
         }
+        util_free(prev);
         buffer.action_end();
         break;}
 
@@ -2939,20 +2954,20 @@ static void handle_input(Key key) {
       G.editing_panes += p;
       break;}
 
-    case CONTROL('q'): {
-      if (G.editing_panes.size == 1)
-        break;
-
-      Pane **p = G.editing_panes.find(G.editing_pane);
-      if (p) {
-        int i = p - G.editing_panes.items;
-        G.editing_panes.remove_slow(i);
-        G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-        G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-      }
-      break;}
+    case CONTROL('q'):
+      G.panes_to_remove += G.editing_pane;
+      break;
 
     case CONTROL('l'): {
+      if (G.editing_pane->subpanes.size > 0) {
+        G.editing_pane = G.editing_pane->subpanes[0].pane;
+        G.selected_pane = G.editing_pane;
+        break;
+      }
+
+      /*fallthrough*/}
+
+    case CONTROL('L'): {
       int i;
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
@@ -2962,7 +2977,48 @@ static void handle_input(Key key) {
       G.selected_pane = G.editing_pane;
       break;}
 
+    case CONTROL('j'): {
+      // Find sibling below
+      Pane *p = G.editing_pane;
+      while (p->parent) {
+        for (int i = 0; i < p->parent->subpanes.size-1; ++i) {
+          if (p->parent->subpanes[i].pane == p) {
+            G.editing_pane = p->parent->subpanes[i+1].pane;
+            G.selected_pane = p->parent->subpanes[i+1].pane;
+            goto sibling_below_done;
+          }
+        }
+        p = p->parent;
+      }
+      sibling_below_done:
+      break;}
+
+    case CONTROL('k'): {
+      // Find sibling above
+      Pane *p = G.editing_pane;
+      while (p->parent) {
+        for (int i = 1; i < p->parent->subpanes.size; ++i) {
+          if (p->parent->subpanes[i].pane == p) {
+            G.editing_pane = p->parent->subpanes[i-1].pane;
+            G.selected_pane = p->parent->subpanes[i-1].pane;
+            goto sibling_above_done;
+          }
+        }
+        p = p->parent;
+      }
+      sibling_above_done:
+      break;}
+
     case CONTROL('h'): {
+      if (G.editing_pane->parent) {
+        G.editing_pane = G.editing_pane->parent;
+        G.selected_pane = G.editing_pane;
+        break;
+      }
+
+      /*fallthrough*/}
+
+    case CONTROL('H'): {
       int i;
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
@@ -3085,14 +3141,6 @@ static void handle_input(Key key) {
       G.visual_start.buffer = G.editing_pane->buffer.data;
       break;
 
-    case 'J':
-      buffer.move_y(G.editing_pane->numchars_y()/2);
-      break;
-
-    case 'K':
-      buffer.move_y(-G.editing_pane->numchars_y()/2);
-      break;
-
     case CONTROL('z'):
       buffer.undo();
       break;
@@ -3146,7 +3194,7 @@ static void handle_rendering(float dt) {
     p->bounds = {x, 0, w, h};
     x += w;
   }
-  G.bottom_pane->bounds = {0, G.editing_pane->bounds.y + G.editing_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
+  G.bottom_pane->bounds = {0, G.win_height - G.bottom_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
   for (Pane *p : G.editing_panes)
     p->render();
@@ -3318,7 +3366,7 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
     last_line:;
     assert(feof(f));
   } else {
-    b.lines.push();
+    b.lines += {};
   }
 
   // token type
@@ -3865,7 +3913,7 @@ void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_i
     if (b.y < lines.size)
       lines[a.y] += lines[b.y](b.x, -1);
     // delete lines a+1 to and including b
-    lines.remove_slown(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
+    lines.remove_slow_and_free(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
 
   action_end(cursors);
@@ -4296,6 +4344,11 @@ void BufferView::goto_beginline() {
     move_to_x(i, x);
     cursors[i].ghost_x = GHOST_BOL;
   }
+}
+
+void BufferData::init() {
+  *this = {};
+  lines += {};
 }
 
 void BufferData::empty(Array<Cursor> &cursors) {
@@ -4881,12 +4934,11 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
 
         case TOKEN_IDENTIFIER: {
           // check for keywords
-          Slice identifier = b.data->getslice(t->r);
-          if (identifier.length > 0 && identifier[0] == '#')
+          if (t->str.length > 0 && t->str[0] == '#')
             render_highlight(keyword_colors[KEYWORD_MACRO]);
           else {
             for (int i = 0; i < (int)ARRAY_LEN(keywords); ++i) {
-              if (identifier == keywords[i].name) {
+              if (t->str == keywords[i].name) {
                 render_highlight(keyword_colors[keywords[i].type]);
                 break;
               }
@@ -4908,6 +4960,14 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
       continue;
     canvas.fill_textcolor({b.data->to_visual_pos(r.a), b.data->to_visual_pos(r.b)}, Rect{0, 0, -1, -1}, G.identifier_color);
   }
+}
+
+void Pane::add_subpane(BufferData *b, Pos pos) {
+  Pane *p = new Pane{};
+  Pane::init_edit(*p, b, (Color*)&COLOR_GREY, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+  p->buffer.move_to(pos);
+  p->parent = this;
+  subpanes += {buffer.cursors[0].pos, p};
 }
 
 void Pane::render() {
@@ -5012,9 +5072,16 @@ void Pane::render_menu() {
 void Pane::render_edit() {
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
-  // calc bounds 
+
+  // recalculate the bounds of this pane depending on the number of subpanes
+  int subpane_depth = calc_max_subpane_depth();
+  int total_width = bounds.w;
+  bounds.w = total_width/(subpane_depth+1);
+
+  // calc buffer bound
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
   int buf_y1 = at_most(buf_offset.y + this->numchars_y(), d.lines.size);
+
 
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
@@ -5024,9 +5091,9 @@ void Pane::render_edit() {
     gutter.background = *this->background_color;
     for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
       if (line < d.lines.size)
-        gutter.render_strf({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, " %i", line + 1);
+        gutter.render_strf({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, " %i", line + 1);
       else
-        gutter.render_str({0, y}, &G.default_gutter_text_color, &G.default_gutter_background_color, 0, _gutter_width, Slice::create(" ~"));
+        gutter.render_str({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, Slice::create(" ~"));
     gutter.render(this->bounds.p);
     util_free(gutter);
   }
@@ -5084,6 +5151,43 @@ void Pane::render_edit() {
 
   if (G.editing_pane == this)
     render_dropdown(this);
+
+  // reflow and render subpanes
+  {
+    float w,h,x,y;
+    int num_panes_in_sight = 0;
+    int margin;
+    int total_margin;
+    #if 0
+    for (SubPane p : subpanes)
+      if (p.anchor_pos.y >= buf_offset.y && p.anchor_pos.y <= buf_y1)
+        ++num_panes_in_sight;
+    #else
+    num_panes_in_sight = subpanes.size;
+    #endif
+    if (!num_panes_in_sight)
+      goto subpanes_done;
+
+    margin = 0; // G.font_height;
+    total_margin = margin*(num_panes_in_sight+1);
+    // margin = total_margin / (num_panes_in_sight+1);
+
+    w = total_width - bounds.w;
+    h = (bounds.h - total_margin)/num_panes_in_sight;
+    x = bounds.x + bounds.w;
+    y = bounds.y + margin;
+    for (SubPane p : subpanes) {
+      // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
+        // continue;
+      p.pane->bounds = {(int)x, (int)y, (int)w, (int)h};
+      p.pane->render();
+      y += h + margin;
+    }
+
+    subpanes_done:;
+  }
+
+  bounds.w = total_width;
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -5112,6 +5216,16 @@ int Pane::calc_left_visible_column() const {
   x -= this->numchars_x()*6/7;
   return at_least(x, 0);
 }
+
+int Pane::calc_max_subpane_depth() const {
+  int result = 0;
+  for (SubPane p : subpanes) {
+    int d = p.pane->calc_max_subpane_depth()+1;
+    result = max(result, d);
+  }
+  return result;
+}
+
 
 Pos Pane::slot2pixel(Pos p) const {
   return {this->bounds.x + p.x*G.font_width, this->bounds.y + p.y*G.line_height};
@@ -5295,6 +5409,58 @@ static void test() {
 STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 #endif
 
+static void handle_pending_removes() {
+  // remove panes
+  for (Pane *p : G.panes_to_remove) {
+    bool remove_pane = false;
+    // The pane should either be a subpane or a dynamically allocated pane (i.e. exists in editing_pane)
+    if (p->parent) {
+      Pane *parent = p->parent;
+      for (int i = 0; i < parent->subpanes.size; ++i) {
+        if (parent->subpanes[i].pane == p) {
+          parent->subpanes.remove_slow(i);
+          Pane *next = parent->subpanes.size == 0 ? parent : parent->subpanes[clamp(i, 0, parent->subpanes.size-1)].pane;
+          if (G.editing_pane == p)
+            G.editing_pane = next;
+          if (G.selected_pane == p)
+            G.selected_pane = next;
+          remove_pane = true;
+          break;
+        }
+      }
+    }
+    else {
+      if (G.editing_panes.size == 1)
+        continue;
+      Pane **e = G.editing_panes.find(p);
+      if (!e)
+        continue;
+      int i = e - G.editing_panes.items;
+      G.editing_panes.remove_slow(i);
+      if (G.editing_pane == p)
+        G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+      if (G.selected_pane == p)
+        G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+      remove_pane = true;
+    }
+    if (remove_pane)
+      util_free(p);
+  }
+  G.panes_to_remove.size = 0;
+
+  // remove buffers
+  for (BufferData *b : G.buffers_to_remove) {
+    for (int i = 0; i < G.buffers.size; ++i) {
+      if (G.buffers[i] == b) {
+        util_free(G.buffers[i]);
+        G.buffers[i] = G.buffers[--G.buffers.size];
+        break;
+      }
+    }
+  }
+  G.buffers_to_remove.size = 0;
+}
+
 #ifdef OS_WINDOWS
 int wmain(int, const wchar_t *[], wchar_t *[])
 #else
@@ -5343,6 +5509,8 @@ int main(int, const char *[])
     G.activation_meter = at_least(G.activation_meter - dt / 5000.0f, 0.0f);
 
     SDL_GL_SwapWindow(G.window);
+
+    handle_pending_removes();
 
     G.flags.cursor_dirty = false;
 
