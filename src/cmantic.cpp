@@ -40,36 +40,8 @@
  */
 
 // @includes
-  #ifdef _MSC_VER
-    #define OS_WINDOWS 1
-  #else
-    #define OS_LINUX 1
-  #endif
-
-  #ifdef OS_LINUX
-    #define _POSIX_C_SOURCE 200112L
-    #include <unistd.h>
-    #include <termios.h>
-    #include <errno.h>
-    #include <sys/ioctl.h>
-    #include <sys/select.h>
-  #else
-    #ifndef WIN32_LEAN_AND_MEAN
-      #define WIN32_LEAN_AND_MEAN 1
-    #endif
-    #define NOMINMAX
-    #include <windows.h>
-  #endif
-  #include <ctype.h>
-  #include <stdio.h>
-  #include <errno.h>
-  #include <string.h>
-  #include <stdlib.h>
-  #include <stdarg.h>
-  #include <assert.h>
-
-#include "graphics.hpp"
 #include "util.hpp"
+#include "graphics.hpp"
 
 // @debug
   #if 0
