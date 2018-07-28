@@ -70,6 +70,12 @@
   typedef uint64_t u64;
 #endif
 
+#ifdef DEBUG
+  #define IF_DEBUG(stmt) stmt
+#else
+  #define IF_DEBUG(stmt)
+#endif
+
 // An annotation for function parameters that a variable is optional
 #define OPTIONAL
 

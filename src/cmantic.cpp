@@ -39,32 +39,13 @@
  * Update markers in other panes with same buffer (or at least make sure they are in range)
  */
 
+#if 0
+#define DEBUG
+#endif
+
 // @includes
 #include "util.hpp"
 #include "graphics.hpp"
-
-// @debug
-  #if 0
-    #define DEBUG
-    #define IF_DEBUG(stmt) stmt
-    // replace malloc
-    #if 0
-    static void* debug_malloc(unsigned long size, int line, const char *file) {
-      struct Header {
-        int line;
-        const char *file;
-      };
-
-      struct Header *p = (Header*)malloc(sizeof(struct Header) + size);
-      p->line = line;
-      p->file = file;
-      return (char*)p + sizeof(struct Header);
-    }
-    #define malloc(size) debug_malloc(size, __LINE__, __FILE__)
-    #endif
-  #else
-    #define IF_DEBUG(stmt)
-  #endif
 
 struct FuzzyMatch {
   Slice str;
