@@ -264,6 +264,10 @@ union Array {
     return a;
   }
 
+  void free_shallow() {
+    free(items);
+  }
+
   void zero() {
     memset(items, 0, sizeof(T) * size);
   }
@@ -1277,6 +1281,9 @@ struct Path {
   static Path create(Slice p) {
     return {StringBuffer::create(p)};
   }
+  static Path create(const char *s) {
+    return {StringBuffer::create(s)};
+  }
 };
 
 void util_free(Path &p) {
@@ -1499,6 +1506,14 @@ struct Json {
 
   // constructors
   static bool parse(Slice str, Json *result) {const char *s = str.chars; return _parse(s, s + str.length, result);}
+  static bool parse_file(Path path, Json *result) {
+    String s;
+    if (!File::get_contents(path, &s))
+      return false;
+    bool success = parse(s.slice, result);
+    util_free(s);
+    return success;
+  }
   static Json create(double d) {Json j = {JSON_NUMBER}; j.number = d; return j;}
   static Json create(const char *str) {return create(Slice::create(str));}
   static Json create(Slice s) {Json j = {JSON_STRING}; j.string = String::create(s); return j;}
@@ -1854,6 +1869,146 @@ LOGGING_LEVEL_IMPLEMENTATION(error, TERM_RED)
 
 
 
+#ifndef UTIL_PROCESS
+#define UTIL_PROCESS
+
+static bool call(Slice command, int *errcode, String *std_out, String *std_err) {
+  // https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
+  bool get_output = std_out || std_err;
+  bool success = false;
+  HANDLE proc_stdout = 0;
+  HANDLE proc_stderr = 0;
+  String cmd = {};
+  Array<u8> stdout_data = {};
+  Array<u8> stderr_data = {};
+
+  STARTUPINFO info = {sizeof(info)};
+  if (get_output)
+    info.dwFlags |= STARTF_USESTDHANDLES;
+  PROCESS_INFORMATION process_info = {};
+
+  // create pipe for stdout
+  if (std_out) {
+    SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
+    if (!CreatePipe(&proc_stdout, &info.hStdOutput, &sattr, 0)) {
+      log_error("Failed to create pipe for stdout\n");
+      goto err;
+    }
+
+    // Ensure the read handle to the pipe for STDOUT is not inherited.
+    if ( ! SetHandleInformation(proc_stdout, HANDLE_FLAG_INHERIT, 0) ) {
+      log_error("Failed SetHandleInformation for stdout\n"); 
+      goto err;
+    }
+  }
+
+  if (std_err) {
+    SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
+    if (!CreatePipe(&proc_stderr, &info.hStdError, &sattr, 0)) {
+      log_error("Failed to create pipe for stderr\n");
+      goto err;
+    }
+
+    // Ensure the read handle to the pipe for STDOUT is not inherited.
+    if ( ! SetHandleInformation(proc_stderr, HANDLE_FLAG_INHERIT, 0) ) {
+      log_error("Failed SetHandleInformation for stderr\n"); 
+      goto err;
+    }
+  }
+
+  // create process
+  cmd = String::create(command);
+  if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
+    log_error("Failed to create process (%i)\n", GetLastError());
+    goto err;
+  }
+  util_free(cmd);
+
+  // we won't be using the write end of the stdout,stderr pipes
+  if (std_out) {
+    CloseHandle(info.hStdOutput);
+    info.hStdOutput = 0;
+  }
+
+  if (std_err) {
+    CloseHandle(info.hStdError);
+    info.hStdError = 0;
+  }
+
+  // read stdout from process
+  while (1) {
+    bool something_was_read = false;
+    if (std_out) {
+      stdout_data.reserve(stdout_data.size + 512);
+      DWORD num_read;
+      success = ReadFile(proc_stdout, stdout_data.items + stdout_data.size, 512, &num_read, NULL);
+      something_was_read |= (success && num_read);
+      stdout_data.size += num_read;
+    }
+    if (std_err) {
+      stderr_data.reserve(stderr_data.size + 512);
+      DWORD num_read;
+      success = ReadFile(proc_stderr, stderr_data.items + stderr_data.size, 512, &num_read, NULL);
+      something_was_read |= (success && num_read);
+      stderr_data.size += num_read;
+    }
+    if (!something_was_read)
+      break;
+  }
+  if (std_out)
+    *std_out = {(char*)stdout_data.items, stdout_data.size};
+  if (std_err)
+    *std_err = {(char*)stderr_data.items, stderr_data.size};
+
+  if (errcode) {
+    WaitForSingleObject(process_info.hProcess, INFINITE);
+    DWORD exit_code;
+    if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
+      log_error("Failed to get error code of command {}\n", &command);
+      goto err;
+    }
+    *errcode = exit_code;
+  }
+
+  CloseHandle(process_info.hProcess);
+  CloseHandle(process_info.hThread);
+  if (std_out)
+    CloseHandle(proc_stdout);
+  if (std_err)
+    CloseHandle(proc_stderr);
+  return true;
+
+  err:
+  if (process_info.hProcess)
+    CloseHandle(process_info.hProcess);
+  if (process_info.hThread)
+    CloseHandle(process_info.hThread);
+  if (std_out) {
+    CloseHandle(proc_stdout);
+    if (info.hStdOutput)
+      CloseHandle(info.hStdOutput);
+  }
+  if (std_err) {
+    CloseHandle(proc_stderr);
+    if (info.hStdError)
+      CloseHandle(info.hStdError);
+  }
+  util_free(cmd);
+  stdout_data.free_shallow();
+  stderr_data.free_shallow();
+  return false;
+}
+static bool call(const char *command, int *errcode, String *std_out, String *std_err) {
+  return call(Slice::create(command), errcode, std_out, std_err);
+}
+
+// TODO: posix version
+// https://jineshkj.wordpress.com/2006/12/22/how-to-capture-stdin-stdout-and-stderr-of-child-program/
+
+#endif /* UTIL_PROCESS */
+
+
+
 
 
 void util_init() {
@@ -1878,5 +2033,4 @@ void util_init() {
   }
 
   #endif /* UTIL_LOGGING */
-
 }

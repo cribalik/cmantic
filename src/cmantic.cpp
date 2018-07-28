@@ -5137,7 +5137,7 @@ void Pane::render_edit() {
   {
     float w,h,x,y;
     int num_panes_in_sight = 0;
-    int margin;
+    int subpane_margin;
     int total_margin;
     #if 0
     for (SubPane p : subpanes)
@@ -5149,20 +5149,20 @@ void Pane::render_edit() {
     if (!num_panes_in_sight)
       goto subpanes_done;
 
-    margin = 0; // G.font_height;
-    total_margin = margin*(num_panes_in_sight+1);
-    // margin = total_margin / (num_panes_in_sight+1);
+    subpane_margin = 0; // G.font_height;
+    total_margin = subpane_margin*(num_panes_in_sight+1);
+    // subpane_margin = total_margin / (num_panes_in_sight+1);
 
-    w = total_width - bounds.w;
-    h = (bounds.h - total_margin)/num_panes_in_sight;
-    x = bounds.x + bounds.w;
-    y = bounds.y + margin;
+    w = (float)total_width - bounds.w;
+    h = (float)(bounds.h - total_margin)/num_panes_in_sight;
+    x = (float)bounds.x + bounds.w;
+    y = (float)bounds.y + subpane_margin;
     for (SubPane p : subpanes) {
       // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
         // continue;
       p.pane->bounds = {(int)x, (int)y, (int)w, (int)h};
       p.pane->render();
-      y += h + margin;
+      y += h + subpane_margin;
     }
 
     subpanes_done:;
@@ -5450,15 +5450,24 @@ int main(int, const char *[])
 {
   util_init();
 
-  String s;
-  if (!File::get_contents("test.json", &s))
-    log_error("Failed to open file\n"), exit(1);
+  String out, err;
+  int errcode;
+  if (!call("git status", &errcode, &out, &err))
+    log_error("Failed to call git status\n"), exit(1);
+  if (errcode)
+    log_warn("Command failed (%i):\n{}\n\n", errcode, &err.slice);
+  else
+    log_info("Command succeeded:\n{}\n\n", &out.slice);
 
+
+  #if 0
   Json j;
-  if (!Json::parse(s.slice, &j))
+  Path p = Path::create("test.json");
+  if (!Json::parse_file(p, &j))
     log_error("Failed to parse json\n"), exit(1);
-
+  util_free(p);
   log_info(j.dump());
+  #endif
 
   state_init();
 
