@@ -808,6 +808,9 @@ union String {
   Slice slice;
 
   static String create(const char *str, int len) {
+    if (!len || !str)
+      return {};
+
     String s;
     s.length = len;
     s.chars = (char*)malloc(s.length+1);
@@ -829,6 +832,9 @@ static bool operator==(String a, String b) {
   return a.slice == b.slice;
 }
 static bool operator==(String a, Slice b) {
+  return a.slice == b;
+}
+static bool operator==(String a, const char *b) {
   return a.slice == b;
 }
 
@@ -863,11 +869,6 @@ union StringBuffer {
       chars = (char*)realloc(chars, cap);
     }
     chars[length] = '\0';
-  }
-
-  void reserve(int n) {
-    if (n > cap)
-      extend(n - cap);
   }
 
   void insert(int i, const char *str, int n) {
@@ -1018,16 +1019,24 @@ union StringBuffer {
   void operator+=(double d) {
     int i;
     if (d < 0) {
-    append('-');
-    d *= -1;
+      append('-');
+      d *= -1;
     }
     append((long)d);
     d -= (double)(long)d;
+    if (d < 0.0000001)
+      return;
+
+    int last_nonzero = length;
     append('.');
-    for (i = 0; i < 2; ++i) {
-    d *= 10.0;
-    append((char)('0' + ((int)(d+0.5))%10));
+    for (i = 0; i < 8 && d > 0.0; ++i) {
+      int digit = ((int)(d*10.0+0.5))%10;
+      append((char)('0' + digit));
+      if (digit)
+        last_nonzero = length;
+      d = fmod(d*10.0, 1.0);
     }
+    length = last_nonzero;
   }
 
   void operator+=(Utf8char c) {
@@ -1381,6 +1390,7 @@ namespace File {
   }
 
   bool list_files(Path directory, Array<Path> *result) {
+    *result = {};
     Path dir = directory.copy();
     WIN32_FIND_DATA find_data;
     dir.push("*");
@@ -1404,6 +1414,41 @@ namespace File {
 
   #endif /* OS */
 
+  bool get_contents(const char *path, Array<u8> *result) {
+    *result = {};
+    FILE *f = fopen(path, "rb");
+    if (!f)
+      goto err;
+    while (1) {
+      result->reserve(result->size + 1024);
+      int n = fread(result->items + result->size, 1, 1024, f);
+      result->size += n;
+      if (n != 1024)
+        break;
+    }
+    if (ferror(f))
+      goto err;
+
+    fclose(f);
+    return true;
+
+    err:
+    if (f)
+      fclose(f);
+    return false;
+  }
+
+  bool get_contents(const char *path, String *result) {
+    Array<u8> r;
+    if (!get_contents(path, &r))
+      return false;
+    *result = {(char*)r.items, r.size};
+    return true;
+  }
+
+  bool get_contents(Path path, String *result) {return get_contents(path.string.chars, result);}
+  bool get_contents(Path path, Array<u8> *result) {return get_contents(path.string.chars, result);}
+
   bool isdir(Path path) {
     return filetype(path) == FILETYPE_DIR;
   }
@@ -1414,3 +1459,348 @@ namespace File {
 }
 
 #endif /* UTIL_FILE */
+
+
+
+
+#ifndef UTIL_JSON
+#define UTIL_JSON
+
+struct Json {
+  struct ObjectField;
+  enum Type {
+    JSON_INVALID,
+    JSON_NIL,
+    JSON_ARRAY,
+    JSON_NUMBER,
+    JSON_STRING,
+    JSON_OBJECT,
+    JSON_BOOLEAN
+  };
+
+  Type type;
+  union {
+    // JSON_ARRAY 
+    Array<Json> array;
+    // JSON_NUMBER
+    double number;
+    // JSON_STRING
+    String string;
+    // JSON_OBJECT
+    Array<ObjectField> fields;
+    // JSON_BOOLEAN
+    bool boolean;
+  };
+
+  // methods
+  Json& operator[](int i);
+  Json& operator[](const char *str);
+  String dump() const;
+
+  // constructors
+  static Json parse(Slice str) {const char *s = str.chars; return _parse(s, s + str.length);}
+  static Json create(double d) {Json j = {JSON_NUMBER}; j.number = d; return j;}
+  static Json create(const char *str) {return create(Slice::create(str));}
+  static Json create(Slice s) {Json j = {JSON_STRING}; j.string = String::create(s); return j;}
+  static Json create(bool b) {Json j = {JSON_BOOLEAN}; j.boolean = b; return j;}
+  static Json create() {return {JSON_NIL};}
+
+  // private
+  void _dump(StringBuffer &sb, int indent, bool indent_first) const;
+  static Json _parse(const char *&str, const char *end);
+  static String _parse_string(const char *&str, const char *end);
+  static char _gettoken(const char *&str, const char *end);
+};
+
+struct Json::ObjectField {
+  String name;
+  Json value;
+};
+
+static Json _invalidJson; // a dump for all invalid values
+
+void Json::_dump(StringBuffer &sb, int indent, bool indent_first) const {
+  static const int INDENT_SIZE = 4;
+  if (type == JSON_INVALID)
+    return;
+
+  switch (type) {
+    case JSON_INVALID:
+      break;
+
+    case JSON_NIL:
+      if (indent_first)
+        sb.append(' ', INDENT_SIZE*indent);
+      sb += "null";
+      break;
+
+    case JSON_ARRAY:
+      if (indent_first)
+        sb.append(' ', INDENT_SIZE*indent);
+      sb += "[\n";
+      for (int i = 0; i < array.size; ++i) {
+        array[i]._dump(sb, indent+1, true);
+        if (i < array.size-1)
+          sb += ",";
+        sb += '\n';
+      }
+      sb.append(' ', INDENT_SIZE*indent);
+      sb += "]";
+      break;
+
+    case JSON_NUMBER:
+      if (indent_first)
+        sb.append(' ', INDENT_SIZE*indent);
+      sb += number;
+      break;
+
+    case JSON_STRING:
+      if (indent_first)
+        sb.append(' ', INDENT_SIZE*indent);
+      sb += '"';
+      for (Utf8char c : string) {
+        if (c == '"' || c == '\\')
+          sb += '\\';
+        sb += c;
+      }
+      sb += '"';
+      break;
+
+    case JSON_OBJECT:
+      sb += '{';
+      if (fields.size == 0)
+        sb += '}';
+      else {
+        sb += '\n';
+        for (int i = 0; i < fields.size; ++i) {
+          sb.append(' ', INDENT_SIZE*(indent+1));
+          sb += '"';
+          sb += fields[i].name;
+          sb += '"';
+          sb += ": ";
+          fields[i].value._dump(sb, indent+1, false);
+          if (i < fields.size-1)
+            sb += ',';
+          sb += '\n';
+        }
+        sb.append(' ', INDENT_SIZE*indent);
+        sb += "}";
+      }
+      break;
+
+    case JSON_BOOLEAN:
+      if (indent_first)
+        sb.append(' ', INDENT_SIZE*indent);
+      if (boolean)
+        sb += "true";
+      else
+        sb += "false";
+      break;
+  }
+}
+
+char Json::_gettoken(const char *&str, const char *end) {
+  while (isspace(*str) && str < end)
+    ++str;
+  if (str >= end)
+    return '\0';
+  return *str;
+}
+
+// properly removes escape sequences, so
+// "\"hello\", said the bard. \\\\sincerely yours"
+// ->
+// "hello" said the bard. \\sincerely yours
+String Json::_parse_string(const char *&str, const char *end) {
+  StringBuffer sb = {};
+  if (_gettoken(str, end) != '"')
+    goto err;
+
+  ++str;
+  bool escaped = false;
+  while (1) {
+    if (str >= end)
+      goto err;
+    char c = *str;
+    if (!c)
+      goto err;
+    if (c == '\\') {
+      if (escaped) {
+        sb += '\\';
+        escaped = false;
+      }
+      else
+        escaped = true;
+      ++str;
+      continue;
+    }
+
+    if (c == '"' && !escaped)
+      break;
+    escaped = false;
+    sb += c;
+    ++str;
+  }
+  ++str;
+  return sb.string;
+
+  err:
+  util_free(sb);
+  return {};
+}
+
+Json Json::_parse(const char *&str, const char *end) {
+  // object
+  if (_gettoken(str, end) == '{') {
+    ++str;
+    Json j = {};
+    j.type = JSON_OBJECT;
+    IF_DEBUG(puts("object"));
+    while (1) {
+      if (_gettoken(str, end) == '}') {
+        ++str;
+        break;
+      }
+
+      j.fields += {Json::_parse_string(str, end)};
+      if (_gettoken(str, end) != ':')
+        return {};
+      ++str;
+      j.fields.last().value = Json::_parse(str, end);
+
+      if (_gettoken(str, end) == '}') {
+        ++str;
+        break;
+      }
+      if (_gettoken(str, end) == ',') {
+        ++str;
+        continue;
+      }
+      return {};
+    }
+    // validate
+    for (ObjectField f : j.fields)
+      if (!f.name.chars || f.value.type == JSON_INVALID)
+        return {};
+    return j;
+  }
+
+  // array
+  else if (_gettoken(str, end) == '[') {
+    ++str;
+    Json j = {};
+    j.type = JSON_ARRAY;
+    IF_DEBUG(puts("array");)
+    while (1) {
+      if (_gettoken(str, end) == ']') {
+        ++str;
+        break;
+      }
+
+      j.array += Json::_parse(str, end);
+
+      if (_gettoken(str, end) == ']') {
+        ++str;
+        break;
+      }
+      if (_gettoken(str, end) == ',') {
+        ++str;
+        continue;
+      }
+      IF_DEBUG(puts("unexpected end of array");)
+      IF_DEBUG(puts(str);)
+      return {};
+    }
+    for (Json jj : j.array)
+      if (jj.type == JSON_INVALID)
+        return {};
+    return j;
+  }
+
+  // string
+  else if (_gettoken(str, end) == '"') {
+    Json j = {};
+    j.type = JSON_STRING;
+    IF_DEBUG(puts("string");)
+    j.string = Json::_parse_string(str, end);
+    if (!j.string.chars)
+      return {};
+    return j;
+  }
+
+  // number
+  else if (_gettoken(str, end) == '-' || (_gettoken(str, end) >= '0' && _gettoken(str, end) <= '9')) {
+    Json j = {};
+    IF_DEBUG(puts("number");)
+    j.type = JSON_NUMBER;
+    char *digit_end;
+    j.number = strtod(str, &digit_end);
+    if (digit_end == str) {
+      IF_DEBUG(puts("bad number");)
+      return {};
+    }
+    str = digit_end;
+    return j;
+  }
+
+  // null
+  else if (_gettoken(str, end) == 'n' && end-str >= 4 && Slice::create(str, 4) == "null") {
+    str += 4;
+    IF_DEBUG(puts("null");)
+    Json j = {};
+    j.type = JSON_NIL;
+    return j;
+  }
+
+  else if (_gettoken(str, end) == 't' && end-str >= 4 && Slice::create(str, 4) == "true") {
+    str += 4;
+    IF_DEBUG(puts("true");)
+    Json j = {};
+    j.type = JSON_BOOLEAN;
+    j.boolean = true;
+    return j;
+  }
+
+  else if (_gettoken(str, end) == 'f' && end-str >= 5 && Slice::create(str, 5) == "false") {
+    str += 5;
+    IF_DEBUG(puts("false");)
+    Json j = {};
+    j.type = JSON_BOOLEAN;
+    j.boolean = false;
+    return j;
+  }
+
+  IF_DEBUG(puts("invalid");)
+
+  return {};
+}
+
+Json& Json::operator[](int i) {
+  if (type != JSON_ARRAY || i < 0 || i >= array.size) {
+    _invalidJson.type = JSON_INVALID;
+    return _invalidJson;
+  }
+  return array[i];
+}
+
+Json& Json::operator[](const char *str) {
+  if (type != JSON_OBJECT) {
+    _invalidJson.type = JSON_INVALID;
+    return _invalidJson;
+  }
+
+  for (ObjectField &f : fields)
+    if (f.name == str)
+      return f.value;
+
+  _invalidJson.type = JSON_INVALID;
+  return _invalidJson;
+}
+
+String Json::dump() const {
+  StringBuffer sb = {};
+  _dump(sb, 0, false);
+  return sb.string;
+}
+
+#endif /* UTIL_JSON */
