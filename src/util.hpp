@@ -1029,7 +1029,7 @@ union StringBuffer {
 
     int last_nonzero = length;
     append('.');
-    for (i = 0; i < 8 && d > 0.0; ++i) {
+    for (i = 0; i < 9 && d > 0.0; ++i) {
       int digit = ((int)(d*10.0+0.5))%10;
       append((char)('0' + digit));
       if (digit)
@@ -1498,7 +1498,7 @@ struct Json {
   String dump() const;
 
   // constructors
-  static Json parse(Slice str) {const char *s = str.chars; return _parse(s, s + str.length);}
+  static bool parse(Slice str, Json *result) {const char *s = str.chars; return _parse(s, s + str.length, result);}
   static Json create(double d) {Json j = {JSON_NUMBER}; j.number = d; return j;}
   static Json create(const char *str) {return create(Slice::create(str));}
   static Json create(Slice s) {Json j = {JSON_STRING}; j.string = String::create(s); return j;}
@@ -1507,8 +1507,8 @@ struct Json {
 
   // private
   void _dump(StringBuffer &sb, int indent, bool indent_first) const;
-  static Json _parse(const char *&str, const char *end);
-  static String _parse_string(const char *&str, const char *end);
+  static bool _parse(const char *&str, const char *end, Json *result);
+  static bool _parse_string(const char *&str, const char *end, String *result);
   static char _gettoken(const char *&str, const char *end);
 };
 
@@ -1524,19 +1524,17 @@ void Json::_dump(StringBuffer &sb, int indent, bool indent_first) const {
   if (type == JSON_INVALID)
     return;
 
+  if (indent_first)
+    sb.append(' ', INDENT_SIZE*indent);
   switch (type) {
     case JSON_INVALID:
       break;
 
     case JSON_NIL:
-      if (indent_first)
-        sb.append(' ', INDENT_SIZE*indent);
       sb += "null";
       break;
 
     case JSON_ARRAY:
-      if (indent_first)
-        sb.append(' ', INDENT_SIZE*indent);
       sb += "[\n";
       for (int i = 0; i < array.size; ++i) {
         array[i]._dump(sb, indent+1, true);
@@ -1549,14 +1547,10 @@ void Json::_dump(StringBuffer &sb, int indent, bool indent_first) const {
       break;
 
     case JSON_NUMBER:
-      if (indent_first)
-        sb.append(' ', INDENT_SIZE*indent);
       sb += number;
       break;
 
     case JSON_STRING:
-      if (indent_first)
-        sb.append(' ', INDENT_SIZE*indent);
       sb += '"';
       for (Utf8char c : string) {
         if (c == '"' || c == '\\')
@@ -1589,8 +1583,6 @@ void Json::_dump(StringBuffer &sb, int indent, bool indent_first) const {
       break;
 
     case JSON_BOOLEAN:
-      if (indent_first)
-        sb.append(' ', INDENT_SIZE*indent);
       if (boolean)
         sb += "true";
       else
@@ -1611,7 +1603,7 @@ char Json::_gettoken(const char *&str, const char *end) {
 // "\"hello\", said the bard. \\\\sincerely yours"
 // ->
 // "hello" said the bard. \\sincerely yours
-String Json::_parse_string(const char *&str, const char *end) {
+bool Json::_parse_string(const char *&str, const char *end, String *result) {
   StringBuffer sb = {};
   if (_gettoken(str, end) != '"')
     goto err;
@@ -1642,14 +1634,15 @@ String Json::_parse_string(const char *&str, const char *end) {
     ++str;
   }
   ++str;
-  return sb.string;
+  *result = sb.string;
+  return true;
 
   err:
   util_free(sb);
-  return {};
+  return false;
 }
 
-Json Json::_parse(const char *&str, const char *end) {
+bool Json::_parse(const char *&str, const char *end, Json *result) {
   // object
   if (_gettoken(str, end) == '{') {
     ++str;
@@ -1662,11 +1655,20 @@ Json Json::_parse(const char *&str, const char *end) {
         break;
       }
 
-      j.fields += {Json::_parse_string(str, end)};
+      // get field
+      Json::ObjectField field;
+      if (!Json::_parse_string(str, end, &field.name))
+        return false;
+
       if (_gettoken(str, end) != ':')
-        return {};
+        return false;
       ++str;
-      j.fields.last().value = Json::_parse(str, end);
+
+      // get value
+      if (!Json::_parse(str, end, &field.value))
+        return false;
+
+      j.fields += field;
 
       if (_gettoken(str, end) == '}') {
         ++str;
@@ -1676,13 +1678,10 @@ Json Json::_parse(const char *&str, const char *end) {
         ++str;
         continue;
       }
-      return {};
+      return false;
     }
-    // validate
-    for (ObjectField f : j.fields)
-      if (!f.name.chars || f.value.type == JSON_INVALID)
-        return {};
-    return j;
+    *result = j;
+    return true;
   }
 
   // array
@@ -1697,7 +1696,10 @@ Json Json::_parse(const char *&str, const char *end) {
         break;
       }
 
-      j.array += Json::_parse(str, end);
+      Json jj;
+      if (!Json::_parse(str, end, &jj))
+        return false;
+      j.array += jj;
 
       if (_gettoken(str, end) == ']') {
         ++str;
@@ -1709,12 +1711,10 @@ Json Json::_parse(const char *&str, const char *end) {
       }
       IF_DEBUG(puts("unexpected end of array");)
       IF_DEBUG(puts(str);)
-      return {};
+      return false;
     }
-    for (Json jj : j.array)
-      if (jj.type == JSON_INVALID)
-        return {};
-    return j;
+    *result = j;
+    return true;
   }
 
   // string
@@ -1722,10 +1722,10 @@ Json Json::_parse(const char *&str, const char *end) {
     Json j = {};
     j.type = JSON_STRING;
     IF_DEBUG(puts("string");)
-    j.string = Json::_parse_string(str, end);
-    if (!j.string.chars)
-      return {};
-    return j;
+    if (!Json::_parse_string(str, end, &j.string))
+      return false;
+    *result = j;
+    return true;
   }
 
   // number
@@ -1737,10 +1737,11 @@ Json Json::_parse(const char *&str, const char *end) {
     j.number = strtod(str, &digit_end);
     if (digit_end == str) {
       IF_DEBUG(puts("bad number");)
-      return {};
+      return false;
     }
     str = digit_end;
-    return j;
+    *result = j;
+    return true;
   }
 
   // null
@@ -1749,7 +1750,8 @@ Json Json::_parse(const char *&str, const char *end) {
     IF_DEBUG(puts("null");)
     Json j = {};
     j.type = JSON_NIL;
-    return j;
+    *result = j;
+    return true;
   }
 
   else if (_gettoken(str, end) == 't' && end-str >= 4 && Slice::create(str, 4) == "true") {
@@ -1758,7 +1760,8 @@ Json Json::_parse(const char *&str, const char *end) {
     Json j = {};
     j.type = JSON_BOOLEAN;
     j.boolean = true;
-    return j;
+    *result = j;
+    return true;
   }
 
   else if (_gettoken(str, end) == 'f' && end-str >= 5 && Slice::create(str, 5) == "false") {
@@ -1767,12 +1770,12 @@ Json Json::_parse(const char *&str, const char *end) {
     Json j = {};
     j.type = JSON_BOOLEAN;
     j.boolean = false;
-    return j;
+    *result = j;
+    return true;
   }
 
   IF_DEBUG(puts("invalid");)
-
-  return {};
+  return false;
 }
 
 Json& Json::operator[](int i) {
@@ -1804,3 +1807,76 @@ String Json::dump() const {
 }
 
 #endif /* UTIL_JSON */
+
+
+
+#ifndef UTIL_LOGGING
+#define UTIL_LOGGING
+
+#ifdef OS_WINDOWS
+#include <io.h>
+#endif
+
+/* Terminal textstyles */
+
+static const char* TERM_RED = "";
+static const char* TERM_GREEN = "";
+static const char* TERM_YELLOW = "";
+static const char* TERM_BLUE = "";
+static const char* TERM_BOLD = "";
+static const char* TERM_UNBOLD = "";
+static const char* TERM_RESET_FORMAT = "";
+static const char* TERM_RESET_COLOR = "";
+static const char* TERM_RESET = "";
+
+#define LOGGING_LEVEL_IMPLEMENTATION(level, color) \
+void log_##level(Slice s) {fprintf(stderr, "%s%.*s%s", color, s.length, s.chars, TERM_RESET_COLOR);} \
+void log_##level(String s) {log_##level(s.slice);} \
+void log_##level(va_list args, const char *fmt) { \
+  StringBuffer sb = {}; \
+  sb.appendv(fmt, args); \
+  log_##level(sb.string.slice); \
+  util_free(sb); \
+} \
+\
+void log_##level(const char *fmt, ...) { \
+  va_list args; \
+  va_start(args, fmt); \
+  log_##level(args, fmt); \
+  va_end(args); \
+}
+
+LOGGING_LEVEL_IMPLEMENTATION(info, TERM_GREEN)
+LOGGING_LEVEL_IMPLEMENTATION(warn, TERM_YELLOW)
+LOGGING_LEVEL_IMPLEMENTATION(error, TERM_RED)
+
+#endif /* UTIL_LOGGING */
+
+
+
+
+
+void util_init() {
+
+  #ifdef UTIL_LOGGING
+
+  #ifdef OS_LINUX
+  if (isatty(1))
+  #elif OS_WINDOWS
+  if (_isatty(_fileno(stderr)))
+  #endif
+  {
+    TERM_RED = "\x1B[31m";
+    TERM_GREEN = "\x1B[32m";
+    TERM_YELLOW = "\x1B[33m";
+    TERM_BLUE = "\x1B[34m";
+    TERM_BOLD = "\x1B[1m";
+    TERM_UNBOLD = "\x1B[21m";
+    TERM_RESET_FORMAT = "\x1B[0m";
+    TERM_RESET_COLOR = "\x1B[39m";
+    TERM_RESET = "\x1B[0m\x1B[39m";
+  }
+
+  #endif /* UTIL_LOGGING */
+
+}

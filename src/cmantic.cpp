@@ -5448,6 +5448,18 @@ int wmain(int, const wchar_t *[], wchar_t *[])
 int main(int, const char *[])
 #endif
 {
+  util_init();
+
+  String s;
+  if (!File::get_contents("test.json", &s))
+    log_error("Failed to open file\n"), exit(1);
+
+  Json j;
+  if (!Json::parse(s.slice, &j))
+    log_error("Failed to parse json\n"), exit(1);
+
+  log_info(j.dump());
+
   state_init();
 
   test();
