@@ -88,7 +88,7 @@ template<class T> union StrideView;
 template<class T> void util_free(Array<T> &);
 #define ALIGN(ptr, n) (void*)(((long)(ptr)+((n)-1)) & ~((n)-1))
 #define ALIGNI(ptr, n) (((long)(ptr)+((n)-1)) & ~((n)-1))
-#define CONTAINEROF(ptr, type, member) (((type)*)((char*)ptr - offsetof(type, member)))
+#define CONTAINEROF(ptr, type, member) ((type*)((char*)ptr - offsetof(type, member)))
 #define CAST(type, val) (*(type*)(&(val)))
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
@@ -137,28 +137,28 @@ void swap(T &a, T &b) {
 // If you want a util library to use your own allocator, you push it on to the stack before using the util stuff
 // See ALLOCATORS for some allocator implementations
 struct Allocator {
-  void *(*alloc)  (void *alloc_data, size_t size, size_t align);
-  void *(*realloc)(void *alloc_data, void *prev, size_t prev_size, size_t size, size_t align);
-  void (*dealloc) (void *alloc_data, void*, size_t size);
+  void *(*alloc)  (int index, void *alloc_data, size_t size, size_t align);
+  void *(*realloc)(int index, void *alloc_data, void *prev, size_t prev_size, size_t size, size_t align);
+  void (*dealloc) (int index, void *alloc_data, void*, size_t size);
   void *alloc_data;
 };
 
-static void* default_alloc(void*, size_t size, size_t) {
+static void* default_alloc(int, void*, size_t size, size_t) {
   return malloc(size);
 }
-static void default_dealloc(void*, void *mem, size_t) {
+static void default_dealloc(int, void*, void *mem, size_t) {
   free(mem);
 }
-static void* default_realloc(void *, void *prev, size_t, size_t size, size_t) {
+static void* default_realloc(int, void *, void *prev, size_t, size_t size, size_t) {
   return realloc(prev, size);
 }
 
 // You shall not have an allocator stack greater than 64 or I will personally come and slap you for writing shit code (i.e. have so little discipline in your control flow that you let it happen).
 static Allocator allocators[64] = {{default_alloc, default_realloc, default_dealloc, 0}};
 static int num_allocators = 1;
-static void *(*current_alloc)(void *alloc_data, size_t size, size_t align) = default_alloc;
-static void *(*current_realloc)(void *alloc_data, void *prev, size_t prev_size, size_t size, size_t align) = default_realloc;
-static void (*current_dealloc)(void *alloc_data, void*, size_t size) = default_dealloc;
+static void *(*current_alloc)(int index, void *alloc_data, size_t size, size_t align) = default_alloc;
+static void *(*current_realloc)(int index, void *alloc_data, void *prev, size_t prev_size, size_t size, size_t align) = default_realloc;
+static void (*current_dealloc)(int index, void *alloc_data, void*, size_t size) = default_dealloc;
 static void *current_alloc_data;
 
 template<class T>
@@ -167,40 +167,41 @@ static T* alloc() {
 }
 
 static void* alloc(size_t size, size_t align = alignof(max_align_t)) {
-  return current_alloc(current_alloc_data, size, align);
+  return current_alloc(num_allocators-1, current_alloc_data, size, align);
 }
 
 template<class T>
 static T* alloc_array(size_t num) {
-  return (T*)current_alloc(current_alloc_data, sizeof(T)*num, alignof(T));
+  return (T*)current_alloc(num_allocators-1, current_alloc_data, sizeof(T)*num, alignof(T));
 }
 
 static void* realloc(void *prev, size_t prev_size, size_t size, size_t align = alignof(max_align_t)) {
-  return current_realloc(current_alloc_data, prev, prev_size, size, align);
+  return current_realloc(num_allocators-1, current_alloc_data, prev, prev_size, size, align);
 }
 
 template<class T>
 static T* realloc(T *prev, size_t prev_num, size_t num) {
-  return (T*)current_realloc(current_alloc_data, prev, sizeof(T)*prev_num, sizeof(T)*num, alignof(T));
+  return (T*)current_realloc(num_allocators-1, current_alloc_data, prev, sizeof(T)*prev_num, sizeof(T)*num, alignof(T));
 }
 
 template<class T>
 static void dealloc(T *t) {
-  current_dealloc(current_alloc_data, t, sizeof(T));
+  current_dealloc(num_allocators-1, current_alloc_data, t, sizeof(T));
 }
 
 template<class T>
 static void dealloc_array(T *t, size_t num) {
-  current_dealloc(current_alloc_data, t, sizeof(T)*num);
+  current_dealloc(num_allocators-1, current_alloc_data, t, sizeof(T)*num);
 }
 
 static void dealloc(void *mem, size_t size) {
-  current_dealloc(current_alloc_data, mem, size);
+  current_dealloc(num_allocators-1, current_alloc_data, mem, size);
 }
 
 static void push_allocator(Allocator a) {
   allocators[num_allocators++] = a;
   current_alloc = a.alloc;
+  current_realloc = a.realloc;
   current_dealloc = a.dealloc;
   current_alloc_data = a.alloc_data;
 }
@@ -208,6 +209,7 @@ static void push_allocator(Allocator a) {
 static void pop_allocator() {
   --num_allocators;
   current_alloc = allocators[num_allocators-1].alloc;
+  current_realloc = allocators[num_allocators-1].realloc;
   current_dealloc = allocators[num_allocators-1].dealloc;
   current_alloc_data = allocators[num_allocators-1].alloc_data;
 }
@@ -301,12 +303,48 @@ View<T> view(StackArray<T, N> a) {
 }
 
 template<class T>
+struct StaticArray {
+  T *items;
+  int size;
+
+  T* begin() {
+    return items;
+  }
+
+  T* end() {
+    return items+size;
+  }
+
+  const T* begin() const {
+    return items;
+  }
+
+  const T* end() const {
+    return items+size;
+  }
+
+  T& operator[](int i) {return items[i];}
+  const T& operator[](int i) const {return items[i];}
+  operator T*() {return items;}
+  operator const T*() const {return items;}
+
+  T& last() {
+    return items[size-1];
+  }
+
+  const T& last() const {
+    return items[size-1];
+  }
+};
+
+template<class T>
 union Array {
   struct {
     T *items;
     int size;
     int cap;
   };
+  StaticArray<T> static_array;
 
   T* begin() {
     return items;
@@ -388,9 +426,9 @@ union Array {
     size = oldsize;
   }
 
-  void push(T *items, int n) {
+  void push(T *array, int n) {
     pushn(n);
-    memmove(items+size-n, items, n*sizeof(T));
+    memcpy(items+size-n, array, n*sizeof(T));
   }
 
   void remove(T *t) {
@@ -900,10 +938,12 @@ union String {
   }
 
   static String create(const char *str) {
-    return String::create(str, strlen(str));
+    return create(str, strlen(str));
   }
 
-  static String create(Slice s);
+  static String String::create(Slice s) {
+    return create(s.chars, s.length);
+  }
 
   STRING_METHODS_DECLARATION;
 };
@@ -946,7 +986,7 @@ union StringBuffer {
     if (cap <= length) {
       const int oldcap = cap;
       while (cap <= length+1)
-        cap = cap ? cap*2 : 4;
+        cap = cap ? cap*2 : 32;
       chars = realloc(chars, oldcap, cap);
     }
     chars[length] = '\0';
@@ -1144,22 +1184,17 @@ union StringBuffer {
     if (!str)
       return;
 
-    #if 0
-    for (; *str; ++str)
-      s += *str;
-    #else
     int l = strlen(str);
     extend(l);
     memcpy(chars + length - l, str, l);
-    #endif
   }
 
   void operator+=(String s) {
-    (*this) += *(Slice*)&s;
+    (*this) += s.slice;
   }
 
   void operator+=(StringBuffer b) {
-    (*this) += CAST(Slice, b);
+    (*this) += b.slice;
   }
 
   void operator+=(Slice b) {
@@ -1168,6 +1203,7 @@ union StringBuffer {
     extend(b.length);
     memcpy(chars + length - b.length, b.chars, b.length);
   }
+
   void appendv(const char* fmt, va_list args) {
     for (; *fmt; ++fmt) {
       if (*fmt == '{' && fmt[1] == '}') {
@@ -1214,6 +1250,10 @@ union StringBuffer {
     return s;
   }
 
+  static StringBuffer create(int initial_size) {
+    return {alloc_array<char>(initial_size+1), 0, initial_size+1};
+  }
+
   STRING_METHODS_DECLARATION;
 };
 
@@ -1222,10 +1262,6 @@ void util_free(StringBuffer &s) {
     dealloc(s.chars);
   s.chars = 0;
   s.length = s.cap = 0;
-}
-
-String String::create(Slice s) {
-  return String::create(s.chars, s.length);
 }
 
 Slice Slice::slice(const char *str, int len, int a, int b) {
@@ -1503,14 +1539,13 @@ namespace File {
     FILE *f = fopen(path, "rb");
     if (!f)
       goto err;
-    while (1) {
-      result->reserve(result->size + 1024);
-      int n = fread(result->items + result->size, 1, 1024, f);
-      result->size += n;
-      if (n != 1024)
-        break;
-    }
-    if (ferror(f))
+    // get file size
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    *result = {alloc_array<u8>(size), (int)size, (int)size};
+    if (fread(result->items, size, 1, f) != 1)
       goto err;
 
     fclose(f);
@@ -1545,362 +1580,6 @@ namespace File {
 #endif /* UTIL_FILE */
 
 
-
-
-#ifndef UTIL_JSON
-#define UTIL_JSON
-
-struct Json {
-  struct ObjectField;
-  enum Type {
-    JSON_INVALID,
-    JSON_NIL,
-    JSON_ARRAY,
-    JSON_NUMBER,
-    JSON_STRING,
-    JSON_OBJECT,
-    JSON_BOOLEAN
-  };
-
-  Type type;
-  union {
-    // JSON_ARRAY 
-    Array<Json> array;
-    // JSON_NUMBER
-    double number;
-    // JSON_STRING
-    String string;
-    // JSON_OBJECT
-    Array<ObjectField> fields;
-    // JSON_BOOLEAN
-    bool boolean;
-  };
-
-  // methods
-  Json& operator[](int i);
-  Json& operator[](const char *str);
-  String dump() const;
-
-  // constructors
-  static bool parse(Slice str, Json *result) {const char *s = str.chars; return _parse(s, s + str.length, result);}
-  static bool parse_file(Path path, Json *result) {
-    String s;
-    if (!File::get_contents(path, &s))
-      return false;
-    bool success = parse(s.slice, result);
-    util_free(s);
-    return success;
-  }
-  static Json create(double d) {Json j = {JSON_NUMBER}; j.number = d; return j;}
-  static Json create(const char *str) {return create(Slice::create(str));}
-  static Json create(Slice s) {Json j = {JSON_STRING}; j.string = String::create(s); return j;}
-  static Json create(bool b) {Json j = {JSON_BOOLEAN}; j.boolean = b; return j;}
-  static Json create() {return {JSON_NIL};}
-
-  // private
-  void _dump(StringBuffer &sb, int indent, bool indent_first) const;
-  static bool _parse(const char *&str, const char *end, Json *result);
-  static bool _parse_string(const char *&str, const char *end, String *result);
-  static char _gettoken(const char *&str, const char *end);
-};
-
-struct Json::ObjectField {
-  String name;
-  Json value;
-};
-
-static Json _invalidJson; // a dump for all invalid values
-
-void Json::_dump(StringBuffer &sb, int indent, bool indent_first) const {
-  static const int INDENT_SIZE = 4;
-  if (type == JSON_INVALID)
-    return;
-
-  if (indent_first)
-    sb.append(' ', INDENT_SIZE*indent);
-  switch (type) {
-    case JSON_INVALID:
-      break;
-
-    case JSON_NIL:
-      sb += "null";
-      break;
-
-    case JSON_ARRAY:
-      sb += "[\n";
-      for (int i = 0; i < array.size; ++i) {
-        array[i]._dump(sb, indent+1, true);
-        if (i < array.size-1)
-          sb += ",";
-        sb += '\n';
-      }
-      sb.append(' ', INDENT_SIZE*indent);
-      sb += "]";
-      break;
-
-    case JSON_NUMBER:
-      sb += number;
-      break;
-
-    case JSON_STRING:
-      sb += '"';
-      for (Utf8char c : string) {
-        if (c == '"' || c == '\\')
-          sb += '\\';
-        sb += c;
-      }
-      sb += '"';
-      break;
-
-    case JSON_OBJECT:
-      sb += '{';
-      if (fields.size == 0)
-        sb += '}';
-      else {
-        sb += '\n';
-        for (int i = 0; i < fields.size; ++i) {
-          sb.append(' ', INDENT_SIZE*(indent+1));
-          sb += '"';
-          sb += fields[i].name;
-          sb += '"';
-          sb += ": ";
-          fields[i].value._dump(sb, indent+1, false);
-          if (i < fields.size-1)
-            sb += ',';
-          sb += '\n';
-        }
-        sb.append(' ', INDENT_SIZE*indent);
-        sb += "}";
-      }
-      break;
-
-    case JSON_BOOLEAN:
-      if (boolean)
-        sb += "true";
-      else
-        sb += "false";
-      break;
-  }
-}
-
-char Json::_gettoken(const char *&str, const char *end) {
-  while (isspace(*str) && str < end)
-    ++str;
-  if (str >= end)
-    return '\0';
-  return *str;
-}
-
-// properly removes escape sequences, so
-// "\"hello\", said the bard. \\\\sincerely yours"
-// ->
-// "hello" said the bard. \\sincerely yours
-bool Json::_parse_string(const char *&str, const char *end, String *result) {
-  StringBuffer sb = {};
-  if (_gettoken(str, end) != '"')
-    goto err;
-
-  ++str;
-  bool escaped = false;
-  while (1) {
-    if (str >= end)
-      goto err;
-    char c = *str;
-    if (!c)
-      goto err;
-    if (c == '\\') {
-      if (escaped) {
-        sb += '\\';
-        escaped = false;
-      }
-      else
-        escaped = true;
-      ++str;
-      continue;
-    }
-
-    if (c == '"' && !escaped)
-      break;
-    escaped = false;
-    sb += c;
-    ++str;
-  }
-  ++str;
-  *result = sb.string;
-  return true;
-
-  err:
-  util_free(sb);
-  return false;
-}
-
-bool Json::_parse(const char *&str, const char *end, Json *result) {
-  // object
-  if (_gettoken(str, end) == '{') {
-    ++str;
-    Json j = {};
-    j.type = JSON_OBJECT;
-    IF_DEBUG(puts("object"));
-    while (1) {
-      if (_gettoken(str, end) == '}') {
-        ++str;
-        break;
-      }
-
-      // get field
-      Json::ObjectField field;
-      if (!Json::_parse_string(str, end, &field.name))
-        return false;
-
-      if (_gettoken(str, end) != ':')
-        return false;
-      ++str;
-
-      // get value
-      if (!Json::_parse(str, end, &field.value))
-        return false;
-
-      j.fields += field;
-
-      if (_gettoken(str, end) == '}') {
-        ++str;
-        break;
-      }
-      if (_gettoken(str, end) == ',') {
-        ++str;
-        continue;
-      }
-      return false;
-    }
-    *result = j;
-    return true;
-  }
-
-  // array
-  else if (_gettoken(str, end) == '[') {
-    ++str;
-    Json j = {};
-    j.type = JSON_ARRAY;
-    IF_DEBUG(puts("array");)
-    while (1) {
-      if (_gettoken(str, end) == ']') {
-        ++str;
-        break;
-      }
-
-      Json jj;
-      if (!Json::_parse(str, end, &jj))
-        return false;
-      j.array += jj;
-
-      if (_gettoken(str, end) == ']') {
-        ++str;
-        break;
-      }
-      if (_gettoken(str, end) == ',') {
-        ++str;
-        continue;
-      }
-      IF_DEBUG(puts("unexpected end of array");)
-      IF_DEBUG(puts(str);)
-      return false;
-    }
-    *result = j;
-    return true;
-  }
-
-  // string
-  else if (_gettoken(str, end) == '"') {
-    Json j = {};
-    j.type = JSON_STRING;
-    IF_DEBUG(puts("string");)
-    if (!Json::_parse_string(str, end, &j.string))
-      return false;
-    *result = j;
-    return true;
-  }
-
-  // number
-  else if (_gettoken(str, end) == '-' || (_gettoken(str, end) >= '0' && _gettoken(str, end) <= '9')) {
-    Json j = {};
-    IF_DEBUG(puts("number");)
-    j.type = JSON_NUMBER;
-    char *digit_end;
-    j.number = strtod(str, &digit_end);
-    if (digit_end == str) {
-      IF_DEBUG(puts("bad number");)
-      return false;
-    }
-    str = digit_end;
-    *result = j;
-    return true;
-  }
-
-  // null
-  else if (_gettoken(str, end) == 'n' && end-str >= 4 && Slice::create(str, 4) == "null") {
-    str += 4;
-    IF_DEBUG(puts("null");)
-    Json j = {};
-    j.type = JSON_NIL;
-    *result = j;
-    return true;
-  }
-
-  else if (_gettoken(str, end) == 't' && end-str >= 4 && Slice::create(str, 4) == "true") {
-    str += 4;
-    IF_DEBUG(puts("true");)
-    Json j = {};
-    j.type = JSON_BOOLEAN;
-    j.boolean = true;
-    *result = j;
-    return true;
-  }
-
-  else if (_gettoken(str, end) == 'f' && end-str >= 5 && Slice::create(str, 5) == "false") {
-    str += 5;
-    IF_DEBUG(puts("false");)
-    Json j = {};
-    j.type = JSON_BOOLEAN;
-    j.boolean = false;
-    *result = j;
-    return true;
-  }
-
-  IF_DEBUG(puts("invalid");)
-  return false;
-}
-
-Json& Json::operator[](int i) {
-  if (type != JSON_ARRAY || i < 0 || i >= array.size) {
-    _invalidJson.type = JSON_INVALID;
-    return _invalidJson;
-  }
-  return array[i];
-}
-
-Json& Json::operator[](const char *str) {
-  if (type != JSON_OBJECT) {
-    _invalidJson.type = JSON_INVALID;
-    return _invalidJson;
-  }
-
-  for (ObjectField &f : fields)
-    if (f.name == str)
-      return f.value;
-
-  _invalidJson.type = JSON_INVALID;
-  return _invalidJson;
-}
-
-String Json::dump() const {
-  StringBuffer sb = {};
-  _dump(sb, 0, false);
-  return sb.string;
-}
-
-#endif /* UTIL_JSON */
-
-
 /***************************************************************
 ***************************************************************
 *                                                            **
@@ -1929,14 +1608,14 @@ static const char* TERM_RESET_FORMAT = "";
 static const char* TERM_RESET_COLOR = "";
 static const char* TERM_RESET = "";
 
+static StringBuffer logging_buffer;
 #define LOGGING_LEVEL_IMPLEMENTATION(level, color) \
 void log_##level(Slice s) {fprintf(stderr, "%s%.*s%s", color, s.length, s.chars, TERM_RESET_COLOR);} \
 void log_##level(String s) {log_##level(s.slice);} \
 void log_##level(va_list args, const char *fmt) { \
-  StringBuffer sb = {}; \
-  sb.appendv(fmt, args); \
-  log_##level(sb.string.slice); \
-  util_free(sb); \
+  logging_buffer.length = 0; \
+  logging_buffer.appendv(fmt, args); \
+  log_##level(logging_buffer.slice); \
 } \
 \
 void log_##level(const char *fmt, ...) { \
@@ -1946,6 +1625,7 @@ void log_##level(const char *fmt, ...) { \
   va_end(args); \
 }
 
+LOGGING_LEVEL_IMPLEMENTATION(debug, TERM_RESET_COLOR)
 LOGGING_LEVEL_IMPLEMENTATION(info, TERM_GREEN)
 LOGGING_LEVEL_IMPLEMENTATION(warn, TERM_YELLOW)
 LOGGING_LEVEL_IMPLEMENTATION(error, TERM_RED)
@@ -2131,24 +1811,24 @@ static bool call(const char *command, int *errcode, String *std_out, String *std
 //
 // Usage
 //
-//   TempAllocator tmp = TempAllocator::create(1024);
-//   tmp.push();
+//   TempAllocator tmp;
+//   tmp.push(512);
 //   ...
 //   tmp.pop_and_free();
 //
 // If you want to persist something, first pop, then copy, then free
 //
-//   TempAllocator tmp = TempAllocator::create(1024);
-//   tmp.push();
+//   TempAllocator tmp;
+//   tmp.push(1024);
 //   ...
 //   tmp.pop();
 //   result = x.copy();
 //   tmp.free();
 //  
 
-static void* temporary_alloc(void *data, size_t size, size_t align);
-static void temporary_dealloc(void *data, void *mem, size_t);
-static void* temporary_realloc(void *data, void *prev, size_t prev_size, size_t size, size_t align);
+static void* temporary_alloc(int index, void *data, size_t size, size_t align);
+static void temporary_dealloc(int index, void *data, void *mem, size_t);
+static void* temporary_realloc(int index, void *data, void *prev, size_t prev_size, size_t size, size_t align);
 
 struct TempAllocator {
   struct Block {
@@ -2160,28 +1840,30 @@ struct TempAllocator {
   Block *current;
   Block *first;
 
-  static TempAllocator create(size_t initial_size = 1024) {
-    TempAllocator t = {};
-    Block *b = (Block*)alloc(offsetof(Block, data) + initial_size, alignof(Block));
-    *b = {};
-    t.first = t.current = b;
-    return t;
-  }
-
-  // pushes the allocator
-  void push() {
+  // initializes and pushes
+  void push(size_t initial_size = 1024) {
+    printf("Creating temp allocator with size %i\n", offsetof(Block,data) + (int)initial_size);
     push_allocator({temporary_alloc, temporary_realloc, temporary_dealloc, (void*)this});
+    *this = {};
+
+    // alloc first block
+    Allocator prev_allocator = allocators[num_allocators-2];
+    Block *b = (Block*)prev_allocator.alloc(num_allocators-2, prev_allocator.alloc_data, offsetof(Block, data) + initial_size, alignof(Block));
+    *b = {0, initial_size, 0};
+    this->first = this->current = b;
   }
 
   void free() {
     #ifdef DEBUG
     int size = 0;
+    int num_blocks = 0;
     #endif
-    Block *b = current;
+    Block *b = first;
     while (b) {
       Block *next = b->next;
       #ifdef DEBUG
-      size += b->size;
+      size += b->cap;
+      ++num_blocks;
       #endif
       dealloc(b, offsetof(Block, data) + b->cap);
 
@@ -2189,11 +1871,10 @@ struct TempAllocator {
     }
 
     #ifdef DEBUG
-    log_info("Freed %i bytes of temporary storage\n", (int)size);
+    log_info("Freed %i bytes of temporary storage in %i blocks\n", size, num_blocks);
     #endif
   }
 
-  // pops the allocator and frees memory
   void pop() {
     pop_allocator();
   }
@@ -2204,16 +1885,18 @@ struct TempAllocator {
   }
 };
 
-static void* temporary_alloc(void *data, size_t size, size_t align) {
-  // TODO: try to make the block size a power of two
+static void* temporary_alloc(int index, void *data, size_t size, size_t align) {
+  // TODO: try to make the block size a power of two, instead of the data
   TempAllocator &t = *(TempAllocator*)data;
   TempAllocator::Block *b = t.current;
   b->size = ALIGNI(b->size, align); // this works because data is max_align_t, so offset (b->size) should also be aligned
   if (b->size + size >= b->cap) {
-    size_t newcap = b->cap;
+    size_t newcap = b->cap*2;
     while (newcap < size)
       newcap *= 2;
-    TempAllocator::Block *new_block = (TempAllocator::Block*)allocators[num_allocators-2].alloc(allocators[num_allocators-2].alloc_data, offsetof(TempAllocator::Block, data) + newcap, alignof(TempAllocator::Block));
+    printf("(%i): Asking parent for %i\n", index, offsetof(TempAllocator::Block, data) + newcap);
+  	Allocator prev_allocator = allocators[index-1];
+    TempAllocator::Block *new_block = (TempAllocator::Block*)prev_allocator.alloc(index-1, prev_allocator.alloc_data, offsetof(TempAllocator::Block, data) + newcap, alignof(TempAllocator::Block));
     new_block->size = 0;
     new_block->cap = newcap;
     new_block->next = 0;
@@ -2223,17 +1906,445 @@ static void* temporary_alloc(void *data, size_t size, size_t align) {
   }
 
   b->size += size;
+  if (index == num_allocators-1)
+    printf("(%i): allocing %i\n", index, size);
   return (char*)&b->data + b->size - size;
 }
 
-static void* temporary_realloc(void *data, void *, size_t, size_t size, size_t align) {
-  return temporary_alloc(data, size, align);
+static void* temporary_realloc(int index, void *data, void *prev, size_t prev_size, size_t size, size_t align) {
+  void *mem = temporary_alloc(index, data, size, align);
+  memcpy(mem, prev, prev_size);
+  return mem;
 }
 
-static void temporary_dealloc(void*, void*, size_t) {}
+static void temporary_dealloc(int, void*, void*, size_t) {}
 
 
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           JSON                             **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
+
+
+
+
+#ifndef UTIL_JSON
+#define UTIL_JSON
+
+#if 1
+#define IF_JSON_DEBUG(stmt)
+#else
+#define IF_JSON_DEBUG(stmt) stmt
+#endif
+
+// TODO, FIXME: this has memory leaks on invalid json (unless the user uses temporary storage)
+// We could fix this with proper rollback, but it's a major pain
+// The easier way is probably just to use temp storage for parsing
+struct JsonBlob;
+struct Json {
+  struct ObjectField;
+  enum Type {
+    JSON_INVALID,
+    JSON_NIL,
+    JSON_ARRAY,
+    JSON_NUMBER,
+    JSON_STRING,
+    JSON_OBJECT,
+    JSON_BOOLEAN
+  };
+
+  Type type;
+  union {
+    // JSON_ARRAY 
+    StaticArray<Json> array;
+    // JSON_NUMBER
+    double number;
+    // JSON_STRING
+    Slice string;
+    // JSON_OBJECT
+    StaticArray<ObjectField> fields;
+    // JSON_BOOLEAN
+    bool boolean;
+  };
+
+  // methods
+  Json& operator[](int i);
+  Json& operator[](const char *str);
+  String dump(int size_hint = 512) const;
+
+  // constructors
+  static bool parse(Slice str, JsonBlob *result);
+  static bool parse_file(Path path, JsonBlob *result);
+  static Json create(double d) {Json j = {JSON_NUMBER}; j.number = d; return j;}
+  static Json create(const char *str) {return create(Slice::create(str));}
+  static Json create(Slice s) {Json j = {JSON_STRING}; j.string = s; return j;}
+  static Json create(bool b) {Json j = {JSON_BOOLEAN}; j.boolean = b; return j;}
+  static Json create() {return {JSON_NIL};}
+
+  // private
+  void _dump(StringBuffer &sb, int indent, bool indent_first) const;
+  static bool _parse(const char *&str, const char *end, Json *result);
+  static bool _parse_string(const char *&str, const char *end, Slice *result);
+  static char _gettoken(const char *&str, const char *end);
+};
+
+struct JsonBlob {
+  TempAllocator allocator;
+  Json root;
+  int size_hint;
+
+  String dump() {return root.dump(size_hint);}
+};
+
+static void util_free(JsonBlob &blob) {
+  blob.allocator.free();
+  blob = {};
+}
+
+bool Json::parse(Slice str, JsonBlob *result) {
+  *result = {};
+  result->allocator.push(str.length);
+  const char *s = str.chars;
+  result->size_hint = str.length;
+  bool success = _parse(s, s + str.length, &result->root);
+  result->allocator.pop();
+  return success;
+}
+
+bool Json::parse_file(Path path, JsonBlob *result) {
+  // no need to keep file contents in temp store
+  String s;
+  if (!File::get_contents(path, &s))
+    return false;
+  bool success = parse(s.slice, result);
+  util_free(s);
+  return success;
+}
+
+struct Json::ObjectField {
+  Slice name;
+  Json value;
+};
+
+static Json _invalidJson; // a dump for all invalid values
+
+void Json::_dump(StringBuffer &sb, int indent, bool indent_first) const {
+  static const int INDENT_SIZE = 4;
+  if (type == JSON_INVALID)
+    return;
+
+  if (indent_first)
+    sb.append(' ', INDENT_SIZE*indent);
+  switch (type) {
+    case JSON_INVALID:
+      break;
+
+    case JSON_NIL:
+      sb += "null";
+      break;
+
+    case JSON_ARRAY:
+      sb += "[\n";
+      for (int i = 0; i < array.size; ++i) {
+        array[i]._dump(sb, indent+1, true);
+        if (i < array.size-1)
+          sb += ",";
+        sb += '\n';
+      }
+      sb.append(' ', INDENT_SIZE*indent);
+      sb += "]";
+      break;
+
+    case JSON_NUMBER:
+      sb += number;
+      break;
+
+    case JSON_STRING:
+      sb += '"';
+      for (Utf8char c : string) {
+        if (c == '"' || c == '\\')
+          sb += '\\';
+        sb += c;
+      }
+      sb += '"';
+      break;
+
+    case JSON_OBJECT:
+      sb += '{';
+      if (fields.size == 0)
+        sb += '}';
+      else {
+        sb += '\n';
+        for (int i = 0; i < fields.size; ++i) {
+          sb.append(' ', INDENT_SIZE*(indent+1));
+          sb += '"';
+          sb += fields[i].name;
+          sb += '"';
+          sb += ": ";
+          fields[i].value._dump(sb, indent+1, false);
+          if (i < fields.size-1)
+            sb += ',';
+          sb += '\n';
+        }
+        sb.append(' ', INDENT_SIZE*indent);
+        sb += "}";
+      }
+      break;
+
+    case JSON_BOOLEAN:
+      if (boolean)
+        sb += "true";
+      else
+        sb += "false";
+      break;
+  }
+}
+
+char Json::_gettoken(const char *&str, const char *end) {
+  while (isspace(*str) && str < end)
+    ++str;
+  if (str >= end)
+    return '\0';
+  return *str;
+}
+
+// properly removes escape sequences, so
+// "\"hello\", said the bard. \\\\sincerely yours"
+// ->
+// "hello" said the bard. \\sincerely yours
+bool Json::_parse_string(const char *&str, const char *end, Slice *result) {
+  int length = 0;
+  char *res = 0;
+  if (_gettoken(str, end) != '"')
+    goto err;
+
+  ++str;
+  // precalculate length of string
+  while (1) {
+    if (str >= end)
+      goto err;
+    char c = *str;
+    if (c == '\\')
+      ++str;
+    else if (c == '\"')
+      break;
+    ++length;
+    ++str;
+  }
+  str -= length;
+
+  res = alloc_array<char>(length);
+  char *out = res;
+  bool escaped = false;
+  while (1) {
+    if (str >= end)
+      goto err;
+    char c = *str;
+    if (!c)
+      goto err;
+    if (c == '\\') {
+      if (escaped) {
+        *out++ = '\\';
+        escaped = false;
+      }
+      else
+        escaped = true;
+      ++str;
+      continue;
+    }
+
+    if (c == '"' && !escaped)
+      break;
+    escaped = false;
+    *out++ = c;
+    ++str;
+  }
+  ++str;
+  *result = {res, length};
+  return true;
+
+  err:
+  if (res)
+    dealloc_array(res, length);
+  return false;
+}
+
+bool Json::_parse(const char *&str, const char *end, Json *result) {
+  // object
+  if (_gettoken(str, end) == '{') {
+    ++str;
+    Json j = {};
+    j.type = JSON_OBJECT;
+    Array<ObjectField> fields = {};
+    IF_JSON_DEBUG(puts("object"));
+    while (1) {
+      if (_gettoken(str, end) == '}') {
+        ++str;
+        break;
+      }
+
+      // get field
+      Json::ObjectField field;
+      if (!Json::_parse_string(str, end, &field.name))
+        return false;
+
+      if (_gettoken(str, end) != ':')
+        return false;
+      ++str;
+
+      // get value
+      if (!Json::_parse(str, end, &field.value))
+        return false;
+
+      fields += field;
+
+      if (_gettoken(str, end) == '}') {
+        ++str;
+        break;
+      }
+      if (_gettoken(str, end) == ',') {
+        ++str;
+        continue;
+      }
+      return false;
+    }
+    j.fields = fields.static_array;
+    *result = j;
+    return true;
+  }
+
+  // array
+  else if (_gettoken(str, end) == '[') {
+    ++str;
+    Json j = {};
+    Array<Json> items = {};
+    j.type = JSON_ARRAY;
+    IF_JSON_DEBUG(puts("array");)
+    while (1) {
+      if (_gettoken(str, end) == ']') {
+        ++str;
+        break;
+      }
+
+      Json jj;
+      if (!Json::_parse(str, end, &jj))
+        return false;
+      items += jj;
+
+      if (_gettoken(str, end) == ']') {
+        ++str;
+        break;
+      }
+      if (_gettoken(str, end) == ',') {
+        ++str;
+        continue;
+      }
+      IF_JSON_DEBUG(puts("unexpected end of array");)
+      IF_JSON_DEBUG(puts(str);)
+      return false;
+    }
+    j.array = items.static_array;
+    *result = j;
+    return true;
+  }
+
+  // string
+  else if (_gettoken(str, end) == '"') {
+    Json j = {};
+    j.type = JSON_STRING;
+    IF_JSON_DEBUG(puts("string");)
+    if (!Json::_parse_string(str, end, &j.string))
+      return false;
+    *result = j;
+    return true;
+  }
+
+  // number
+  else if (_gettoken(str, end) == '-' || (_gettoken(str, end) >= '0' && _gettoken(str, end) <= '9')) {
+    Json j = {};
+    IF_JSON_DEBUG(puts("number");)
+    j.type = JSON_NUMBER;
+    char *digit_end;
+    j.number = strtod(str, &digit_end);
+    if (digit_end == str) {
+      IF_JSON_DEBUG(puts("bad number");)
+      return false;
+    }
+    str = digit_end;
+    *result = j;
+    return true;
+  }
+
+  // null
+  else if (_gettoken(str, end) == 'n' && end-str >= 4 && Slice::create(str, 4) == "null") {
+    str += 4;
+    IF_JSON_DEBUG(puts("null");)
+    Json j = {};
+    j.type = JSON_NIL;
+    *result = j;
+    return true;
+  }
+
+  else if (_gettoken(str, end) == 't' && end-str >= 4 && Slice::create(str, 4) == "true") {
+    str += 4;
+    IF_JSON_DEBUG(puts("true");)
+    Json j = {};
+    j.type = JSON_BOOLEAN;
+    j.boolean = true;
+    *result = j;
+    return true;
+  }
+
+  else if (_gettoken(str, end) == 'f' && end-str >= 5 && Slice::create(str, 5) == "false") {
+    str += 5;
+    IF_JSON_DEBUG(puts("false");)
+    Json j = {};
+    j.type = JSON_BOOLEAN;
+    j.boolean = false;
+    *result = j;
+    return true;
+  }
+
+  IF_JSON_DEBUG(puts("invalid");)
+  return false;
+}
+
+Json& Json::operator[](int i) {
+  if (type != JSON_ARRAY || i < 0 || i >= array.size) {
+    _invalidJson.type = JSON_INVALID;
+    return _invalidJson;
+  }
+  return array[i];
+}
+
+Json& Json::operator[](const char *str) {
+  if (type != JSON_OBJECT) {
+    _invalidJson.type = JSON_INVALID;
+    return _invalidJson;
+  }
+
+  for (ObjectField &f : fields)
+    if (f.name == str)
+      return f.value;
+
+  _invalidJson.type = JSON_INVALID;
+  return _invalidJson;
+}
+
+String Json::dump(int size_hint) const {
+  StringBuffer sb = StringBuffer::create(size_hint);
+  _dump(sb, 0, false);
+  return sb.string;
+}
+
+#endif /* UTIL_JSON */
 
 
 
