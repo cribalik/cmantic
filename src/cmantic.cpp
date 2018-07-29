@@ -5463,20 +5463,17 @@ int main(int, const char *[])
   TempAllocator tmp;
   tmp.push();
 
-  // String s;
-  // File::get_contents("test.json", &s);
   #if 1
   JsonBlob j;
   Path p = Path::create("test.json");
   if (!Json::parse_file(p, &j))
     log_error("Failed to parse json\n"), exit(1);
-  log_info(j.dump());
+  log_debug(j.dump());
   util_free(j);
   #endif
 
   tmp.pop_and_free();
   #endif
-  log_error("%i\n", (int)sizeof(Json::ObjectField));
 
   state_init();
 

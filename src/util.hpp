@@ -1356,7 +1356,6 @@ struct Path {
         bool succ = string.find_r(i-1, separator, &prev);
         if (!succ)
           prev = -1;
-        printf("%i\n", prev);
         int num_to_remove = i-prev+3;
         string.remove(prev, num_to_remove);
         i -= num_to_remove;
@@ -1785,6 +1784,12 @@ static bool call(const char *command, int *errcode, String *std_out, String *std
 
 #endif /* UTIL_PROCESS */
 
+#if 1
+#define IF_ALLOC_DEBUG(stmt)
+#else
+#define IF_ALLOC_DEBUG(stmt) stmt
+#endif
+
 
 
 /***************************************************************
@@ -1842,7 +1847,7 @@ struct TempAllocator {
 
   // initializes and pushes
   void push(size_t initial_size = 1024) {
-    printf("Creating temp allocator with size %i\n", offsetof(Block,data) + (int)initial_size);
+    IF_ALLOC_DEBUG(log_info("Creating temp allocator with size %i\n", offsetof(Block,data) + (int)initial_size));
     push_allocator({temporary_alloc, temporary_realloc, temporary_dealloc, (void*)this});
     *this = {};
 
@@ -1854,25 +1859,24 @@ struct TempAllocator {
   }
 
   void free() {
-    #ifdef DEBUG
-    int size = 0;
-    int num_blocks = 0;
-    #endif
+    IF_DEBUG(
+      int size = 0;
+      int num_blocks = 0;
+    );
+
     Block *b = first;
     while (b) {
       Block *next = b->next;
-      #ifdef DEBUG
-      size += b->cap;
-      ++num_blocks;
-      #endif
+      IF_DEBUG(
+        size += b->cap;
+        ++num_blocks;
+      );
       dealloc(b, offsetof(Block, data) + b->cap);
 
       b = next;
     }
 
-    #ifdef DEBUG
-    log_info("Freed %i bytes of temporary storage in %i blocks\n", size, num_blocks);
-    #endif
+    IF_DEBUG(log_info("Freed %i bytes of temporary storage in %i blocks\n", size, num_blocks));
   }
 
   void pop() {
@@ -1894,7 +1898,7 @@ static void* temporary_alloc(int index, void *data, size_t size, size_t align) {
     size_t newcap = b->cap*2;
     while (newcap < size)
       newcap *= 2;
-    printf("(%i): Asking parent for %i\n", index, offsetof(TempAllocator::Block, data) + newcap);
+    IF_ALLOC_DEBUG(printf("(%i): Asking parent for %i\n", index, offsetof(TempAllocator::Block, data) + newcap));
   	Allocator prev_allocator = allocators[index-1];
     TempAllocator::Block *new_block = (TempAllocator::Block*)prev_allocator.alloc(index-1, prev_allocator.alloc_data, offsetof(TempAllocator::Block, data) + newcap, alignof(TempAllocator::Block));
     new_block->size = 0;
@@ -1906,8 +1910,10 @@ static void* temporary_alloc(int index, void *data, size_t size, size_t align) {
   }
 
   b->size += size;
-  if (index == num_allocators-1)
-    printf("(%i): allocing %i\n", index, size);
+  IF_ALLOC_DEBUG(
+    if (index == num_allocators-1)
+      printf("(%i): allocing %i\n", index, size);
+  );
   return (char*)&b->data + b->size - size;
 }
 
