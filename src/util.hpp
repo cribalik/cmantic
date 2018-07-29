@@ -2134,8 +2134,17 @@ static bool call(const char *command, int *errcode, String *std_out, String *std
 //   TempAllocator tmp = TempAllocator::create(1024);
 //   tmp.push();
 //   ...
-//   tmp.pop();
+//   tmp.pop_and_free();
 //
+// If you want to persist something, first pop, then copy, then free
+//
+//   TempAllocator tmp = TempAllocator::create(1024);
+//   tmp.push();
+//   ...
+//   tmp.pop();
+//   result = x.copy();
+//   tmp.free();
+//  
 
 static void* temporary_alloc(void *data, size_t size, size_t align);
 static void temporary_dealloc(void *data, void *mem, size_t);
@@ -2164,8 +2173,7 @@ struct TempAllocator {
     push_allocator({temporary_alloc, temporary_realloc, temporary_dealloc, (void*)this});
   }
 
-  // pops the allocator and frees memory
-  void pop() {
+  void free() {
     #ifdef DEBUG
     int size = 0;
     #endif
@@ -2183,7 +2191,15 @@ struct TempAllocator {
     #ifdef DEBUG
     log_info("Freed %i bytes of temporary storage\n", (int)size);
     #endif
+  }
 
+  // pops the allocator and frees memory
+  void pop() {
+    pop_allocator();
+  }
+
+  void pop_and_free() {
+    free();
     pop_allocator();
   }
 };

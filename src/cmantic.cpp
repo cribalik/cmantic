@@ -5468,8 +5468,8 @@ int main(int, const char *[])
   if (!Json::parse_file(p, &j))
     log_error("Failed to parse json\n"), exit(1);
   log_info(j.dump());
+  tmp.pop_and_free();
 
-  tmp.pop();
   #endif
 
   state_init();
