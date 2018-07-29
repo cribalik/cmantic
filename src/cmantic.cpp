@@ -39,7 +39,7 @@
  * Update markers in other panes with same buffer (or at least make sure they are in range)
  */
 
-#if 0
+#if 1
 #define DEBUG
 #endif
 
@@ -5459,14 +5459,17 @@ int main(int, const char *[])
   else
     log_info("Command succeeded:\n{}\n\n", &out.slice);
 
+  #if 1
+  TempAllocator tmp = TempAllocator::create();
+  tmp.push();
 
-  #if 0
   Json j;
   Path p = Path::create("test.json");
   if (!Json::parse_file(p, &j))
     log_error("Failed to parse json\n"), exit(1);
-  util_free(p);
   log_info(j.dump());
+
+  tmp.pop();
   #endif
 
   state_init();

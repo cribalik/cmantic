@@ -8,16 +8,20 @@
   #define _POSIX_C_SOURCE 200112L
   #include <unistd.h>
   #include <termios.h>
-  #include <errno.h>
   #include <sys/ioctl.h>
   #include <sys/select.h>
+  #include <sys/types.h>
+  #include <dirent.h>
 #else
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN 1
   #endif
   #define NOMINMAX
   #include <windows.h>
+  #include <direct.h>
+  #include <sys/types.h>
 #endif
+#include <cstddef>
 #include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
@@ -26,6 +30,7 @@
 #include <stdarg.h>
 #include <assert.h>
 #include <math.h>
+#include <sys/stat.h>
 
 /***************************************************************
 ***************************************************************
@@ -37,16 +42,6 @@
 ***************************************************************
 ***************************************************************/
 
-#ifdef OS_LINUX
-  #include <errno.h>
-  #include <sys/types.h>
-  #include <dirent.h>
-  #include <sys/stat.h>
-#else
-  #include <direct.h>
-  #include <sys/types.h>
-  #include <sys/stat.h>
-#endif /* OS */
 
 #ifdef _MSC_VER
   typedef __int8 i8;
@@ -91,7 +86,8 @@ template<class T> union Array;
 template<class T> struct View;
 template<class T> union StrideView;
 template<class T> void util_free(Array<T> &);
-
+#define ALIGN(ptr, n) (void*)(((long)(ptr)+((n)-1)) & ~((n)-1))
+#define ALIGNI(ptr, n) (((long)(ptr)+((n)-1)) & ~((n)-1))
 #define CONTAINEROF(ptr, type, member) (((type)*)((char*)ptr - offsetof(type, member)))
 #define CAST(type, val) (*(type*)(&(val)))
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
@@ -131,6 +127,96 @@ void swap(T &a, T &b) {
 ***************************************************************
 *                                                            **
 *                                                            **
+*                          ALLOCATION                        **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
+// All the util libraries uses this stack of allocators.
+// If you want a util library to use your own allocator, you push it on to the stack before using the util stuff
+// See ALLOCATORS for some allocator implementations
+struct Allocator {
+  void *(*alloc)  (void *alloc_data, size_t size, size_t align);
+  void *(*realloc)(void *alloc_data, void *prev, size_t prev_size, size_t size, size_t align);
+  void (*dealloc) (void *alloc_data, void*, size_t size);
+  void *alloc_data;
+};
+
+static void* default_alloc(void*, size_t size, size_t) {
+  return malloc(size);
+}
+static void default_dealloc(void*, void *mem, size_t) {
+  free(mem);
+}
+static void* default_realloc(void *, void *prev, size_t, size_t size, size_t) {
+  return realloc(prev, size);
+}
+
+// You shall not have an allocator stack greater than 64 or I will personally come and slap you for writing shit code (i.e. have so little discipline in your control flow that you let it happen).
+static Allocator allocators[64] = {{default_alloc, default_realloc, default_dealloc, 0}};
+static int num_allocators = 1;
+static void *(*current_alloc)(void *alloc_data, size_t size, size_t align) = default_alloc;
+static void *(*current_realloc)(void *alloc_data, void *prev, size_t prev_size, size_t size, size_t align) = default_realloc;
+static void (*current_dealloc)(void *alloc_data, void*, size_t size) = default_dealloc;
+static void *current_alloc_data;
+
+template<class T>
+static T* alloc() {
+  return (T*)current_alloc(current_alloc_data, sizeof(T), alignof(T));
+}
+
+static void* alloc(size_t size, size_t align = alignof(max_align_t)) {
+  return current_alloc(current_alloc_data, size, align);
+}
+
+template<class T>
+static T* alloc_array(size_t num) {
+  return (T*)current_alloc(current_alloc_data, sizeof(T)*num, alignof(T));
+}
+
+static void* realloc(void *prev, size_t prev_size, size_t size, size_t align = alignof(max_align_t)) {
+  return current_realloc(current_alloc_data, prev, prev_size, size, align);
+}
+
+template<class T>
+static T* realloc(T *prev, size_t prev_num, size_t num) {
+  return (T*)current_realloc(current_alloc_data, prev, sizeof(T)*prev_num, sizeof(T)*num, alignof(T));
+}
+
+template<class T>
+static void dealloc(T *t) {
+  current_dealloc(current_alloc_data, t, sizeof(T));
+}
+
+template<class T>
+static void dealloc_array(T *t, size_t num) {
+  current_dealloc(current_alloc_data, t, sizeof(T)*num);
+}
+
+static void dealloc(void *mem, size_t size) {
+  current_dealloc(current_alloc_data, mem, size);
+}
+
+static void push_allocator(Allocator a) {
+  allocators[num_allocators++] = a;
+  current_alloc = a.alloc;
+  current_dealloc = a.dealloc;
+  current_alloc_data = a.alloc_data;
+}
+
+static void pop_allocator() {
+  --num_allocators;
+  current_alloc = allocators[num_allocators-1].alloc;
+  current_dealloc = allocators[num_allocators-1].dealloc;
+  current_alloc_data = allocators[num_allocators-1].alloc_data;
+}
+
+
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
 *                           ARRAY                            **
 *                                                            **
 *                                                            **
@@ -146,16 +232,6 @@ void swap(T &a, T &b) {
 
 #ifndef ARRAY_INITIAL_SIZE
   #define ARRAY_INITIAL_SIZE 4
-#endif
-
-#ifndef ARRAY_REALLOC
-  #include <stdlib.h>
-  #define ARRAY_REALLOC realloc
-#endif
-
-#ifndef ARRAY_FREE
-  #include <stdlib.h>
-  #define ARRAY_FREE free
 #endif
 
 template<class T>
@@ -265,7 +341,7 @@ union Array {
   }
 
   void free_shallow() {
-    free(items);
+    dealloc(items);
   }
 
   void zero() {
@@ -380,7 +456,7 @@ union Array {
       int newcap = cap ? cap*2 : 1;
       while (newcap < size+n)
         newcap *= 2;
-      items = (T*)ARRAY_REALLOC(items, newcap * sizeof(T));
+      items = realloc(items, cap, newcap);
       cap = newcap;
     }
     size += n;
@@ -408,7 +484,7 @@ void util_free(Array<T> &a) {
   if (a.items) {
     for (int i = 0; i < a.size; ++i)
       util_free(a.items[i]);
-    free(a.items);
+    dealloc(a.items);
   }
   a.items = 0;
   a.size = a.cap = 0;
@@ -817,7 +893,7 @@ union String {
 
     String s;
     s.length = len;
-    s.chars = (char*)malloc(s.length+1);
+    s.chars = alloc_array<char>(s.length+1);
     memcpy(s.chars, str, s.length);
     s.chars[s.length] = '\0';
     return s;
@@ -844,7 +920,7 @@ static bool operator==(String a, const char *b) {
 
 void util_free(String &s) {
   if (s.chars)
-    free(s.chars);
+    dealloc(s.chars);
   s.chars = 0;
   s.length = 0;
 }
@@ -868,9 +944,10 @@ union StringBuffer {
   void extend(int l) {
     length += l;
     if (cap <= length) {
+      const int oldcap = cap;
       while (cap <= length+1)
         cap = cap ? cap*2 : 4;
-      chars = (char*)realloc(chars, cap);
+      chars = realloc(chars, oldcap, cap);
     }
     chars[length] = '\0';
   }
@@ -1142,7 +1219,7 @@ union StringBuffer {
 
 void util_free(StringBuffer &s) {
   if (s.chars)
-    free(s.chars);
+    dealloc(s.chars);
   s.chars = 0;
   s.length = s.cap = 0;
 }
@@ -1164,7 +1241,7 @@ Slice Slice::slice(const char *str, int len, int a, int b) {
 
 String Slice::copy(const char *chars, int length) {
   String s;
-  s.chars = (char*)malloc(length+1);
+  s.chars = alloc_array<char>(length+1);
   s.length = length;
   memcpy(s.chars, chars, length);
   s.chars[length] = '\0';
@@ -1824,6 +1901,15 @@ String Json::dump() const {
 #endif /* UTIL_JSON */
 
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           LOGGING                          **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
 
 #ifndef UTIL_LOGGING
 #define UTIL_LOGGING
@@ -1832,8 +1918,7 @@ String Json::dump() const {
 #include <io.h>
 #endif
 
-/* Terminal textstyles */
-
+// Terminal textstyles
 static const char* TERM_RED = "";
 static const char* TERM_GREEN = "";
 static const char* TERM_YELLOW = "";
@@ -1869,11 +1954,24 @@ LOGGING_LEVEL_IMPLEMENTATION(error, TERM_RED)
 
 
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           PROCESS                          **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
 #ifndef UTIL_PROCESS
 #define UTIL_PROCESS
 
 static bool call(Slice command, int *errcode, String *std_out, String *std_err) {
-  // https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
+  // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
+  // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
+
+  // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
   bool get_output = std_out || std_err;
   bool success = false;
   HANDLE proc_stdout = 0;
@@ -2009,6 +2107,138 @@ static bool call(const char *command, int *errcode, String *std_out, String *std
 
 
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           ALLOCATORS                       **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
+
+/*****************************************************
+*                                                    *
+*           Temp (arena/colony) allocator            *
+*                                                    *
+*****************************************************/
+
+// A linked list of exponentially growing blocks that only gets freed when you free the whole thing
+// This is really nice because it allows you to completely ignore freeing anything until the very end of whatever you're doing
+// And you are always sure you don't have any leaks
+// Just remember that anything you want to keep, you store separately before freeing
+//
+// Usage
+//
+//   TempAllocator tmp = TempAllocator::create(1024);
+//   tmp.push();
+//   ...
+//   tmp.pop();
+//
+
+static void* temporary_alloc(void *data, size_t size, size_t align);
+static void temporary_dealloc(void *data, void *mem, size_t);
+static void* temporary_realloc(void *data, void *prev, size_t prev_size, size_t size, size_t align);
+
+struct TempAllocator {
+  struct Block {
+    size_t size;
+    size_t cap;
+    Block *next;
+    max_align_t data;
+  };
+  Block *current;
+  Block *first;
+
+  static TempAllocator create(size_t initial_size = 1024) {
+    TempAllocator t = {};
+    Block *b = (Block*)alloc(offsetof(Block, data) + initial_size, alignof(Block));
+    *b = {};
+    t.first = t.current = b;
+    return t;
+  }
+
+  // pushes the allocator
+  void push() {
+    push_allocator({temporary_alloc, temporary_realloc, temporary_dealloc, (void*)this});
+  }
+
+  // pops the allocator and frees memory
+  void pop() {
+    #ifdef DEBUG
+    int size = 0;
+    #endif
+    Block *b = current;
+    while (b) {
+      Block *next = b->next;
+      #ifdef DEBUG
+      size += b->size;
+      #endif
+      dealloc(b, offsetof(Block, data) + b->cap);
+
+      b = next;
+    }
+
+    #ifdef DEBUG
+    log_info("Freed %i bytes of temporary storage\n", (int)size);
+    #endif
+
+    pop_allocator();
+  }
+};
+
+static void* temporary_alloc(void *data, size_t size, size_t align) {
+  // TODO: try to make the block size a power of two
+  TempAllocator &t = *(TempAllocator*)data;
+  TempAllocator::Block *b = t.current;
+  b->size = ALIGNI(b->size, align); // this works because data is max_align_t, so offset (b->size) should also be aligned
+  if (b->size + size >= b->cap) {
+    size_t newcap = b->cap;
+    while (newcap < size)
+      newcap *= 2;
+    TempAllocator::Block *new_block = (TempAllocator::Block*)allocators[num_allocators-2].alloc(allocators[num_allocators-2].alloc_data, offsetof(TempAllocator::Block, data) + newcap, alignof(TempAllocator::Block));
+    new_block->size = 0;
+    new_block->cap = newcap;
+    new_block->next = 0;
+    b->next = new_block;
+    t.current = new_block;
+    b = new_block;
+  }
+
+  b->size += size;
+  return (char*)&b->data + b->size - size;
+}
+
+static void* temporary_realloc(void *data, void *, size_t, size_t size, size_t align) {
+  return temporary_alloc(data, size, align);
+}
+
+static void temporary_dealloc(void*, void*, size_t) {}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           INIT                             **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
 
 
 void util_init() {
