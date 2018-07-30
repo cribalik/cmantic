@@ -46,6 +46,7 @@
 // @includes
 #include "util.hpp"
 #include "graphics.hpp"
+#include "git.cpp"
 
 struct FuzzyMatch {
   Slice str;
@@ -350,6 +351,8 @@ struct BufferData {
   BufferData *buffer;
 
   Array<StringBuffer> lines;
+  Array<String> blame;
+
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
   // raw_mode is used when inserting text that is not coming from the keyboard, for example when pasting text or doing undo/redo
@@ -1432,6 +1435,33 @@ static void menu_option_closeall() {
     G.buffers_to_remove += b;
 }
 
+static void menu_option_blame() {
+  BufferData &b = *G.editing_pane->buffer.data;
+  if (b.blame.size) {
+    util_free(b.blame);
+    return;
+  }
+  util_free(b.blame);
+
+  save_buffer(&b);
+  // TODO: ask the user if it's okay we save before blaming
+
+  // call git
+  StringBuffer cmd = {};
+  cmd.appendf("git blame {} --porcelain", &b.filename);
+
+  int errcode;
+  String out;
+  if (!call(cmd.slice, &errcode, &out, NULL)) {
+    status_message_set("Call to git failed");
+    goto done;
+  }
+  git_parse_blame(out, &b.blame);
+
+  done:
+  util_free(cmd);
+}
+
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   {
     Slice::create("quit"),
@@ -1478,6 +1508,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("Close all open buffers"),
     menu_option_closeall
   },
+  {
+    Slice::create("blame"),
+    Slice::create("git blame on current file"),
+    menu_option_blame
+  }
 };
 
 static Array<String> easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings);
@@ -3439,6 +3474,8 @@ void BufferData::action_begin(Array<Cursor> &cursors) {
   if (undo_disabled)
     return;
 
+  util_free(blame);
+
   if (_action_group_depth == 0) {
     push_undo_action({ACTIONTYPE_GROUP_BEGIN});
     push_undo_action(UndoAction::cursor_snapshot(cursors));
@@ -5089,6 +5126,16 @@ void Pane::render_edit() {
   // draw each line 
   for (int y = buf_offset.y; y < buf_y1; ++y)
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
+
+  // draw blame
+  if (d.blame.size) {
+    for (int y = buf_offset.y; y < buf_y1; ++y) {
+      Pos p = d.to_visual_pos({d.lines[y].length, y});
+      p.x = at_least(p.x+2, 30);
+      canvas.render_str(p, &G.comment_color, NULL, p.x, -1, d.blame[y].slice);
+      // canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
+    }
+  }
 
   this->render_syntax_highlight(canvas, buf_y1);
 

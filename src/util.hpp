@@ -692,6 +692,8 @@ struct Utf8Iter {
   Utf8Iter end() const; \
   int prev(int i) const; \
   int next(int i) const; \
+  bool tofloat(double *result) const; \
+  bool toint(int *result) const; \
   int from_visual_offset(int x, int tab_width) const; \
   int visual_offset(int x, int tab_width) const; \
   bool equals(const char *str, int n) const; \
@@ -704,6 +706,8 @@ struct Utf8Iter {
   bool find_r(StringBuffer s, int *result) const; \
   bool find_r(char c, int *result) const; \
   bool find_r(int offset, char c, int *result) const; \
+  Slice token(int *offset, char c) const; \
+  Slice token(int *offset, const char *c) const; \
   bool begins_with(int offset, String s) const; \
   bool begins_with(int offset, Slice s) const; \
   bool begins_with(int offset, StringBuffer s) const; \
@@ -720,6 +724,8 @@ struct Utf8Iter {
   Utf8Iter classname::end() const {return {};} \
   int classname::prev(int i) const {return Slice::prev(chars, i);} \
   int classname::next(int i) const {return Slice::next(chars, length, i);} \
+  bool classname::tofloat(double *result) const {return Slice::tofloat(chars, length, result);} \
+  bool classname::toint(int *result) const {return Slice::toint(chars, length, result);} \
   int classname::from_visual_offset(int x, int tab_width) const {return Slice::from_visual_offset(chars, length, x, tab_width);} \
   int classname::visual_offset(int x, int tab_width) const {return Slice::visual_offset(chars, length, x, tab_width);} \
   bool classname::equals(const char *str, int n) const {return Slice::equals(chars, length, str, n);} \
@@ -732,6 +738,8 @@ struct Utf8Iter {
   bool classname::find_r(StringBuffer s, int *result) const {return Slice::find_r(chars, length, TO_STR(s), result);} \
   bool classname::find_r(char c, int *result) const {return Slice::find_r(chars, length, c, result);} \
   bool classname::find_r(int offset, char c, int *result) const {return Slice::find_r(chars, offset, c, result);} \
+  Slice classname::token(int *offset, char c) const {return Slice::token(chars, length, offset, c);} \
+  Slice classname::token(int *offset, const char *c) const {return Slice::token(chars, length, offset, c);} \
   bool classname::begins_with(int offset, String s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, Slice s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
@@ -769,6 +777,36 @@ struct Slice {
     }
   }
 
+  static bool tofloat(const char *chars, int length, double *result) {
+    char buf[24];
+    while (chars && length && *chars == ' ')
+      ++chars, --length;
+
+    if (!length || length >= sizeof(buf))
+      return false;
+
+    memcpy(buf, chars, length);
+    buf[length] = '\0';
+    char *end;
+    *result = strtod(buf, &end);
+    return end != buf;
+  }
+
+  static bool toint(const char *chars, int length, int *result) {
+    char buf[24];
+    while (chars && length && *chars == ' ')
+      ++chars, --length;
+
+    if (!length || length >= sizeof(buf))
+      return false;
+
+    memcpy(buf, chars, length);
+    buf[length] = '\0';
+    char *end;
+    *result = strtol(buf, &end, 10);
+    return end != buf;
+  }
+
   /* returns the logical index located visually at x */
   static int from_visual_offset(const char *chars, int length, int x, int tab_width) {
     int visual = 0;
@@ -794,10 +832,13 @@ struct Slice {
     if (!chars)
       return 0;
 
-    if (x > length)
-      x = length;
-
     int result = 0;
+
+    if (x > length) {
+      result += x - length;
+      x = length;
+    }
+
     for (int i = 0; i < x; ++i) {
       if (is_utf8_trail(chars[i]))
         continue;
@@ -811,6 +852,34 @@ struct Slice {
 
   static bool equals(const char *chars, int length, const char *str, int n) {
     return length == n && !memcmp(chars, str, n);
+  }
+
+  static Slice token(const char *chars, int length, int *offset, char c) {
+    int i = *offset;
+    while (chars[i] != c && i < length)
+      ++i;
+    Slice s = {chars + *offset, i - *offset};
+    while (chars[i] == c && i < length)
+      ++i;
+    *offset = i;
+    return s;
+  }
+
+  static bool contains(const char *s, char c) {
+    for (s; *s; ++s)
+      if (*s == c)
+        return true;
+    return false;
+  }
+  static Slice token(const char *chars, int length, int *offset, const char *c) {
+    int i = *offset;
+    while (!contains(c, chars[i]) && i < length)
+      ++i;
+    Slice s = {chars + *offset, i - *offset};
+    while (contains(c, chars[i]) && i < length)
+      ++i;
+    *offset = i;
+    return s;
   }
 
   static bool find(const char *chars, int length, int offset, Slice s, int *result) {
@@ -944,6 +1013,8 @@ union String {
   static String String::create(Slice s) {
     return create(s.chars, s.length);
   }
+
+  static String createf(const char *fmt, ...);
 
   STRING_METHODS_DECLARATION;
 };
@@ -1250,6 +1321,15 @@ union StringBuffer {
     return s;
   }
 
+  static StringBuffer createf(const char *fmt, ...) {
+    StringBuffer sb = {};
+    va_list args;
+    va_start(args, fmt);
+    sb.appendv(fmt, args);
+    va_end(args);
+    return sb;
+  }
+
   static StringBuffer create(int initial_size) {
     return {alloc_array<char>(initial_size+1), 0, initial_size+1};
   }
@@ -1262,6 +1342,15 @@ void util_free(StringBuffer &s) {
     dealloc(s.chars);
   s.chars = 0;
   s.length = s.cap = 0;
+}
+
+String String::createf(const char *fmt, ...) {
+  StringBuffer sb = {};
+  va_list args;
+  va_start(args, fmt);
+  sb.appendv(fmt, args);
+  va_end(args);
+  return sb.string;
 }
 
 Slice Slice::slice(const char *str, int len, int a, int b) {
