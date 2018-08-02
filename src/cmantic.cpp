@@ -2151,7 +2151,7 @@ static void state_init() {
   // initialize graphics library
   if (graphics_init(&G.window))
     exit(1);
-  G.font_height = 16;
+  G.font_height = 14;
   if (graphics_text_init(G.ttf_file.string.chars, G.font_height))
     exit(1);
   if (graphics_quad_init())
@@ -2168,7 +2168,7 @@ static void state_init() {
 
   // @colors!
   G.default_text_color = COLOR_WHITE;
-  G.default_background_color = {33, 33, 33, 255};
+  G.default_background_color = {45, 45, 45, 255};
   G.default_gutter_text_color = {127, 127, 127, 255};
   G.number_color = COLOR_RED;
   G.string_color =                          COLOR_RED;
@@ -2192,7 +2192,7 @@ static void state_init() {
   G.active_highlight_background_color.popped_color = COLOR_WHITE;
   G.active_highlight_background_color.speed = 1.0f;
   G.active_highlight_background_color.cooldown = 1.0f;
-  G.active_highlight_background_color.min = 0.1f;
+  G.active_highlight_background_color.min = 0.0f;
   G.active_highlight_background_color.max = 0.18f;
 
   G.bottom_pane_highlight.base_color = G.default_background_color;
@@ -4989,7 +4989,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
 
 void Pane::add_subpane(BufferData *b, Pos pos) {
   Pane *p = new Pane{};
-  Pane::init_edit(*p, b, (Color*)&COLOR_GREY, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+  Pane::init_edit(*p, b, (Color*)&G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
   p->buffer.move_to(pos);
   p->parent = this;
   subpanes += {buffer.cursors[0].pos, p};
