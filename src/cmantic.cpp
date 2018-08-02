@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * Search on word only
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
  * make 'dp' use tokens instead of chars
@@ -1336,7 +1337,7 @@ static void save_buffer(BufferData *b) {
   assert(b->filename.length);
 
   if (file_open(&f, b->filename.chars, "wb")) {
-    status_message_set("Could not open file %s for writing: %s", b->filename, cman_strerror(errno));
+    status_message_set("Could not open file {} for writing: %s", (Slice)b->filename.slice, cman_strerror(errno));
     return;
   }
 
@@ -1347,20 +1348,20 @@ static void save_buffer(BufferData *b) {
     unsigned int num_to_write = b->lines[i].length;
 
     if (num_to_write && file_write(f, b->lines[i].chars, num_to_write)) {
-      status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
+      status_message_set("Failed to write to {}: %s", (Slice)b->filename.slice, cman_strerror(errno));
       goto err;
     }
 
     // endline
     if (i < b->num_lines()-1) {
       if (file_write(f, b->endline_string, endline_len)) {
-        status_message_set("Failed to write to %s: %s", b->filename, cman_strerror(errno));
+        status_message_set("Failed to write to {}: %s", (Slice)b->filename.slice, cman_strerror(errno));
         goto err;
       }
     }
   }
 
-  status_message_set("Wrote %i lines to %s", b->num_lines(), b->filename);
+  status_message_set("Wrote %i lines to {}", b->num_lines(), (Slice)b->filename.slice);
 
   b->_last_save_undo_action = b->_next_undo_action;
 
@@ -1409,9 +1410,9 @@ static void menu_option_reload() {
     return;
 
   if (BufferData::reload(G.editing_pane->buffer.data))
-    status_message_set("Reloaded {}", &G.editing_pane->buffer.data->filename.slice);
+    status_message_set("Reloaded {}", (Slice)G.editing_pane->buffer.data->filename.slice);
   else
-    status_message_set("Failed to reload {}", &G.editing_pane->buffer.data->filename.slice);
+    status_message_set("Failed to reload {}", (Slice)G.editing_pane->buffer.data->filename.slice);
 }
 
 static void menu_option_reloadall() {
@@ -1425,7 +1426,7 @@ static void menu_option_close() {
   if (b == &G.null_buffer)
     return;
 
-  status_message_set("Closed {}", &b->filename.slice);
+  status_message_set("Closed {}", (Slice)b->filename.slice);
   G.buffers_to_remove += b;
 }
 
@@ -1448,11 +1449,11 @@ static void menu_option_blame() {
 
   // call git
   StringBuffer cmd = {};
-  cmd.appendf("git blame {} --porcelain", &b.filename);
+  cmd.appendf("git blame {} --porcelain", (Slice)b.filename.slice);
 
   int errcode;
   String out;
-  if (!call(cmd.slice, &errcode, &out, NULL)) {
+  if (!call(cmd.slice, &errcode, &out)) {
     status_message_set("Call to git failed");
     goto done;
   }
@@ -1594,7 +1595,7 @@ static Array<String> get_cwd_suggestions() {
   // StringBuffer sb = {};
   for (int i = 0; i < n; ++i) {
     // sb.length = 0;
-    // sb.appendf("{} - %f", &matches[i].str, matches[i].points);
+    // sb.appendf("{} - %f", matches[i].str.slice, matches[i].points);
     // result += String::create(sb.slice);
     result += String::create(paths[matches[i].idx].string.slice);
   }
@@ -1987,7 +1988,7 @@ static bool movement_default(BufferView &buffer, int key) {
       G.search_term_background_color.reset();
       buffer.jumplist_push();
       if (!buffer.find_and_move(G.search_term.slice, false))
-        status_message_set("'{}' not found", &G.menu_buffer[0]);
+        status_message_set("'{}' not found", (Slice)G.menu_buffer[0].slice);
       else
         buffer.jumplist_push();
       break;
@@ -2056,7 +2057,7 @@ static bool movement_default(BufferView &buffer, int key) {
       G.search_term_background_color.reset();
       buffer.jumplist_push();
       if (!buffer.find_and_move_r(G.search_term.slice, false))
-        status_message_set("'{}' not found", &G.search_term.slice);
+        status_message_set("'{}' not found", (Slice)G.search_term.slice);
       else
         buffer.jumplist_push();
       break;
@@ -2396,23 +2397,23 @@ static void handle_input(Key key) {
       if (!File::isdir(p)) {
         Slice *s = G.menu_pane.menu_get_selection();
         if (!s) {
-          status_message_set("'{}' is not a directory", &p.string.slice);
+          status_message_set("'{}' is not a directory", (Slice)p.string.slice);
           goto err;
         }
         util_free(p);
         p = Path::create(*s);
         if (!File::isdir(p)) {
-          status_message_set("'{}' is not a directory", &p.string.slice);
+          status_message_set("'{}' is not a directory", (Slice)p.string.slice);
           goto err;
         }
       }
 
       if (!File::change_dir(p)) {
-        status_message_set("Failed to change directory to '{}'", &p.string.slice);
+        status_message_set("Failed to change directory to '{}'", (Slice)p.string.slice);
         goto err;
       }
 
-      status_message_set("Changed directory to '{}'", &p.string.slice);
+      status_message_set("Changed directory to '{}'", (Slice)p.string.slice);
       util_free(G.current_working_directory);
       G.current_working_directory = p;
       filetree_init();
@@ -2447,19 +2448,25 @@ static void handle_input(Key key) {
   case MODE_GOTO:
     buffer.collapse_cursors();
     if (key >= '0' && key <= '9') {
+      buffer.jumplist_push();
       G.goto_line_number *= 10;
       G.goto_line_number += key - '0';
       buffer.move_to_y(0, G.goto_line_number-1);
       status_message_set("goto %u", G.goto_line_number);
+      buffer.jumplist_push();
       break;
     }
 
     switch (key) {
       case 't':
+        buffer.jumplist_push();
         buffer.move_to(0, 0);
+        buffer.jumplist_push();
         break;
       case 'b':
+        buffer.jumplist_push();
         buffer.move_to(0, buffer.data->num_lines()-1);
+        buffer.jumplist_push();
         break;
       case 'd': {
         // goto definition
@@ -2503,7 +2510,7 @@ static void handle_input(Key key) {
           goto done;
         }
       }
-      status_message_set("Unknown option '{}'", s);
+      status_message_set("Unknown option '{}'", (Slice)*s);
       done:
       // if the menu option changed the mode, leave it
       if (G.mode == MODE_MENU)
@@ -2525,7 +2532,7 @@ static void handle_input(Key key) {
     if (key == KEY_RETURN) {
       Slice* opt = G.menu_pane.menu_get_selection();
       if (!opt) {
-        status_message_set("\"{}\": No such file", &G.menu_buffer[0].slice);
+        status_message_set("\"{}\": No such file", (Slice)G.menu_buffer[0].slice);
         mode_normal(false);
         break;
       }
@@ -2551,7 +2558,7 @@ static void handle_input(Key key) {
     if (key == KEY_RETURN) {
       Slice *opt = G.menu_pane.menu_get_selection();
       if (!opt) {
-        status_message_set("\"{}\": No such file", &G.menu_buffer[0].slice);
+        status_message_set("\"{}\": No such file", (Slice)G.menu_buffer[0].slice);
         mode_normal(false);
         break;
       }
@@ -2574,7 +2581,7 @@ static void handle_input(Key key) {
         }
       }
       if (b) {
-        status_message_set("Switched to {}", &filename);
+        status_message_set("Switched to {}", (Slice)filename);
         G.editing_pane->switch_buffer(b);
       }
       else {
@@ -2582,9 +2589,9 @@ static void handle_input(Key key) {
         if (BufferData::from_file(filename, b)) {
           G.buffers.push(b);
           G.editing_pane->switch_buffer(b);
-          status_message_set("Loaded file {} (%s)", &filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
+          status_message_set("Loaded file {} (%s)", (Slice)filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
-          status_message_set("Failed to load file {}", &filename);
+          status_message_set("Failed to load file {}", (Slice)filename);
           free(b);
         }
       }
@@ -2603,7 +2610,7 @@ static void handle_input(Key key) {
       G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
       if (G.search_failed) {
         buffer.move_to(G.search_begin_pos);
-        status_message_set("'{}' not found", &G.search_term.slice);
+        status_message_set("'{}' not found", (Slice)G.search_term.slice);
         mode_normal(false);
       }
       else {
@@ -5033,7 +5040,7 @@ void Pane::render_single_line() {
   canvas.margin = this->margin;
 
   // draw prefix
-  canvas.render_strf({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, "{}: ", &menu.prefix);
+  canvas.render_strf({0, 0}, &G.default_gutter_text_color, NULL, 0, -1, "{}: ", (Slice)menu.prefix);
 
   // draw buffer
   canvas.render_str(buf_offset, this->text_color, NULL, 0, -1, b.data->lines[0].slice);
@@ -5127,17 +5134,16 @@ void Pane::render_edit() {
   for (int y = buf_offset.y; y < buf_y1; ++y)
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
 
+  this->render_syntax_highlight(canvas, buf_y1);
+
   // draw blame
   if (d.blame.size) {
     for (int y = buf_offset.y; y < buf_y1; ++y) {
       Pos p = d.to_visual_pos({d.lines[y].length, y});
       p.x = at_least(p.x+2, 30);
-      canvas.render_str(p, &G.comment_color, NULL, p.x, -1, d.blame[y].slice);
-      // canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
+      canvas.render_str(p, &COLOR_DEEP_ORANGE, NULL, p.x, -1, d.blame[y].slice);
     }
   }
-
-  this->render_syntax_highlight(canvas, buf_y1);
 
   // highlight the line you're on
   const Color *highlight_background_color = G.editing_pane == this ? this->active_highlight_background_color : this->inactive_highlight_background_color;
@@ -5497,14 +5503,14 @@ int main(int, const char *[])
 {
   util_init();
 
-  String out, err;
+  String out;
   int errcode;
-  if (!call("git status", &errcode, &out, &err))
+  if (!call("git status", &errcode, &out))
     log_error("Failed to call git status\n"), exit(1);
   if (errcode)
-    log_warn("Command failed (%i):\n{}\n\n", errcode, &err.slice);
+    log_warn("Command failed (%i):\n{}\n\n", errcode, (Slice)out.slice);
   else
-    log_info("Command succeeded:\n{}\n\n", &out.slice);
+    log_info("Command succeeded:\n{}\n\n", (Slice)out.slice);
 
   #if 1
   TempAllocator tmp;

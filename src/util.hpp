@@ -1278,7 +1278,8 @@ union StringBuffer {
   void appendv(const char* fmt, va_list args) {
     for (; *fmt; ++fmt) {
       if (*fmt == '{' && fmt[1] == '}') {
-        append(*va_arg(args, Slice*));
+        Slice s = va_arg(args, Slice);
+        append(s);
         ++fmt;
       }
       else if (*fmt != '%') {
@@ -1297,6 +1298,7 @@ union StringBuffer {
 
           case 'f': append(va_arg(args, double)); break;
 
+          default:  append('%'), append(*fmt); break;
         }
       }
     }
@@ -1735,6 +1737,99 @@ LOGGING_LEVEL_IMPLEMENTATION(error, TERM_RED)
 #ifndef UTIL_PROCESS
 #define UTIL_PROCESS
 
+static bool call(Slice command, int *errcode, String *output) {
+  // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
+  // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
+
+  // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
+  bool success = false;
+  HANDLE proc_output = 0;
+  String cmd = {};
+  Array<u8> output_data = {};
+
+  STARTUPINFO info = {sizeof(info)};
+  if (output)
+    info.dwFlags |= STARTF_USESTDHANDLES;
+  PROCESS_INFORMATION process_info = {};
+
+  // create pipe for stdout
+  if (output) {
+    SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
+    if (!CreatePipe(&proc_output, &info.hStdOutput, &sattr, 0)) {
+      log_error("Failed to create pipe for stdout\n");
+      goto err;
+    }
+
+    // Ensure the read handle to the pipe for STDOUT is not inherited.
+    if ( ! SetHandleInformation(proc_output, HANDLE_FLAG_INHERIT, 0) ) {
+      log_error("Failed SetHandleInformation for stdout\n"); 
+      goto err;
+    }
+    info.hStdError = info.hStdOutput;
+  }
+
+  // create process
+  cmd = String::create(command);
+  if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
+    log_error("Failed to create process (%i)\n", GetLastError());
+    goto err;
+  }
+  util_free(cmd);
+
+  // we won't be using the write end of the stdout,stderr pipes
+  if (output) {
+    CloseHandle(info.hStdOutput);
+    info.hStdOutput = 0;
+  }
+
+  // read stdout from process
+  while (1) {
+    bool something_was_read = false;
+    if (output) {
+      output_data.reserve(output_data.size + 512);
+      DWORD num_read;
+      success = ReadFile(proc_output, output_data.items + output_data.size, 512, &num_read, NULL);
+      something_was_read |= (success && num_read);
+      output_data.size += num_read;
+    }
+    if (!something_was_read)
+      break;
+  }
+  if (output)
+    *output = {(char*)output_data.items, output_data.size};
+
+  if (errcode) {
+    WaitForSingleObject(process_info.hProcess, INFINITE);
+    DWORD exit_code;
+    if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
+      log_error("Failed to get error code of command {}\n", command.slice);
+      goto err;
+    }
+    *errcode = exit_code;
+  }
+
+  CloseHandle(process_info.hProcess);
+  CloseHandle(process_info.hThread);
+  if (output)
+    CloseHandle(proc_output);
+  return true;
+
+  err:
+  if (process_info.hProcess)
+    CloseHandle(process_info.hProcess);
+  if (process_info.hThread)
+    CloseHandle(process_info.hThread);
+  if (output) {
+    CloseHandle(proc_output);
+    if (info.hStdOutput)
+      CloseHandle(info.hStdOutput);
+  }
+  util_free(cmd);
+  output_data.free_shallow();
+  return false;
+}
+
+#if 0
 static bool call(Slice command, int *errcode, String *std_out, String *std_err) {
   // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
   // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
@@ -1749,7 +1844,7 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
   Array<u8> stderr_data = {};
 
   STARTUPINFO info = {sizeof(info)};
-  if (get_output)
+  if (std_out || std_err)
     info.dwFlags |= STARTF_USESTDHANDLES;
   PROCESS_INFORMATION process_info = {};
 
@@ -1830,7 +1925,7 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
     WaitForSingleObject(process_info.hProcess, INFINITE);
     DWORD exit_code;
     if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
-      log_error("Failed to get error code of command {}\n", &command);
+      log_error("Failed to get error code of command {}\n", command.slice);
       goto err;
     }
     *errcode = exit_code;
@@ -1864,8 +1959,9 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
   stderr_data.free_shallow();
   return false;
 }
-static bool call(const char *command, int *errcode, String *std_out, String *std_err) {
-  return call(Slice::create(command), errcode, std_out, std_err);
+#endif
+static bool call(const char *command, int *errcode, String *output) {
+  return call(Slice::create(command), errcode, output);
 }
 
 // TODO: posix version

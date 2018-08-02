@@ -15,7 +15,7 @@ static bool git_parse_blame(String output, Array<String> *result) {
 		Slice key = row.token(&i, ' ');
 		if (key.length == 40) {
 			if (hash.length)
-				*result += String::createf("{} - {}", &author, &summary);
+				*result += String::createf("{} - {} - {}", hash(0, 8), author, summary);
 			hash = key;
 			orig_file_line_number = row.token(&i, ' ');
 			final_file_line_number = row.token(&i, ' ');
@@ -30,7 +30,7 @@ static bool git_parse_blame(String output, Array<String> *result) {
 			summary = row(i, -1);
 	}
 	if (hash.length)
-		*result += String::createf("{} - {}", &author, &summary);
+		*result += String::createf("{} - {}", hash(0, 8), author, summary);
 
 	return true;
 }
