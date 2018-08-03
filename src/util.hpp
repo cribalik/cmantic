@@ -96,6 +96,16 @@ template<class T> void util_free(Array<T> &);
 typedef unsigned int u32;
 STATIC_ASSERT(sizeof(u32) == 4, u32_is_4_bytes);
 
+template<class T, class U, int N>
+static bool contains(T (&arr)[N], U t, int *result) {
+  for (int i = 0; i < N; ++i)
+    if (arr[i] == t) {
+      *result = i;
+      return true;
+    }
+  return false;
+}
+
 #define at_least(a, b) max((a),(b))
 #define at_most(a, b) min((a),(b))
 
@@ -420,10 +430,10 @@ union Array {
   }
 
   void reserve(int l) {
-    int oldsize = size;
-    if (l > size)
-      pushn(l-size);
-    size = oldsize;
+    if (l > size) {
+      items = realloc(items, cap, l);
+      cap = l;
+    }
   }
 
   void push(T *array, int n) {
@@ -490,7 +500,7 @@ union Array {
   }
 
   T* pushn(int n) {
-    if (size+n >= cap) {
+    if (size+n > cap) {
       int newcap = cap ? cap*2 : 1;
       while (newcap < size+n)
         newcap *= 2;
@@ -856,10 +866,10 @@ struct Slice {
 
   static Slice token(const char *chars, int length, int *offset, char c) {
     int i = *offset;
-    while (chars[i] != c && i < length)
+    while (i < length && chars[i] != c)
       ++i;
     Slice s = {chars + *offset, i - *offset};
-    while (chars[i] == c && i < length)
+    while (i < length && chars[i] == c)
       ++i;
     *offset = i;
     return s;
@@ -873,10 +883,10 @@ struct Slice {
   }
   static Slice token(const char *chars, int length, int *offset, const char *c) {
     int i = *offset;
-    while (!contains(c, chars[i]) && i < length)
+    while (i < length && !contains(c, chars[i]))
       ++i;
     Slice s = {chars + *offset, i - *offset};
-    while (contains(c, chars[i]) && i < length)
+    while (i < length && contains(c, chars[i]))
       ++i;
     *offset = i;
     return s;
@@ -973,14 +983,14 @@ void util_free(Slice &) {}
 
 
 static bool operator==(Slice a, Slice b) {
-  return a.length == b.length && !memcmp(a.chars, b.chars, a.length);
+  return a.length == b.length && (a.chars == b.chars || !memcmp(a.chars, b.chars, a.length));
 }
 static bool operator!=(Slice a, Slice b) {
   return !(a == b);
 }
 static bool operator==(Slice a, const char *str) {
   int l = strlen(str);
-  return a.length == l && !memcmp(a.chars, str, l);
+  return a.length == l && (a.chars == str || !memcmp(a.chars, str, l));
 }
 static bool operator!=(Slice a, const char *str) {
   return !(a == str);
@@ -1969,7 +1979,7 @@ static bool call(const char *command, int *errcode, String *output) {
 
 #endif /* UTIL_PROCESS */
 
-#if 1
+#if 0
 #define IF_ALLOC_DEBUG(stmt)
 #else
 #define IF_ALLOC_DEBUG(stmt) stmt
@@ -2044,6 +2054,9 @@ struct TempAllocator {
   }
 
   void free() {
+    if (!current)
+      return;
+
     IF_DEBUG(
       int size = 0;
       int num_blocks = 0;
@@ -2060,6 +2073,7 @@ struct TempAllocator {
 
       b = next;
     }
+    *this = {};
 
     IF_DEBUG(log_info("Freed %i bytes of temporary storage in %i blocks\n", size, num_blocks));
   }
@@ -2073,21 +2087,29 @@ struct TempAllocator {
     pop_allocator();
   }
 };
+void util_free(TempAllocator &t) {
+  t.free();
+}
 
 static void* temporary_alloc(int index, void *data, size_t size, size_t align) {
+  IF_ALLOC_DEBUG(
+    if (index == num_allocators-1)
+      printf("(%i): allocing %i\n", index, size);
+  );
   // TODO: try to make the block size a power of two, instead of the data
   TempAllocator &t = *(TempAllocator*)data;
   TempAllocator::Block *b = t.current;
   b->size = ALIGNI(b->size, align); // this works because data is max_align_t, so offset (b->size) should also be aligned
   if (b->size + size >= b->cap) {
-    size_t newcap = b->cap*2;
-    while (newcap < size)
-      newcap *= 2;
-    IF_ALLOC_DEBUG(printf("(%i): Asking parent for %i\n", index, offsetof(TempAllocator::Block, data) + newcap));
+    size_t newsize = b->cap*2;
+    while (newsize - offsetof(TempAllocator::Block, data) < size)
+      newsize *= 2;
+    IF_ALLOC_DEBUG(printf("(%i): Going from %i to %i\n", index, b->cap, newsize - offsetof(TempAllocator::Block, data)));
+    IF_ALLOC_DEBUG(printf("(%i): Asking parent for %i\n", index, newsize));
   	Allocator prev_allocator = allocators[index-1];
-    TempAllocator::Block *new_block = (TempAllocator::Block*)prev_allocator.alloc(index-1, prev_allocator.alloc_data, offsetof(TempAllocator::Block, data) + newcap, alignof(TempAllocator::Block));
+    TempAllocator::Block *new_block = (TempAllocator::Block*)prev_allocator.alloc(index-1, prev_allocator.alloc_data, newsize, alignof(TempAllocator::Block));
     new_block->size = 0;
-    new_block->cap = newcap;
+    new_block->cap = newsize - offsetof(TempAllocator::Block, data);
     new_block->next = 0;
     b->next = new_block;
     t.current = new_block;
@@ -2095,10 +2117,6 @@ static void* temporary_alloc(int index, void *data, size_t size, size_t align) {
   }
 
   b->size += size;
-  IF_ALLOC_DEBUG(
-    if (index == num_allocators-1)
-      printf("(%i): allocing %i\n", index, size);
-  );
   return (char*)&b->data + b->size - size;
 }
 

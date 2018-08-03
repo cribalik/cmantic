@@ -47,6 +47,19 @@
 // @includes
 #include "util.hpp"
 #include "graphics.hpp"
+
+
+template<class T>
+struct GroupedData {
+  TempAllocator storage;
+  T data;
+};
+template<class T>
+void util_free(GroupedData<T> &d) {
+  util_free(d.storage);
+  d = {};
+}
+struct BlameData {int line; char *hash, *author, *summary;};
 #include "git.cpp"
 
 struct FuzzyMatch {
@@ -352,7 +365,7 @@ struct BufferData {
   BufferData *buffer;
 
   Array<StringBuffer> lines;
-  Array<String> blame;
+  GroupedData<Array<BlameData>> blame;
 
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
@@ -814,7 +827,6 @@ struct State {
   Color default_background_color;
   Color default_text_color;
   Color default_gutter_text_color;
-  Color default_highlight_background_color;
   Color number_color;
   Color comment_color;
   Color string_color;
@@ -1438,7 +1450,7 @@ static void menu_option_closeall() {
 
 static void menu_option_blame() {
   BufferData &b = *G.editing_pane->buffer.data;
-  if (b.blame.size) {
+  if (b.blame.data.size) {
     util_free(b.blame);
     return;
   }
@@ -1448,18 +1460,20 @@ static void menu_option_blame() {
   // TODO: ask the user if it's okay we save before blaming
 
   // call git
-  StringBuffer cmd = {};
-  cmd.appendf("git blame {} --porcelain", (Slice)b.filename.slice);
-
+  StringBuffer cmd = StringBuffer::createf("git blame {} --porcelain", (Slice)b.filename.slice);
+  String out = {};
   int errcode;
-  String out;
   if (!call(cmd.slice, &errcode, &out)) {
     status_message_set("Call to git failed");
     goto done;
   }
-  git_parse_blame(out, &b.blame);
+
+  b.blame.storage.push();
+  git_parse_blame(out, &b.blame.data);
+  b.blame.storage.pop();
 
   done:
+  util_free(out);
   util_free(cmd);
 }
 
@@ -2192,7 +2206,7 @@ static void state_init() {
   G.active_highlight_background_color.popped_color = COLOR_WHITE;
   G.active_highlight_background_color.speed = 1.0f;
   G.active_highlight_background_color.cooldown = 1.0f;
-  G.active_highlight_background_color.min = 0.0f;
+  G.active_highlight_background_color.min = 0.1f;
   G.active_highlight_background_color.max = 0.18f;
 
   G.bottom_pane_highlight.base_color = G.default_background_color;
@@ -5137,12 +5151,25 @@ void Pane::render_edit() {
   this->render_syntax_highlight(canvas, buf_y1);
 
   // draw blame
-  if (d.blame.size) {
+  if (d.blame.data.size) {
+    Slice last_hash = {};
+    StringBuffer msg = {};
+    int i = 0;
     for (int y = buf_offset.y; y < buf_y1; ++y) {
+      while (i < d.blame.data.size && d.blame.data[i].line <= y)
+        ++i;
+      BlameData bd = d.blame.data[i-1];
+      if (last_hash == bd.hash)
+        continue;
+      last_hash = Slice::create(bd.hash);
+
       Pos p = d.to_visual_pos({d.lines[y].length, y});
       p.x = at_least(p.x+2, 30);
-      canvas.render_str(p, &COLOR_DEEP_ORANGE, NULL, p.x, -1, d.blame[y].slice);
+      msg.length = 0;
+      msg.appendf("%s - %s - %s", bd.hash, bd.author, bd.summary);
+      canvas.render_str(p, &COLOR_DEEP_ORANGE, NULL, p.x, -1, msg.slice);
     }
+    util_free(msg);
   }
 
   // highlight the line you're on
