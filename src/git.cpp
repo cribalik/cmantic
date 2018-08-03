@@ -43,7 +43,7 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 				++num_lines, last = key;
 		}
 	}
-	printf("%i %i\n", num_lines, num_lines * sizeof(BlameData));
+	// printf("%i %i\n", num_lines, num_lines * sizeof(BlameData));
 	result->reserve(num_lines+1);
 
 	Slice hash = {};
@@ -84,9 +84,11 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 			summary = row(col, -1);
 	}
 	*result += BlameData{current_line, hash_cache.get(hash(0, 8)).chars, author_cache.get(author).chars, summary_cache.get(summary).chars};
+	#if 0
 	printf("%i %i %i\n", hash_cache.num_misses, hash_cache.num_hits, hash_cache.num_bytes_alloced);
 	printf("%i %i %i\n", author_cache.num_misses, author_cache.num_hits, author_cache.num_bytes_alloced);
 	printf("%i %i %i\n", summary_cache.num_misses, summary_cache.num_hits, summary_cache.num_bytes_alloced);
 	printf("%i\n", result->size);
+	#endif
 	return true;
 }
