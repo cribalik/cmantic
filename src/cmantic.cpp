@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * File header
  * Search on word only
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
@@ -1464,7 +1465,12 @@ static void menu_option_blame() {
   String out = {};
   int errcode;
   if (!call(cmd.slice, &errcode, &out)) {
-    status_message_set("Call to git failed");
+    status_message_set("System call \"{}\" failed", cmd.slice);
+    goto done;
+  }
+  if (errcode) {
+    // TODO: handle newlines
+    status_message_set("git blame returned exit code %i: {}", errcode, out.slice(0,-2));
     goto done;
   }
 
