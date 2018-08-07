@@ -1979,7 +1979,7 @@ static bool call(const char *command, int *errcode, String *output) {
 
 #endif /* UTIL_PROCESS */
 
-#if 0
+#if 1
 #define IF_ALLOC_DEBUG(stmt)
 #else
 #define IF_ALLOC_DEBUG(stmt) stmt
@@ -2153,9 +2153,6 @@ static void temporary_dealloc(int, void*, void*, size_t) {}
 #define IF_JSON_DEBUG(stmt) stmt
 #endif
 
-// TODO, FIXME: this has memory leaks on invalid json (unless the user uses temporary storage)
-// We could fix this with proper rollback, but it's a major pain
-// The easier way is probably just to use temp storage for parsing
 struct JsonBlob;
 struct Json {
   struct ObjectField;

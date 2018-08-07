@@ -168,6 +168,7 @@ enum Mode {
   MODE_FILESEARCH,
   MODE_GOTO_DEFINITION,
   MODE_CWD,
+  MODE_PROMPT,
   MODE_COUNT
 };
 
@@ -813,6 +814,13 @@ void util_free(Location &l) {
   l.buffer = 0;
 }
 
+enum PromptType {
+  PROMPT_STRING,
+  PROMPT_INT,
+  PROMPT_FLOAT,
+  PROMPT_BOOLEAN
+};
+
 struct State {
   /* @renderer rendering state */
   SDL_Window *window;
@@ -875,6 +883,17 @@ struct State {
     bool cursor_dirty;
   } flags;
 
+  /* prompt state */
+  PromptType prompt_type;
+  bool prompt_success;
+  union {
+    String string;
+    int integer;
+    double floating;
+    bool boolean;
+  } prompt_result;
+  void (*prompt_callback)(void);
+
   /* goto state */
   unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
 
@@ -884,7 +903,6 @@ struct State {
 
   /* file tree state */
   Array<Path> files;
-
   
   /* visual mode state */
   Location visual_start; // starting position of visual mode
@@ -1449,38 +1467,70 @@ static void menu_option_closeall() {
     G.buffers_to_remove += b;
 }
 
+#define yield(name) do {step = name; return;} while(0); name:
+#define yield_break do {step = {}; return;} while(0)
+
+static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
 static void menu_option_blame() {
+  // TODO: So yield instructions turned out really nice, except for this code. Perhaps we can generate it?
+  static enum {
+    check_prompt_result = 1,
+    check_prompt_result_again,
+  } step;
+  switch (step) {
+    case check_prompt_result: goto check_prompt_result;
+    case check_prompt_result_again: goto check_prompt_result_again;
+  }
+
+  // TODO: ask the user if it's okay we save before blaming
+  if (G.editing_pane->buffer.data->modified()) {
+    mode_prompt(Slice::create("Will save buffer in order to blame, ok? [y/n]"), menu_option_blame, PROMPT_BOOLEAN);
+    yield(check_prompt_result);
+    if (!G.prompt_success || !G.prompt_result.boolean) {
+      status_message_set("Cancelling blame");
+      yield_break;
+    }
+  }
+
+  if (G.editing_pane->buffer.data->modified()) {
+    mode_prompt(Slice::create("Are you reaaally sure?"), menu_option_blame, PROMPT_BOOLEAN);
+    yield(check_prompt_result_again);
+    if (!G.prompt_success || !G.prompt_result.boolean) {
+      status_message_set("Thought so");
+      yield_break;
+    }
+  }
+
   BufferData &b = *G.editing_pane->buffer.data;
   if (b.blame.data.size) {
     util_free(b.blame);
-    return;
+    yield_break;
   }
   util_free(b.blame);
 
   save_buffer(&b);
-  // TODO: ask the user if it's okay we save before blaming
 
   // call git
-  StringBuffer cmd = StringBuffer::createf("git blame {} --porcelain", (Slice)b.filename.slice);
+  String cmd = String::createf("git blame {} --porcelain", b.filename.slice);
   String out = {};
   int errcode;
   if (!call(cmd.slice, &errcode, &out)) {
-    status_message_set("System call \"{}\" failed", cmd.slice);
-    goto done;
+    status_message_set("System call \"{}\" failed", cmd);
+    yield_break;
   }
   if (errcode) {
     // TODO: handle newlines
     status_message_set("git blame returned exit code %i: {}", errcode, out.slice(0,-2));
-    goto done;
+    yield_break;
   }
 
   b.blame.storage.push();
   git_parse_blame(out, &b.blame.data);
   b.blame.storage.pop();
 
-  done:
   util_free(out);
   util_free(cmd);
+  yield_break;
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1643,6 +1693,20 @@ static void mode_cwd() {
   G.menu_pane.buffer.insert(G.current_working_directory.string.slice);
   G.menu_pane.buffer.insert(Utf8char::create(Path::separator));
   G.menu_pane.update_suggestions();
+}
+
+static void mode_prompt(Slice msg, void (*callback)(void), PromptType type) {
+  mode_cleanup();
+  G.mode = MODE_PROMPT;
+  G.menu_pane.menu.prefix = msg;
+  G.prompt_type = type;
+  G.prompt_callback = callback;
+
+  G.selected_pane = &G.menu_pane;
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu.get_suggestions = 0;
+
+  G.menu_pane.buffer.empty();
 }
 
 static Array<String> get_goto_definition_suggestions() {
@@ -2463,6 +2527,65 @@ static void handle_input(Key key) {
     }
     else
       handle_menu_insert(key);
+    break;
+
+  case MODE_PROMPT:
+    if (key == KEY_RETURN) {
+      G.prompt_success = true;
+      switch (G.prompt_type) {
+        // TODO: implement
+        case PROMPT_STRING:
+          G.prompt_result.string = String::create(G.menu_buffer.lines[0].slice);
+          goto prompt_done;
+
+        case PROMPT_INT:
+          if (!G.menu_buffer.lines[0].toint(&G.prompt_result.integer)) {
+            G.menu_pane.buffer.empty();
+            G.menu_pane.menu.prefix = Slice::create("Please enter a valid number");
+            goto prompt_keepgoing;
+          }
+          goto prompt_done;
+
+        case PROMPT_FLOAT:
+          if (!G.menu_buffer.lines[0].tofloat(&G.prompt_result.floating)) {
+            G.menu_pane.buffer.empty();
+            G.menu_pane.menu.prefix = Slice::create("Please enter a valid number");
+            goto prompt_keepgoing;
+          }
+          goto prompt_done;
+
+        case PROMPT_BOOLEAN:
+          if (G.menu_buffer.lines[0].slice == "y")
+            G.prompt_result.boolean = true;
+          else if (G.menu_buffer.lines[0].slice == "n")
+            G.prompt_result.boolean = false;
+          else {
+            G.menu_pane.buffer.empty();
+            G.menu_pane.menu.prefix = Slice::create("Invalid bool. Please enter y or n");
+            goto prompt_keepgoing;
+          }
+          goto prompt_done;
+      }
+    }
+    else if (key == KEY_ESCAPE) {
+      G.prompt_success = false;
+      goto prompt_done;
+    }
+    else if (G.prompt_type == PROMPT_BOOLEAN && (key == 'y' || key == 'n')) {
+      G.prompt_success = true;
+      G.prompt_result.boolean = key == 'y';
+      goto prompt_done;
+    }
+    else
+      handle_menu_insert(key);
+
+    prompt_keepgoing:
+    G.prompt_success = false;
+    break;
+
+    prompt_done:
+    mode_normal(false);
+    G.prompt_callback();
     break;
 
   case MODE_GOTO:
@@ -5037,6 +5160,8 @@ void Pane::render() {
 void Pane::update_suggestions() {
   if (!G.flags.cursor_dirty)
     return;
+  if (!menu.get_suggestions)
+    return;
   util_free(menu.suggestions);
   menu.suggestions = menu.get_suggestions();
   menu.current_suggestion = 0;
@@ -5536,6 +5661,7 @@ int main(int, const char *[])
 {
   util_init();
 
+  #if 0
   String out;
   int errcode;
   if (!call("git status", &errcode, &out))
@@ -5544,19 +5670,17 @@ int main(int, const char *[])
     log_warn("Command failed (%i):\n{}\n\n", errcode, (Slice)out.slice);
   else
     log_info("Command succeeded:\n{}\n\n", (Slice)out.slice);
+  #endif
 
-  #if 1
+  #if 0
   TempAllocator tmp;
   tmp.push();
 
-  #if 1
   JsonBlob j;
-  Path p = Path::create("test.json");
-  if (!Json::parse_file(p, &j))
+  if (!Json::parse_file(Path::create("test.json"), &j))
     log_error("Failed to parse json\n"), exit(1);
   log_debug(j.dump());
   util_free(j);
-  #endif
 
   tmp.pop_and_free();
   #endif
