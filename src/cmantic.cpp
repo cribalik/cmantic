@@ -1,7 +1,8 @@
 /*
  * TODO:
- * File header
+ * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Search on word only
+ * Fix modified() bug
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
  * make 'dp' use tokens instead of chars
@@ -14,30 +15,13 @@
  * recursive panes
  * Build system
  * parse BOM
- * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
  * Size limit on undo/redo
  * Fix memory leak occuring between frames
  * Index entire file tree
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
  * Compress undo history?
- *
- * Update identifiers as you type
- *       When you make a change, go backwards to check if it was an
- *       identifier, and update the identifier list.
- *       To do this fast, have a hashmap of refcounts for each identifier
- *       if identifier disappears, remove from autocomplete list
- *
  * Multiuser editing
- * TODO stack
- * Optimize autocompletion using some sort of A*
- * update file list on change
- *
- * load files
- * movement (parentheses, block, etc.)
- * actions (Delete, Yank, ...)
- * SDL doesn't handle caps-escape swapping correctly on Windows.. We probably need to use VK directly for windows
- *
- * LOW:
+ * Listen to changes in current directory and update file list accordingly
  * Update markers in other panes with same buffer (or at least make sure they are in range)
  */
 
