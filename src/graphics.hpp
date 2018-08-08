@@ -39,10 +39,10 @@ struct Color {
  *    TEXT    *
  *************/
 
-static int graphics_text_init(const char *ttf_file, int font_size = 20);
+static int graphics_text_init(const char *ttf_file, int default_font_size);
 static void render_textatlas(int x, int y, int w, int h);
-static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color);
-static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color);
+static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color, int font_size = 0);
+static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color, int font_size = 0);
 static void push_textf(int pos_x, int pos_y, bool center, Color color, const char *fmt, ...);
 static void render_text();
 
@@ -202,22 +202,40 @@ struct Glyph {
 };
 
 static struct GraphicsTextState {
-  bool initialized;
-  GLuint shader;
-  TextVertex *vertices;
-  int num_vertices;
-  int _vertex_buffer_size;
-  int font_size;
-  Texture text_atlas;
   static const int FIRST_CHAR = 32;
   static const int LAST_CHAR = 128;
+  bool initialized;
+  String font_file;
+  int font_size;
+  struct FontData {
+    int font_size;
+    Texture atlas;
+    Glyph glyphs[GraphicsTextState::LAST_CHAR - GraphicsTextState::FIRST_CHAR];
+    Array<TextVertex> vertices;
+  };
+  Array<FontData> fonts;
   GLuint vertex_array, vertex_buffer;
-  Glyph glyphs[GraphicsTextState::LAST_CHAR - GraphicsTextState::FIRST_CHAR];
+  GLuint shader;
 } graphics_text_state;
 
+static void graphics_set_font_options(const char *font_file = 0, int font_size = 0) {
+  if (font_file) {
+    util_free(graphics_text_state.font_file);
+    graphics_text_state.font_file = String::create(font_file);
+  }
+  if (font_size)
+    graphics_text_state.font_size = font_size;
+}
+
 // only makes sense for mono fonts
-static int graphics_get_font_advance() {
-  return (int)graphics_text_state.glyphs[0].advance;
+static bool get_or_create_fontdata(Slice ttf_file, int font_size, GraphicsTextState::FontData **result);
+static int graphics_get_font_advance(int font_size) {
+  for (auto &d : graphics_text_state.fonts)
+    if (d.font_size == font_size)
+      return (int)d.glyphs[0].advance;
+  GraphicsTextState::FontData *d;
+  get_or_create_fontdata(graphics_text_state.font_file.slice, font_size, &d);
+  return (int)d->glyphs[0].advance;
 }
 
 static struct {
@@ -342,6 +360,10 @@ static int graphics_init(SDL_Window **window) {
   return 0;
 }
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#include "stb_truetype.h"
+
 static const char* graphics_strerror(int err) {
 #ifdef OS_WINDOWS
   static char buf[128];
@@ -350,6 +372,59 @@ static const char* graphics_strerror(int err) {
 #else
   return strerror(err);
 #endif
+}
+
+static bool load_font_from_file(Slice filename, int height, GraphicsTextState::FontData **result) {
+  GraphicsTextState::FontData font_data = {};
+  font_data.font_size = height;
+
+  // Create font texture and read in font from file
+  const int w = 512, h = 512;
+  glGenTextures(1, &font_data.atlas.id);
+  glBindTexture(GL_TEXTURE_2D, font_data.atlas.id);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, 0);
+  font_data.atlas.w = w;
+  font_data.atlas.h = h;
+  gl_ok_or_die;
+
+  glGenerateMipmap(GL_TEXTURE_2D);
+  gl_ok_or_die;
+
+  Array<u8> data;
+  if (!File::get_contents(filename.chars, &data)) {
+    log_err("Failed to open ttf file {}: %s\n", (Slice)filename, graphics_strerror(errno));
+    return false;
+  }
+
+  u8 *bitmap = (u8*)malloc(w * h);
+  if (!bitmap) {
+    log_err("Failed to allocate memory for font\n");
+    return false;
+  }
+
+  if (stbtt_BakeFontBitmap(data.items, 0, (float)height, bitmap, w, h, GraphicsTextState::FIRST_CHAR, GraphicsTextState::LAST_CHAR - GraphicsTextState::FIRST_CHAR, (stbtt_bakedchar*) font_data.glyphs) <= 0) {
+    log_err("Failed to bake font\n");
+    return false;
+  }
+
+  glBindTexture(GL_TEXTURE_2D, font_data.atlas.id);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
+
+  data.free_shallow();
+  free(bitmap);
+  graphics_text_state.fonts += font_data;
+  *result = &graphics_text_state.fonts.last();
+  return true;
+}
+
+static bool get_or_create_fontdata(Slice ttf_file, int font_size, GraphicsTextState::FontData **result) {
+  for (GraphicsTextState::FontData &d : graphics_text_state.fonts) {
+    if (d.font_size == font_size) {
+      *result = &d;
+      return true;
+    }
+  }
+  return load_font_from_file(ttf_file, font_size, result);
 }
 
 static FILE* graphics_fopen(const char *filename, const char *mode) {
@@ -367,44 +442,12 @@ static FILE* graphics_fopen(const char *filename, const char *mode) {
 #endif
 }
 
-#define STB_TRUETYPE_IMPLEMENTATION
-#define STBTT_STATIC
-#include "stb_truetype.h"
-
-static int load_font_from_file(const char* filename, GLuint gl_texture, int tex_w, int tex_h, unsigned char first_char, unsigned char last_char, int height, Glyph *out_glyphs) {
-  #define BUFFER_SIZE 1024*1024
-  unsigned char* ttf_mem;
-  unsigned char* bitmap;
-  FILE* f;
-  int res;
-
-  ttf_mem = (unsigned char*)malloc(BUFFER_SIZE);
-  bitmap = (unsigned char*)malloc(tex_w * tex_h);
-  if (!ttf_mem || !bitmap) {fprintf(stderr, "Failed to allocate memory for font: %s\n", graphics_strerror(errno)); return 1;}
-
-  f = graphics_fopen(filename, "rb");
-  if (!f) {fprintf(stderr, "Failed to open ttf file %s: %s\n", filename, graphics_strerror(errno)); return 1;}
-  fread(ttf_mem, 1, BUFFER_SIZE, f);
-
-  res = stbtt_BakeFontBitmap(ttf_mem, 0, (float)height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) out_glyphs);
-  if (res <= 0) {fprintf(stderr, "Failed to bake font: %i\n", res); return 1;}
-
-  glBindTexture(GL_TEXTURE_2D, gl_texture);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
-
-  fclose(f);
-  free(ttf_mem);
-  free(bitmap);
-  return 0;
-}
-
 static GLuint graphics_compile_shader(const char *vertex_shader_src, const char *fragment_shader_src) {
   GLuint result = 0;
   const char * shader_src_list;
   char info_log[512];
   GLint success;
   GLuint vertex_shader, fragment_shader;
-
 
   vertex_shader = glCreateShader(GL_VERTEX_SHADER);
   shader_src_list = vertex_shader_src;
@@ -444,49 +487,22 @@ static GLuint graphics_compile_shader(const char *vertex_shader_src, const char 
   return result;
 }
 
-static int graphics_set_font_options(const char *ttf_file, int font_size) {
-  graphics_text_state.font_size = font_size;
-  if (load_font_from_file(ttf_file, graphics_text_state.text_atlas.id, graphics_text_state.text_atlas.w, graphics_text_state.text_atlas.h, GraphicsTextState::FIRST_CHAR, GraphicsTextState::LAST_CHAR, graphics_text_state.font_size, graphics_text_state.glyphs))
-    return 1;
-  return 0;
-}
-
-static int graphics_text_init(const char *ttf_file, int font_size) {
+static int graphics_text_init(const char *ttf_file, int default_font_size) {
   assert(graphics_state.initialized);
+  graphics_text_state.initialized = true;
 
-  graphics_text_state._vertex_buffer_size = 512;
-  graphics_text_state.vertices = (TextVertex*)malloc(sizeof(TextVertex) * graphics_text_state._vertex_buffer_size);
-  graphics_text_state.num_vertices = 0;
-  graphics_text_state.font_size = font_size;
-  gl_ok_or_die;
-
-  /* Allocate text buffer */
+  // Allocate text buffer
   glGenVertexArrays(1, &graphics_text_state.vertex_array);
   glGenBuffers(1, &graphics_text_state.vertex_buffer);
   glBindVertexArray(graphics_text_state.vertex_array);
   glBindBuffer(GL_ARRAY_BUFFER, graphics_text_state.vertex_buffer);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(graphics_text_state.vertices), 0, GL_DYNAMIC_DRAW);
+  // glBufferData(GL_ARRAY_BUFFER, 1024, 0, GL_DYNAMIC_DRAW);
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glEnableVertexAttribArray(2);
-  glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(*graphics_text_state.vertices), (void*) 0);
-  glVertexAttribIPointer(1, 2, GL_UNSIGNED_SHORT, sizeof(*graphics_text_state.vertices), (void*) offsetof(TextVertex, tx));
-  glVertexAttribPointer(2, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(*graphics_text_state.vertices), (void*) offsetof(TextVertex, color));
-  gl_ok_or_die;
-
-  /* Create font texture and read in font from file */
-  const int w = 512, h = 512;
-  glGenTextures(1, &graphics_text_state.text_atlas.id);
-  glBindTexture(GL_TEXTURE_2D, graphics_text_state.text_atlas.id);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, 0);
-  graphics_text_state.text_atlas.w = w;
-  graphics_text_state.text_atlas.h = h;
-  gl_ok_or_die;
-
-  if (load_font_from_file(ttf_file, graphics_text_state.text_atlas.id, graphics_text_state.text_atlas.w, graphics_text_state.text_atlas.h, GraphicsTextState::FIRST_CHAR, GraphicsTextState::LAST_CHAR, graphics_text_state.font_size, graphics_text_state.glyphs))
-    return 1;
-  glBindTexture(GL_TEXTURE_2D, graphics_text_state.text_atlas.id);
-  glGenerateMipmap(GL_TEXTURE_2D);
+  glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(TextVertex), (void*) 0);
+  glVertexAttribIPointer(1, 2, GL_UNSIGNED_SHORT, sizeof(TextVertex), (void*) offsetof(TextVertex, tx));
+  glVertexAttribPointer(2, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(TextVertex), (void*) offsetof(TextVertex, color));
   gl_ok_or_die;
 
   // @shader
@@ -522,11 +538,22 @@ static int graphics_text_init(const char *ttf_file, int font_size) {
   // gl_ok_or_die;
   glActiveTexture(GL_TEXTURE0);
 
-  graphics_text_state.initialized = true;
+  graphics_set_font_options(ttf_file, default_font_size);
   return 0;
 }
 
-static void render_textatlas(int x, int y, int w, int h) {
+// might return null if it doesn't exist
+static GraphicsTextState::FontData* get_fontdata(int font_size) {
+  for (GraphicsTextState::FontData &d : graphics_text_state.fonts)
+    if (d.font_size == font_size)
+      return &d;
+}
+
+static void render_textatlas(int x, int y, int w, int h, int font_size) {
+  GraphicsTextState::FontData *d = get_fontdata(font_size);
+  if (!d)
+    return;
+
   SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
   glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
 
@@ -548,37 +575,30 @@ static void render_textatlas(int x, int y, int w, int h) {
   glBindVertexArray(graphics_text_state.vertex_array);
   glBindBuffer(GL_ARRAY_BUFFER, graphics_text_state.vertex_buffer);
   glBufferData(GL_ARRAY_BUFFER, 6*sizeof(*vertices), vertices, GL_DYNAMIC_DRAW);
-  glBindTexture(GL_TEXTURE_2D, graphics_text_state.text_atlas.id);
+  glBindTexture(GL_TEXTURE_2D, d->atlas.id);
   glDrawArrays(GL_TRIANGLES, 0, 6);
   glBindVertexArray(0);
 }
 
-static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color) {
+static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color, int font_size) {
   assert(graphics_text_state.initialized);
+  if (!font_size)
+    font_size = graphics_text_state.font_size;
+
+  GraphicsTextState::FontData *font_data;
+  if (!get_or_create_fontdata(graphics_text_state.font_file.slice, font_size, &font_data))
+    return;
 
   if (!str)
     return;
 
   // allocate new memory if needed
-  int newsize = graphics_text_state.num_vertices + 6*n;
-  if (newsize > graphics_text_state._vertex_buffer_size) {
-    int newcap = graphics_text_state._vertex_buffer_size * 2;
-    while (newcap < newsize)
-      newcap *= 2;
-
-    TextVertex *v = (TextVertex*)malloc(sizeof(*v) * newcap);
-    memcpy(v, graphics_text_state.vertices, graphics_text_state.num_vertices * sizeof(TextVertex));
-    free(graphics_text_state.vertices);
-
-    graphics_text_state.vertices = v;
-    graphics_text_state._vertex_buffer_size = newcap;
-  }
 
   if (center) {
     // calc string width
     float strw = 0.0f;
     for (int i = 0; i < n; ++i)
-      strw += graphics_text_state.glyphs[str[i] - 32].advance;
+      strw += font_data->glyphs[str[i] - 32].advance;
     pos_x -= (int)(strw / 2.0f);
     /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
   }
@@ -590,7 +610,7 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
       chr = ' ';
     else if (chr < GraphicsTextState::FIRST_CHAR || chr > GraphicsTextState::LAST_CHAR)
       chr = '?';
-    Glyph g = graphics_text_state.glyphs[chr - 32];
+    Glyph g = font_data->glyphs[chr - 32];
 
     u16 x = (u16)(pos_x + (int)g.offset_x);
     u16 y = (u16)(pos_y + (int)g.offset_y);
@@ -606,38 +626,31 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
     u16 y0 = y;
     u16 y1 = y+h;
 
-    TextVertex *v = graphics_text_state.vertices + graphics_text_state.num_vertices;
     TextVertex a = {x0, y0, g.x0, g.y0, color};
     TextVertex b = {x1, y0, g.x1, g.y0, color};
     TextVertex c = {x1, y1, g.x1, g.y1, color};
     TextVertex d = {x0, y1, g.x0, g.y1, color};
-    v[0] = a;
-    v[1] = b;
-    v[2] = c;
-    v[3] = a;
-    v[4] = c;
-    v[5] = d;
-
-    graphics_text_state.num_vertices += 6;
+    font_data->vertices += a;
+    font_data->vertices += b;
+    font_data->vertices += c;
+    font_data->vertices += a;
+    font_data->vertices += c;
+    font_data->vertices += d;
   }
 }
 
-static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color) {
+static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color, int font_size) {
   if (!str) return;
-  push_textn(str, strlen(str), pos_x, pos_y, center, color);
+  push_textn(str, strlen(str), pos_x, pos_y, center, color, font_size);
 }
 
 static void render_text() {
   SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
   glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
 
-  /* draw text */
+  // draw text
   gl_ok_or_die;
   glUseProgram(graphics_text_state.shader);
-
-  // set screen size
-  glUniform2f(glGetUniformLocation(graphics_text_state.shader, "screensize"), (float)graphics_state.window_width, (float)graphics_state.window_height);
-  glUniform2f(glGetUniformLocation(graphics_text_state.shader, "texture_size"), (float)graphics_text_state.text_atlas.w, (float)graphics_text_state.text_atlas.h);
 
   // set alpha blending
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -645,20 +658,26 @@ static void render_text() {
   // send vertex data
   glBindVertexArray(graphics_text_state.vertex_array);
   glBindBuffer(GL_ARRAY_BUFFER, graphics_text_state.vertex_buffer);
-  glBufferData(GL_ARRAY_BUFFER, graphics_text_state.num_vertices*sizeof(*graphics_text_state.vertices), graphics_text_state.vertices, GL_DYNAMIC_DRAW);
+
+  // set screen size
+  glUniform2f(glGetUniformLocation(graphics_text_state.shader, "screensize"), (float)graphics_state.window_width, (float)graphics_state.window_height);
 
   // set texture
   glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, graphics_text_state.text_atlas.id);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-  //draw
-  glDrawArrays(GL_TRIANGLES, 0, graphics_text_state.num_vertices);
+  for (GraphicsTextState::FontData &font_data : graphics_text_state.fonts) {
+    glUniform2f(glGetUniformLocation(graphics_text_state.shader, "texture_size"), (float)font_data.atlas.w, (float)font_data.atlas.h);
+    glBindTexture(GL_TEXTURE_2D, font_data.atlas.id);
+    glBufferData(GL_ARRAY_BUFFER, font_data.vertices.size*sizeof(*font_data.vertices.items), font_data.vertices, GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, font_data.vertices.size);
+    font_data.vertices.size = 0;
+  }
+
   glBindVertexArray(0);
 
   // clear
-  graphics_text_state.num_vertices = 0;
   gl_ok_or_die;
 }
 

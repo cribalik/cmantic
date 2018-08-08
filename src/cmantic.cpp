@@ -915,8 +915,8 @@ struct State {
 
 State G;
 
-static int get_text_offset_y() {
-  return (int)(-G.font_height*3.3f/15.0f); // TODO: get this from truetype?
+static int get_text_offset_y(int font_height) {
+  return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
 }
 
 typedef int Key;
@@ -2242,7 +2242,7 @@ static void state_init() {
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
 
   // font stuff
-  G.font_width = graphics_get_font_advance();
+  G.font_width = graphics_get_font_advance(G.font_height);
   G.tab_width = 4;
   G.default_tab_type = 4;
   G.line_margin = 0;
@@ -3033,14 +3033,12 @@ static void handle_input(Key key) {
 
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
-      if (graphics_set_font_options(G.ttf_file.string.chars, G.font_height))
-        exit(1);
+      graphics_set_font_options(G.ttf_file.string.chars, G.font_height);
       break;
 
     case '-':
       G.font_height = at_least(G.font_height-1, 7);
-      if (graphics_set_font_options(G.ttf_file.string.chars, G.font_height))
-        exit(1);
+      graphics_set_font_options(G.ttf_file.string.chars, G.font_height);
       break;
 
     case 'q':
@@ -3341,7 +3339,7 @@ static void handle_rendering(float dt) {
   G.marker_background_color.popped_color = G.default_marker_background_color.color;
 
   // render
-  G.font_width = graphics_get_font_advance();
+  G.font_width = graphics_get_font_advance(G.font_height);
   G.line_height = G.font_height + G.line_margin;
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
   glClearColor(G.default_background_color.r/255.0f, G.default_background_color.g/255.0f, G.default_background_color.g/255.0f, 1.0f);
@@ -5016,7 +5014,7 @@ void Canvas::render(Pos pos) {
   }
 
   // render text
-  const int text_offset_y = get_text_offset_y();
+  const int text_offset_y = get_text_offset_y(G.font_height);
   for (int row = 0; row < h; ++row) {
     G.tmp_render_buffer.clear();
     G.tmp_render_buffer.append(&chars[row*w], w);
@@ -5241,6 +5239,10 @@ void Pane::render_edit() {
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
 
+  const int header_height = 18;
+  bounds.y += header_height;
+  bounds.h -= header_height;
+
   // recalculate the bounds of this pane depending on the number of subpanes
   int subpane_depth = calc_max_subpane_depth();
   int total_width = bounds.w;
@@ -5261,7 +5263,7 @@ void Pane::render_edit() {
         gutter.render_strf({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, " %i", line + 1);
       else
         gutter.render_str({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, Slice::create(" ~"));
-    gutter.render(this->bounds.p + Pos{0, G.line_height});
+    gutter.render(this->bounds.p);
     util_free(gutter);
   }
 
@@ -5332,10 +5334,10 @@ void Pane::render_edit() {
       canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.marker_inactive_color);
   }
 
-  canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, G.line_height});
+  canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
 
   const Slice filename = &d == &G.null_buffer ? Slice{} : Path::name(d.filename.slice);
-  push_text(filename.chars, bounds.x + G.font_width, bounds.y + G.line_height + get_text_offset_y(), false, d.modified() ? COLOR_ORANGE : COLOR_WHITE);
+  push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_height), false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_height);
 
   util_free(canvas);
   render_quads();
@@ -5380,6 +5382,8 @@ void Pane::render_edit() {
   }
 
   bounds.w = total_width;
+  bounds.y -= header_height;
+  bounds.h += header_height;
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -5738,4 +5742,3 @@ int main(int, const char *[])
       assert(G.editing_pane->buffer.data->_action_group_depth == 0);
   }
 }
-
