@@ -915,6 +915,10 @@ struct State {
 
 State G;
 
+static int get_text_offset_y() {
+  return (int)(-G.font_height*3.3f/15.0f); // TODO: get this from truetype?
+}
+
 typedef int Key;
 enum SpecialKey {
   KEY_NONE = 0,
@@ -1472,15 +1476,7 @@ static void menu_option_closeall() {
 
 static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
 static void menu_option_blame() {
-  // TODO: So yield instructions turned out really nice, except for this code. Perhaps we can generate it?
-  static enum {
-    check_prompt_result = 1,
-    check_prompt_result_again,
-  } step;
-  switch (step) {
-    case check_prompt_result: goto check_prompt_result;
-    case check_prompt_result_again: goto check_prompt_result_again;
-  }
+  COROUTINE_BEGIN
 
   // TODO: ask the user if it's okay we save before blaming
   if (G.editing_pane->buffer.data->modified()) {
@@ -1531,6 +1527,8 @@ static void menu_option_blame() {
   util_free(out);
   util_free(cmd);
   yield_break;
+
+  COROUTINE_END
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -5018,7 +5016,7 @@ void Canvas::render(Pos pos) {
   }
 
   // render text
-  const int text_offset_y = (int)(-G.font_height*3.3f/15.0f); // TODO: get this from truetype?
+  const int text_offset_y = get_text_offset_y();
   for (int row = 0; row < h; ++row) {
     G.tmp_render_buffer.clear();
     G.tmp_render_buffer.append(&chars[row*w], w);
@@ -5252,7 +5250,6 @@ void Pane::render_edit() {
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
   int buf_y1 = at_most(buf_offset.y + this->numchars_y(), d.lines.size);
 
-
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   {
@@ -5264,7 +5261,7 @@ void Pane::render_edit() {
         gutter.render_strf({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, " %i", line + 1);
       else
         gutter.render_str({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, Slice::create(" ~"));
-    gutter.render(this->bounds.p);
+    gutter.render(this->bounds.p + Pos{0, G.line_height});
     util_free(gutter);
   }
 
@@ -5335,7 +5332,10 @@ void Pane::render_edit() {
       canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.marker_inactive_color);
   }
 
-  canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
+  canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, G.line_height});
+
+  const Slice filename = &d == &G.null_buffer ? Slice{} : Path::name(d.filename.slice);
+  push_text(filename.chars, bounds.x + G.font_width, bounds.y + G.line_height + get_text_offset_y(), false, d.modified() ? COLOR_ORANGE : COLOR_WHITE);
 
   util_free(canvas);
   render_quads();
@@ -5436,7 +5436,9 @@ int Pane::numchars_x() const {
 }
 
 int Pane::numchars_y() const {
-  return (this->bounds.h - 2*this->margin) / G.line_height + 1;
+  // return (this->bounds.h - 2*this->margin) / G.line_height + 1;
+  const int header_height = type == PANETYPE_EDIT ? G.line_height : 0;
+  return (this->bounds.h - header_height - 2*this->margin) / G.line_height + 1;
 }
 
 static Key get_input(bool *window_active) {

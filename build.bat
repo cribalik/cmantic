@@ -7,5 +7,11 @@ set linker_flags=-incremental:no -opt:ref -debug:full -profile
 IF NOT EXIST .\build mkdir .\build
 IF NOT EXIST .\build\x86 mkdir .\build\x86
 
-cl %compiler_flags% -I3party -Iinclude src\cmantic.cpp -link %linker_flags% SDL2.lib opengl32.lib  -debug
+cl %compiler_flags% -I3party -Iinclude tools\coroutines.cpp -link %linker_flags% SDL2.lib opengl32.lib -debug
+coroutines.exe src\cmantic.cpp src\out.cpp
+
+cl %compiler_flags% -I3party -Iinclude .\src\out.cpp -Fecmantic.exe -link %linker_flags% SDL2.lib opengl32.lib -debug
+
+del src\out.cpp
+
 popd

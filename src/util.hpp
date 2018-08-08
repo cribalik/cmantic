@@ -1300,6 +1300,8 @@ union StringBuffer {
 
           case 'i': append((long)va_arg(args, int)); break;
 
+          case 'c': append(va_arg(args, char)); break;
+
           case 'u': append((long)va_arg(args, unsigned int)); break;
 
           case 's': append(va_arg(args, char*)); break;
@@ -1636,9 +1638,15 @@ namespace File {
 
   bool get_contents(const char *path, Array<u8> *result) {
     *result = {};
-    FILE *f = fopen(path, "rb");
-    if (!f)
-      goto err;
+    #ifdef OS_WINDOWS
+      FILE *f = 0;
+      if (fopen_s(&f, path, "rb"))
+        goto err;
+    #else
+      FILE *f = fopen(path, "rb");
+      if (!f)
+        goto err;
+    #endif
     // get file size
     fseek(f, 0, SEEK_END);
     size_t size = ftell(f);
@@ -1712,7 +1720,7 @@ static StringBuffer logging_buffer;
 #define LOGGING_LEVEL_IMPLEMENTATION(level, color) \
 void log_##level(Slice s) {fprintf(stderr, "%s%.*s%s", color, s.length, s.chars, TERM_RESET_COLOR);} \
 void log_##level(String s) {log_##level(s.slice);} \
-void log_##level(va_list args, const char *fmt) { \
+void log_##level##v(va_list args, const char *fmt) { \
   logging_buffer.length = 0; \
   logging_buffer.appendv(fmt, args); \
   log_##level(logging_buffer.slice); \
@@ -1721,14 +1729,14 @@ void log_##level(va_list args, const char *fmt) { \
 void log_##level(const char *fmt, ...) { \
   va_list args; \
   va_start(args, fmt); \
-  log_##level(args, fmt); \
+  log_##level##v(args, fmt); \
   va_end(args); \
 }
 
 LOGGING_LEVEL_IMPLEMENTATION(debug, TERM_RESET_COLOR)
 LOGGING_LEVEL_IMPLEMENTATION(info, TERM_GREEN)
 LOGGING_LEVEL_IMPLEMENTATION(warn, TERM_YELLOW)
-LOGGING_LEVEL_IMPLEMENTATION(error, TERM_RED)
+LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
 
 #endif /* UTIL_LOGGING */
 
@@ -1766,13 +1774,13 @@ static bool call(Slice command, int *errcode, String *output) {
   if (output) {
     SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
     if (!CreatePipe(&proc_output, &info.hStdOutput, &sattr, 0)) {
-      log_error("Failed to create pipe for stdout\n");
+      log_err("Failed to create pipe for stdout\n");
       goto err;
     }
 
     // Ensure the read handle to the pipe for STDOUT is not inherited.
     if ( ! SetHandleInformation(proc_output, HANDLE_FLAG_INHERIT, 0) ) {
-      log_error("Failed SetHandleInformation for stdout\n"); 
+      log_err("Failed SetHandleInformation for stdout\n"); 
       goto err;
     }
     info.hStdError = info.hStdOutput;
@@ -1781,7 +1789,7 @@ static bool call(Slice command, int *errcode, String *output) {
   // create process
   cmd = String::create(command);
   if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_error("Failed to create process (%i)\n", GetLastError());
+    log_err("Failed to create process (%i)\n", GetLastError());
     goto err;
   }
   util_free(cmd);
@@ -1812,7 +1820,7 @@ static bool call(Slice command, int *errcode, String *output) {
     WaitForSingleObject(process_info.hProcess, INFINITE);
     DWORD exit_code;
     if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
-      log_error("Failed to get error code of command {}\n", command.slice);
+      log_err("Failed to get error code of command {}\n", command.slice);
       goto err;
     }
     *errcode = exit_code;
@@ -1862,13 +1870,13 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
   if (std_out) {
     SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
     if (!CreatePipe(&proc_stdout, &info.hStdOutput, &sattr, 0)) {
-      log_error("Failed to create pipe for stdout\n");
+      log_err("Failed to create pipe for stdout\n");
       goto err;
     }
 
     // Ensure the read handle to the pipe for STDOUT is not inherited.
     if ( ! SetHandleInformation(proc_stdout, HANDLE_FLAG_INHERIT, 0) ) {
-      log_error("Failed SetHandleInformation for stdout\n"); 
+      log_err("Failed SetHandleInformation for stdout\n"); 
       goto err;
     }
   }
@@ -1876,13 +1884,13 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
   if (std_err) {
     SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
     if (!CreatePipe(&proc_stderr, &info.hStdError, &sattr, 0)) {
-      log_error("Failed to create pipe for stderr\n");
+      log_err("Failed to create pipe for stderr\n");
       goto err;
     }
 
     // Ensure the read handle to the pipe for STDOUT is not inherited.
     if ( ! SetHandleInformation(proc_stderr, HANDLE_FLAG_INHERIT, 0) ) {
-      log_error("Failed SetHandleInformation for stderr\n"); 
+      log_err("Failed SetHandleInformation for stderr\n"); 
       goto err;
     }
   }
@@ -1890,7 +1898,7 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
   // create process
   cmd = String::create(command);
   if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_error("Failed to create process (%i)\n", GetLastError());
+    log_err("Failed to create process (%i)\n", GetLastError());
     goto err;
   }
   util_free(cmd);
@@ -1935,7 +1943,7 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
     WaitForSingleObject(process_info.hProcess, INFINITE);
     DWORD exit_code;
     if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
-      log_error("Failed to get error code of command {}\n", command.slice);
+      log_err("Failed to get error code of command {}\n", command.slice);
       goto err;
     }
     *errcode = exit_code;
