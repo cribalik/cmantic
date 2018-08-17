@@ -64,6 +64,7 @@
   typedef uint32_t u32;
   typedef uint64_t u64;
 #endif
+typedef unsigned int uint;
 
 #ifdef DEBUG
   #define IF_DEBUG(stmt) stmt
@@ -106,6 +107,11 @@ static bool contains(T (&arr)[N], U t, int *result) {
   return false;
 }
 
+template<class T>
+T max(T a, T b) {return a < b ? b : a;}
+template<class T>
+T min(T a, T b) {return b < a ? b : a;}
+
 #define at_least(a, b) max((a),(b))
 #define at_most(a, b) min((a),(b))
 
@@ -114,11 +120,6 @@ template<class T>
 static T clamp(T x, T a, T b) {
   return x < a ? a : (b < x ? b : x);
 }
-
-template<class T>
-T max(T a, T b) {return a < b ? b : a;}
-template<class T>
-T min(T a, T b) {return b < a ? b : a;}
 
 float angle_to_range(float v, float a, float b) {
   return (sinf(v)*0.5f + 0.5f)*(b-a) + a;

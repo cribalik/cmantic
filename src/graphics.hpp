@@ -33,6 +33,8 @@ struct Color {
   static Color from_hsl(float h, float s, float l);
   static Color blend(Color back, Color front);
   static Color blend(Color back, Color front, float alpha);
+  static Color blend_additive(Color back, Color front);
+  static Color blend_additive(Color back, Color front, float alpha);
 };
 
 /**************
@@ -842,6 +844,22 @@ Color Color::blend(Color back, Color front, float alpha) {
     (u8)(b*255),
     (u8)(a*255),
   };
+}
+
+Color Color::blend_additive(Color back, Color front, float alpha) {
+  if (alpha < 0.0001f)
+    return back;
+
+  return {
+    (u8)at_most(back.r + front.r*alpha, 255.0f),
+    (u8)at_most(back.g + front.g*alpha, 255.0f),
+    (u8)at_most(back.b + front.b*alpha, 255.0f),
+    back.a
+  };
+}
+
+Color Color::blend_additive(Color back, Color front) {
+  return Color::blend_additive(back, front, front.a/255.0f);
 }
 
 Color Color::blend(Color back, Color front) {

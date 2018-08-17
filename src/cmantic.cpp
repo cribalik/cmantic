@@ -1,6 +1,6 @@
 /*
  * TODO:
- * Highlight inserted text (through copy/paste, or undo, but probably not for insert mode)
+ * move_cursors_on_delete to match move_cursors_on_insert
  * Search on word only
  * Fix modified() bug
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
@@ -344,6 +344,12 @@ struct UndoAction {
 static void util_free(UndoAction &a);
 static void tokenize(BufferData &b);
 
+struct PasteHighlight {
+  Pos a;
+  Pos b;
+  float alpha; // 1 -> 0
+};
+
 struct BufferData {
   String filename;
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
@@ -352,6 +358,8 @@ struct BufferData {
 
   Array<StringBuffer> lines;
   GroupedData<Array<BlameData>> blame;
+
+  Array<PasteHighlight> paste_highlights;
 
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
@@ -494,7 +502,6 @@ UndoAction UndoAction::insert_slice(Pos a, Pos b, Slice s, int cursor_idx) {
   return act;
 }
 
-
 struct v2 {
   int x;
   int y;
@@ -517,11 +524,14 @@ struct Canvas {
   void fill(Color text, Color background);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
-  void fill_textcolor(Range range, Rect bounds, Color c);
+  void fill_textcolor(Range range, Color c);
+  void blend_textcolor(Range range, Color c);
+  void blend_textcolor_additive(Range range, Color c);
   void invert_color(Pos p);
   void fill(Utf8char c);
   void resize(int w, int h);
   void init(int w, int h);
+  void _normalize_range(Pos &a, Pos &b);
 };
 
 void util_free(Canvas &c) {
@@ -727,19 +737,7 @@ struct Pane {
   }
 };
 
-void util_free(Pane *&p);
-void util_free(SubPane &p) {
-  util_free(p.pane);
-  p.anchor_pos = {};
-  p.pane = 0;
-}
-
-void util_free(Pane &p) {
-  util_free(p.buffer);
-  util_free(p.buffer.jumplist);
-  util_free(p.subpanes);
-}
-
+void util_free(Pane &p);
 void util_free(Pane *&p) {
   if (!p)
     return;
@@ -903,6 +901,22 @@ static int get_text_offset_y(int font_height) {
   return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
 }
 
+void util_free(Pane *&p);
+void util_free(Pane &p) {
+  util_free(p.buffer);
+  util_free(p.buffer.jumplist);
+
+  // remove subpanes
+  for (SubPane sp : p.subpanes) {
+    // remove subpanes from global pane list
+    for (int i = 0; i < G.editing_panes.size; ++i)
+      if (G.editing_panes[i] == sp.pane)
+        G.editing_panes[i--] = G.editing_panes[--G.editing_panes.size];
+    util_free(sp.pane);
+  }
+  p.subpanes.free_shallow();
+}
+
 typedef int Key;
 enum SpecialKey {
   KEY_NONE = 0,
@@ -961,6 +975,7 @@ static const Slice operators[] = {
 
 static const Color COLOR_PINK = {236, 64, 122, 255};
 static const Color COLOR_YELLOW = {255, 235, 59, 255};
+static const Color COLOR_LIGHT_YELLOW = {255, 240, 79, 255};
 static const Color COLOR_AMBER = {255,193,7, 255};
 static const Color COLOR_DEEP_ORANGE = {255,138,101, 255};
 static const Color COLOR_ORANGE = {255,183,77, 255};
@@ -1462,21 +1477,12 @@ static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
 static void menu_option_blame() {
   COROUTINE_BEGIN
 
-  // TODO: ask the user if it's okay we save before blaming
+  // ask the user if it's okay we save before blaming
   if (G.editing_pane->buffer.data->modified()) {
     mode_prompt(Slice::create("Will save buffer in order to blame, ok? [y/n]"), menu_option_blame, PROMPT_BOOLEAN);
-    yield(check_prompt_result);
+    yield(CHECK_PROMPT_RESULT);
     if (!G.prompt_success || !G.prompt_result.boolean) {
       status_message_set("Cancelling blame");
-      yield_break;
-    }
-  }
-
-  if (G.editing_pane->buffer.data->modified()) {
-    mode_prompt(Slice::create("Are you reaaally sure?"), menu_option_blame, PROMPT_BOOLEAN);
-    yield(check_prompt_result_again);
-    if (!G.prompt_success || !G.prompt_result.boolean) {
-      status_message_set("Thought so");
       yield_break;
     }
   }
@@ -3043,7 +3049,7 @@ static void handle_input(Key key) {
     case 'p':
       if (G.editing_pane == G.selected_pane && SDL_HasClipboardText()) {
         char *s = SDL_GetClipboardText();
-        // if we're on windows, we want to remove \r
+        // if we're on windows, remove \r
         #ifdef OS_WINDOWS
           char *out = s;
           for (char *in = s; *in; ++in)
@@ -3055,7 +3061,6 @@ static void handle_input(Key key) {
         int num_endlines = 0;
         for (char *t = s; *t; ++t)
           num_endlines += (*t == '\n');
-
 
         buffer.action_begin();
         buffer.data->raw_begin();
@@ -3318,6 +3323,16 @@ static void handle_rendering(float dt) {
   G.bottom_pane_highlight.tick(dt);
   G.search_term_background_color.tick(dt);
 
+  // update paste highlights
+  for (BufferData *b : G.buffers) {
+    for (int i = 0; i < b->paste_highlights.size; ++i) {
+      b->paste_highlights[i].alpha -= dt*0.03f;
+
+      if (b->paste_highlights[i].alpha < 0)
+        b->paste_highlights[i--] = b->paste_highlights[--b->paste_highlights.size];
+    }
+  }
+
   // highlight some colors
   G.default_marker_background_color.tick(dt);
   G.marker_background_color.popped_color = G.default_marker_background_color.color;
@@ -3342,8 +3357,10 @@ static void handle_rendering(float dt) {
   }
   G.bottom_pane->bounds = {0, G.win_height - G.bottom_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
-  for (Pane *p : G.editing_panes)
-    p->render();
+  for (Pane *p : G.editing_panes) {
+    if (!p->parent)
+      p->render();
+  }
   G.bottom_pane->render();
 }
 
@@ -4255,6 +4272,48 @@ void BufferData::insert(Array<Cursor> &cursors, Slice s, int cursor_idx) {
   insert(cursors, cursors[cursor_idx].pos, s, cursor_idx);
 }
 
+static void move_on_insert(Pos &p, Pos a, Pos b) {
+  if (p.y == a.y && p.x >= a.x) {
+    p.y += b.y - a.y;
+    p.x = b.x + p.x - a.x;
+  }
+  else if (p.y > a.y) {
+    p.y += b.y - a.y;
+  }
+}
+
+static void move_cursors_on_insert(BufferData *buffer, Pos a, Pos b) {
+  if (buffer == &G.status_message_buffer) {
+    move_on_insert(G.status_message_pane.buffer.cursors[0].pos, a, b);
+    return;
+  }
+  if (buffer == &G.menu_buffer) {
+    move_on_insert(G.menu_pane.buffer.cursors[0].pos, a, b);
+    return;
+  }
+
+  // move cursors
+  for (Pane *pane : G.editing_panes) {
+    if (pane->buffer.data != buffer)
+      continue;
+
+    // cursors
+    for (Cursor &c : pane->buffer.cursors) {
+      move_on_insert(c.pos, a, b);
+      c.ghost_x = c.x;
+    }
+
+    // jumplist
+    for (Pos &pos : pane->buffer.jumplist)
+      move_on_insert(pos, a, b);
+
+    for (PasteHighlight &ph : buffer->paste_highlights) {
+      move_on_insert(ph.a, a, b);
+      move_on_insert(ph.b, a, b);
+    }
+  }
+}
+
 void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_idx) {
   if (!s.length)
     return;
@@ -4278,20 +4337,13 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
     b = {a.x + s.length, a.y};
 
   // if (this == G.editing_pane->buffer.data)
-    // printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
+  //   printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   if (!undo_disabled)
     push_undo_action(UndoAction::insert_slice(a, b, s, cursor_idx));
 
-  if (num_lines == 0) {
+  if (num_lines == 0)
     lines[a.y].insert(a.x, s);
-    // move cursors
-    for (Cursor &c : cursors)
-      if (c.y == a.y && c.x >= a.x) {
-        c.x += s.length;
-        c.ghost_x = c.x;
-      }
-  }
   else {
     lines.insertz(a.y+1, num_lines);
     // construct last line
@@ -4315,19 +4367,11 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
       ++bi;
       ai = bi;
     }
-
-    for (Cursor &c : cursors) {
-      if (c.y == a.y && c.x >= a.x) {
-        c.y += num_lines;
-        c.x = b.x + c.x - a.x;
-        c.ghost_x = c.x;
-      }
-      else if (c.y > a.y) {
-        c.y += num_lines;
-      }
-    }
   }
 
+  move_cursors_on_insert(this, a, b);
+
+  paste_highlights += PasteHighlight{a, b, 1.0f};
   action_end(cursors);
 }
 
@@ -4798,8 +4842,8 @@ void Canvas::invert_color(Pos p) {
   swap(text_colors[p.y*w + p.x], background_colors[p.y*w + p.x]);
 }
 
-// fills a to b but only inside the bounds 
-void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
+#if 0
+void Canvas:fit_range_to_bounds() {
   Pos a = range.a;
   Pos b = range.b;
   a -= offset;
@@ -4828,6 +4872,65 @@ void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
     b.y = bounds.y + bounds.h - 1;
     b.x = bounds.x + bounds.w - 1;
   }
+}
+#endif
+
+void Canvas::_normalize_range(Pos &a, Pos &b) {
+  a -= offset;
+  b -= offset;
+  a.x = clamp(a.x, 0, w-1);
+  a.y = clamp(a.y, 0, h-1);
+  b.x = clamp(b.x, 0, w-1);
+  b.y = clamp(b.y, 0, h-1);
+}
+
+void Canvas::blend_textcolor(Range range, Color c) {
+  Pos a = range.a;
+  Pos b = range.b;
+  _normalize_range(a, b);
+
+  if (a.y == b.y) {
+    for (int x = a.x; x < b.x; ++x)
+      this->text_colors[a.y*this->w + x] = Color::blend(this->text_colors[a.y*this->w + x], c);
+    return;
+  }
+
+  int y = a.y;
+  for (int x = a.x; x < w; ++x)
+    this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
+  for (++y; y < b.y; ++y)
+    for (int x = 0; x < w; ++x)
+      this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
+  for (int x = 0; x < b.x; ++x)
+    this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
+}
+
+void Canvas::blend_textcolor_additive(Range range, Color c) {
+  Pos a = range.a;
+  Pos b = range.b;
+  _normalize_range(a, b);
+
+  if (a.y == b.y) {
+    for (int x = a.x; x < b.x; ++x)
+      this->text_colors[a.y*this->w + x] = Color::blend_additive(this->text_colors[a.y*this->w + x], c);
+    return;
+  }
+
+  int y = a.y;
+  for (int x = a.x; x < w; ++x)
+    this->text_colors[y*this->w + x] = Color::blend_additive(this->text_colors[y*this->w + x], c);
+  for (++y; y < b.y; ++y)
+    for (int x = 0; x < w; ++x)
+      this->text_colors[y*this->w + x] = Color::blend_additive(this->text_colors[y*this->w + x], c);
+  for (int x = 0; x < b.x; ++x)
+    this->text_colors[y*this->w + x] = Color::blend_additive(this->text_colors[y*this->w + x], c);
+}
+
+// fills a to b but only inside the bounds 
+void Canvas::fill_textcolor(Range range, Color c) {
+  Pos a = range.a;
+  Pos b = range.b;
+  _normalize_range(a, b);
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
@@ -4836,12 +4939,12 @@ void Canvas::fill_textcolor(Range range, Rect bounds, Color c) {
   }
 
   int y = a.y;
-  for (int x = a.x; x < bounds.x+bounds.w; ++x)
+  for (int x = a.x; x < w; ++x)
     this->text_colors[y*this->w + x] = c;
   for (++y; y < b.y; ++y)
-    for (int x = bounds.x; x < bounds.x+bounds.w; ++x)
+    for (int x = 0; x < w; ++x)
       this->text_colors[y*this->w + x] = c;
-  for (int x = bounds.x; x < b.x; ++x)
+  for (int x = 0; x < b.x; ++x)
     this->text_colors[y*this->w + x] = c;
 }
 
@@ -5043,7 +5146,7 @@ void Pane::render_as_dropdown() {
 }
 
 void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
-  #define render_highlight(color) canvas.fill_textcolor({b.data->to_visual_pos(t->a), b.data->to_visual_pos(t->b)}, Rect{0, 0, -1, -1}, color)
+  #define render_highlight(color) canvas.fill_textcolor(Range{b.data->to_visual_pos(t->a), b.data->to_visual_pos(t->b)}, color)
 
   BufferView &b = this->buffer;
   // syntax @highlighting
@@ -5106,7 +5209,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
       break;
     if (r.b.y < y0)
       continue;
-    canvas.fill_textcolor({b.data->to_visual_pos(r.a), b.data->to_visual_pos(r.b)}, Rect{0, 0, -1, -1}, G.identifier_color);
+    canvas.fill_textcolor(Range{b.data->to_visual_pos(r.a), b.data->to_visual_pos(r.b)}, G.identifier_color);
   }
 }
 
@@ -5116,6 +5219,7 @@ void Pane::add_subpane(BufferData *b, Pos pos) {
   p->buffer.move_to(pos);
   p->parent = this;
   subpanes += {buffer.cursors[0].pos, p};
+  G.editing_panes += p;
 }
 
 void Pane::render() {
@@ -5223,7 +5327,7 @@ void Pane::render_edit() {
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
 
-  const int header_height = 18;
+  const int header_height = 25;
   bounds.y += header_height;
   bounds.h -= header_height;
 
@@ -5242,7 +5346,7 @@ void Pane::render_edit() {
     Canvas gutter;
     gutter.init(_gutter_width, this->numchars_y());
     gutter.background = *this->background_color;
-    for (int y = 0, line = buf_offset.y; y < this->numchars_y(); ++y, ++line)
+    for (int y = 0, line = buf_offset.y; line < buf_y1; ++y, ++line)
       if (line < d.lines.size)
         gutter.render_strf({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, " %i", line + 1);
       else
@@ -5262,7 +5366,19 @@ void Pane::render_edit() {
   for (int y = buf_offset.y; y < buf_y1; ++y)
     canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
 
+  // draw syntax highlighting
   this->render_syntax_highlight(canvas, buf_y1);
+
+  // draw paste highlight
+  #if 1
+  for (PasteHighlight ph : d.paste_highlights) {
+    if (ph.b.y < buf_offset.y || ph.a.y > buf_y1)
+      continue;
+    Color color = COLOR_LIGHT_YELLOW;
+    color.a = (u8)(ph.alpha*255.0f);
+    canvas.blend_textcolor(Range{d.to_visual_pos(ph.a), d.to_visual_pos(ph.b)}, color);
+  }
+  #endif
 
   // draw blame
   if (d.blame.data.size) {
@@ -5321,7 +5437,8 @@ void Pane::render_edit() {
   canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
 
   const Slice filename = &d == &G.null_buffer ? Slice{} : Path::name(d.filename.slice);
-  push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_height), false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_height);
+  const int header_text_size = header_height - 6;
+  push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
 
   util_free(canvas);
   render_quads();
@@ -5336,13 +5453,7 @@ void Pane::render_edit() {
     int num_panes_in_sight = 0;
     int subpane_margin;
     int total_margin;
-    #if 0
-    for (SubPane p : subpanes)
-      if (p.anchor_pos.y >= buf_offset.y && p.anchor_pos.y <= buf_y1)
-        ++num_panes_in_sight;
-    #else
     num_panes_in_sight = subpanes.size;
-    #endif
     if (!num_panes_in_sight)
       goto subpanes_done;
 
@@ -5426,7 +5537,7 @@ int Pane::numchars_x() const {
 int Pane::numchars_y() const {
   // return (this->bounds.h - 2*this->margin) / G.line_height + 1;
   const int header_height = type == PANETYPE_EDIT ? G.line_height : 0;
-  return (this->bounds.h - header_height - 2*this->margin) / G.line_height + 1;
+  return ((this->bounds.h - header_height - 2*this->margin) / G.line_height) + 2;
 }
 
 static Key get_input(bool *window_active) {
