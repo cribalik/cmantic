@@ -3344,13 +3344,20 @@ static void handle_rendering(float dt) {
   glClearColor(G.default_background_color.r/255.0f, G.default_background_color.g/255.0f, G.default_background_color.g/255.0f, 1.0f);
   glClear(GL_COLOR_BUFFER_BIT);
 
-  // reflow panes
+  // reflow top level panes
   G.bottom_pane->margin = 3;
   G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
 
   int x = 0;
+  int num_top_level_panes = 0;
+  for (Pane *p : G.editing_panes)
+    if (!p->parent)
+      ++num_top_level_panes;
+
   for (Pane *p : G.editing_panes) {
-    const int w = G.win_width / G.editing_panes.size;
+    if (p->parent)
+      continue;
+    const int w = G.win_width / num_top_level_panes;
     const int h = G.win_height - G.bottom_pane->bounds.h;
     p->bounds = {x, 0, w, h};
     x += w;
@@ -5327,13 +5334,14 @@ void Pane::render_edit() {
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
 
+  Rect orig_bounds = bounds;
   const int header_height = 25;
   bounds.y += header_height;
   bounds.h -= header_height;
 
   // recalculate the bounds of this pane depending on the number of subpanes
   int subpane_depth = calc_max_subpane_depth();
-  int total_width = bounds.w;
+  int total_width = orig_bounds.w;
   bounds.w = total_width/(subpane_depth+1);
 
   // calc buffer bound
@@ -5451,20 +5459,19 @@ void Pane::render_edit() {
   {
     float w,h,x,y;
     int num_panes_in_sight = 0;
-    int subpane_margin;
-    int total_margin;
+    int subpane_margin = 0;
+    int total_margin = 0;
     num_panes_in_sight = subpanes.size;
     if (!num_panes_in_sight)
       goto subpanes_done;
 
-    subpane_margin = 0; // G.font_height;
-    total_margin = subpane_margin*(num_panes_in_sight+1);
+    // total_margin = subpane_margin*(num_panes_in_sight+1);
     // subpane_margin = total_margin / (num_panes_in_sight+1);
 
     w = (float)total_width - bounds.w;
-    h = (float)(bounds.h - total_margin)/num_panes_in_sight;
-    x = (float)bounds.x + bounds.w;
-    y = (float)bounds.y + subpane_margin;
+    h = (float)(orig_bounds.h - total_margin)/num_panes_in_sight;
+    x = (float)orig_bounds.x + bounds.w;
+    y = (float)orig_bounds.y + subpane_margin;
     for (SubPane p : subpanes) {
       // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
         // continue;
