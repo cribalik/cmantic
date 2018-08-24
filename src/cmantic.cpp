@@ -3634,10 +3634,10 @@ void BufferData::push_undo_action(UndoAction a) {
 }
 
 void BufferData::action_begin(Array<Cursor> &cursors) {
+  util_free(blame);
+
   if (undo_disabled)
     return;
-
-  util_free(blame);
 
   if (_action_group_depth == 0) {
     push_undo_action({ACTIONTYPE_GROUP_BEGIN});
@@ -3731,6 +3731,8 @@ void BufferData::action_end(Array<Cursor> &cursors) {
 }
 
 void BufferData::undo(Array<Cursor> &cursors) {
+  util_free(blame);
+
   if (undo_disabled)
     return;
   if (!_next_undo_action)
@@ -3771,6 +3773,8 @@ void BufferData::undo(Array<Cursor> &cursors) {
 }
 
 void BufferData::redo(Array<Cursor> &cursors) {
+  util_free(blame);
+
   if (undo_disabled)
     return;
 
