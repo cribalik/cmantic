@@ -459,7 +459,6 @@ struct BufferData {
 };
 
 void util_free(BufferData &b);
-void util_free(BufferData *b);
 
 static void util_free(UndoAction &a) {
   switch (a.type) {
@@ -737,14 +736,11 @@ struct Pane {
   }
 };
 
-void util_free(Pane &p);
-void util_free(Pane *&p) {
-  if (!p)
-    return;
-  util_free(*p);
-  delete p;
-  p = 0;
+void util_free(Pane &p) {
+  util_free(p.buffer);
+  util_free(p.buffer.jumplist);
 }
+
 
 struct PoppedColor {
   Color base_color;
@@ -899,22 +895,6 @@ State G;
 
 static int get_text_offset_y(int font_height) {
   return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
-}
-
-void util_free(Pane *&p);
-void util_free(Pane &p) {
-  util_free(p.buffer);
-  util_free(p.buffer.jumplist);
-
-  // remove subpanes
-  for (SubPane sp : p.subpanes) {
-    // remove subpanes from global pane list
-    for (int i = 0; i < G.editing_panes.size; ++i)
-      if (G.editing_panes[i] == sp.pane)
-        G.editing_panes[i--] = G.editing_panes[--G.editing_panes.size];
-    util_free(sp.pane);
-  }
-  p.subpanes.free_shallow();
 }
 
 typedef int Key;
@@ -2341,6 +2321,7 @@ static void state_init() {
 
 void state_free() {
   // really none of this matters, since all resouces are freed when program exits
+  #if 0
   util_free(G.buffers);
   util_free(G.null_buffer);
   util_free(G.menu_buffer);
@@ -2348,13 +2329,10 @@ void state_free() {
   util_free(G.status_message_buffer);
   util_free(G.files);
 
-  for (Pane *p : G.editing_panes)
-    util_free(*p);
-  util_free(G.editing_panes);
-
   util_free(G.menu_pane);
   util_free(G.status_message_pane);
   util_free(G.dropdown_pane);
+  #endif
   SDL_Quit();
 }
 
@@ -3306,6 +3284,14 @@ static void handle_input(Key key) {
   buffer.deduplicate_cursors();
 }
 
+static int num_top_level_panes() {
+  int x = 0;
+  for (Pane *p : G.editing_panes)
+    if (!p->parent)
+      ++x;
+  return x;
+}
+
 static void handle_rendering(float dt) {
   // boost marker when you move or change modes
   static Pos prev_pos;
@@ -3349,15 +3335,10 @@ static void handle_rendering(float dt) {
   G.bottom_pane->bounds.h = G.line_height + 2*G.bottom_pane->margin;
 
   int x = 0;
-  int num_top_level_panes = 0;
-  for (Pane *p : G.editing_panes)
-    if (!p->parent)
-      ++num_top_level_panes;
-
   for (Pane *p : G.editing_panes) {
     if (p->parent)
       continue;
-    const int w = G.win_width / num_top_level_panes;
+    const int w = G.win_width / num_top_level_panes();
     const int h = G.win_height - G.bottom_pane->bounds.h;
     p->bounds = {x, 0, w, h};
     x += w;
@@ -3469,18 +3450,6 @@ void util_free(BufferData &b) {
   util_free(b.identifiers);
   util_free(b.definitions);
   util_free(b._undo_actions);
-}
-
-void util_free(BufferData *b) {
-  util_free(*b);
-  // reset any panes that are using this buffer
-  for (int i = 0; i < G.editing_panes.size; ++i) {
-    if (G.editing_panes[i]->buffer.data == b) {
-      util_free(*G.editing_panes[i]);
-      Pane::init_edit(*G.editing_panes[i], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
-    }
-  }
-  delete b;
 }
 
 bool BufferData::reload(BufferData *b) {
@@ -5444,7 +5413,9 @@ void Pane::render_edit() {
 
   canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
 
-  const Slice filename = &d == &G.null_buffer ? Slice{} : Path::name(d.filename.slice);
+  // render filename
+  // render filename
+  const Slice filename = &d == &G.null_buffer ? Slice::create("[No name]") : Path::name(d.filename.slice);
   const int header_text_size = header_height - 6;
   push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
 
@@ -5711,9 +5682,12 @@ STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 
 static void handle_pending_removes() {
   // remove panes
-  for (Pane *p : G.panes_to_remove) {
-    bool remove_pane = false;
-    // The pane should either be a subpane or a dynamically allocated pane (i.e. exists in editing_pane)
+  for (int pane_idx = 0; pane_idx < G.panes_to_remove.size; ++pane_idx) {
+    Pane *p = G.panes_to_remove[pane_idx];
+    if (p == &G.menu_pane || p == &G.dropdown_pane || p == &G.status_message_pane)
+      continue;
+
+    // remove from parent subpane list
     if (p->parent) {
       Pane *parent = p->parent;
       for (int i = 0; i < parent->subpanes.size; ++i) {
@@ -5724,36 +5698,59 @@ static void handle_pending_removes() {
             G.editing_pane = next;
           if (G.selected_pane == p)
             G.selected_pane = next;
-          remove_pane = true;
           break;
         }
       }
     }
-    else {
-      if (G.editing_panes.size == 1)
-        continue;
-      Pane **e = G.editing_panes.find(p);
-      if (!e)
-        continue;
-      int i = e - G.editing_panes.items;
-      G.editing_panes.remove_slow(i);
-      if (G.editing_pane == p)
-        G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-      if (G.selected_pane == p)
-        G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-      remove_pane = true;
+
+    // remove subpanes
+    for (SubPane sp : p->subpanes) {
+      sp.pane->parent = 0;
+      G.panes_to_remove += sp.pane;
     }
-    if (remove_pane)
-      util_free(p);
+    p->subpanes.free_shallow();
+
+    // remove from global pane list
+    Pane **global = G.editing_panes.find(p);
+    if (!global)
+      continue;
+    int i = global - G.editing_panes.items;
+    G.editing_panes.remove_slow(i);
+    if (G.editing_pane == p)
+      G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+    if (G.selected_pane == p)
+      G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
+
+    util_free(*p);
+    delete p;
   }
   G.panes_to_remove.size = 0;
 
+  if (G.editing_panes.size == 0) {
+    Pane *main_pane = new Pane{};
+    Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+    G.editing_panes += main_pane;
+    G.selected_pane = main_pane;
+    G.editing_pane = main_pane;
+  }
+
   // remove buffers
-  for (BufferData *b : G.buffers_to_remove) {
-    for (int i = 0; i < G.buffers.size; ++i) {
-      if (G.buffers[i] == b) {
-        util_free(G.buffers[i]);
-        G.buffers[i] = G.buffers[--G.buffers.size];
+  for (int i = 0; i < G.buffers_to_remove.size; ++i) {
+    BufferData *b = G.buffers_to_remove[i];
+    for (int j = 0; j < G.buffers.size; ++j) {
+      if (G.buffers[j] == b) {
+        util_free(*G.buffers[j]);
+
+        // reset any panes that are using this buffer
+        for (int k = 0; k < G.editing_panes.size; ++k) {
+          if (G.editing_panes[k]->buffer.data == b) {
+            util_free(*G.editing_panes[k]);
+            Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+          }
+        }
+        delete b;
+
+        G.buffers[j] = G.buffers[--G.buffers.size];
         break;
       }
     }

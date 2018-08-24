@@ -62,12 +62,12 @@ int main(int argc, char const *argv[])
 		out.append("static enum {");
 		for (int i = 0; i < yields.size; ++i)
 			out.appendf("{} = %i, ", yields[i], i+1);
-		out.append("} step;\n");
+		out.append("} step; ");
 
 		out.append("switch (step) {");
 		for (int i = 0; i < yields.size; ++i)
 			out.appendf("case {}: goto {};", yields[i], yields[i]);
-		out.append("}\n");
+		out.append("}");
 
 		out += data(a, b);
 		b += strlen("COROUTINE_END");
