@@ -467,6 +467,16 @@ union Array {
     size -= n;
   }
 
+  // only removes one item, so you better make sure it's unique
+  void remove_slow(T t) {
+    remove_slow(find(t));
+  }
+
+  void remove_slow(T *t) {
+    if (t >= items && t < items + size)
+      remove_slow(t - items);
+  }
+
   void remove_slow(int i) {
     memmove(items+i, items+i+1, (size-i-1)*sizeof(T));
     --size;
@@ -839,6 +849,14 @@ struct Slice {
     return i;
   }
 
+  static int convert_to_unix_endlines(char *chars, int length) {
+    char *out = chars;
+    for (int i = 0; i < length; ++i)
+      if (chars[i] != '\r')
+        *out++ = chars[i];
+    return out - chars;
+  }
+
   static int visual_offset(const char *chars, int length, int x, int tab_width) {
     if (!chars)
       return 0;
@@ -1005,6 +1023,8 @@ union String {
   };
   Slice slice;
 
+  void convert_to_unix_endlines() {length = Slice::convert_to_unix_endlines(chars, length);}
+
   static String create(const char *str, int len) {
     if (!len || !str)
       return {};
@@ -1056,6 +1076,8 @@ union StringBuffer {
   };
   String string;
   Slice slice;
+
+  void convert_to_unix_endlines() {length = Slice::convert_to_unix_endlines(chars, length);}
 
   void resize(int l) {
     if (l > length)

@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * Have a single build buffer
  * move_cursors_on_delete to match move_cursors_on_insert
  * Search on word only
  * Fix modified() bug
@@ -354,6 +355,8 @@ struct BufferData {
   String filename;
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
 
+  bool is_dynamic;
+
   BufferData *buffer;
 
   Array<StringBuffer> lines;
@@ -373,7 +376,7 @@ struct BufferData {
   Array<String> identifiers;
 
   // methods
-  void init();
+  void init(bool is_dynamic);
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
@@ -653,6 +656,8 @@ struct Pane {
   const Color *text_color;
   int _gutter_width;
 
+  bool is_dynamic; // some panes are statically allocated because they are singletons, like the build result pane, status message pane, etc.
+
   Array<SubPane> subpanes;
   Pane *parent;
 
@@ -718,29 +723,30 @@ struct Pane {
   Pos buf2char(Pos p) const;
   Pos buf2pixel(Pos p) const;
 
-  static void init_edit(Pane &p,
-                        BufferData *b,
-                        Color *background_color,
-                        Color *text_color,
-                        Color *active_highlight_background_color,
-                        Color *inactive_highlight_background_color) {
-    util_free(p.buffer);
-    p = {};
-    p.type = PANETYPE_EDIT;
-    p.buffer = {b, Array<Cursor>{}};
-    p.buffer.cursors += {};
-    p.background_color = background_color;
-    p.text_color = text_color;
-    p.active_highlight_background_color = active_highlight_background_color;
-    p.inactive_highlight_background_color = inactive_highlight_background_color;
-  }
+  static void init_edit(Pane &p, BufferData *b, Color *background_color, Color *text_color, Color *active_highlight_background_color, Color *inactive_highlight_background_color, bool is_dynamic);
 };
 
 void util_free(Pane &p) {
   util_free(p.buffer);
-  util_free(p.buffer.jumplist);
 }
 
+void Pane::init_edit(Pane &p,
+                      BufferData *b,
+                      Color *background_color,
+                      Color *text_color,
+                      Color *active_highlight_background_color,
+                      Color *inactive_highlight_background_color, bool is_dynamic) {
+  util_free(p);
+  p = {};
+  p.type = PANETYPE_EDIT;
+  p.buffer = {b, Array<Cursor>{}};
+  p.buffer.cursors += {};
+  p.background_color = background_color;
+  p.text_color = text_color;
+  p.active_highlight_background_color = active_highlight_background_color;
+  p.inactive_highlight_background_color = inactive_highlight_background_color;
+  p.is_dynamic = is_dynamic;
+}
 
 struct PoppedColor {
   Color base_color;
@@ -844,6 +850,8 @@ struct State {
   Pane dropdown_pane;
   BufferData dropdown_buffer;
   BufferData null_buffer;
+  Pane build_result_pane;
+  BufferData build_result_buffer;
 
   float activation_meter;
 
@@ -924,6 +932,14 @@ static void status_message_set(const char *fmt, ...) {
   G.status_message_pane.buffer.empty();
   G.status_message_buffer[0].clear();
   G.status_message_buffer[0].appendv(fmt, args);
+
+  // grab only the first line
+  int i;
+  if (G.status_message_buffer[0].find('\n', &i)) {
+    if (i > 0 && G.status_message_buffer[0][i-1] == '\r')
+      --i;
+    G.status_message_buffer[0].length = i;
+  }
 }
 
 // MUST BE REVERSE SIZE ORDER
@@ -2275,9 +2291,9 @@ static void state_init() {
 
   // @panes
 
-  G.null_buffer.init();
+  G.null_buffer.init(false);
   Pane *main_pane = new Pane{};
-  Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+  Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
 
 
   // search pane
@@ -2307,6 +2323,10 @@ static void state_init() {
   G.status_message_pane.active_highlight_background_color = &G.active_highlight_background_color.color;
   G.status_message_pane.margin = 5;
   G.status_message_pane.menu.prefix = Slice::create("status");
+
+  // build result pane
+  G.build_result_buffer.init(false);
+  Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
 
   G.editing_pane = main_pane;
   G.bottom_pane = &G.status_message_pane;
@@ -3016,6 +3036,26 @@ static void handle_input(Key key) {
         editor_exit(0);
       break;
 
+    case CONTROL('b'): {
+      int errcode;
+      String output;
+      if (!call("build.bat", &errcode, &output)) {
+        status_message_set("Failed to call build.bat");
+        goto build_done;
+      }
+      output.convert_to_unix_endlines();
+
+      if (!G.editing_panes.find(&G.build_result_pane))
+        G.editing_panes += &G.build_result_pane;
+      if (!G.buffers.find(&G.build_result_buffer))
+        G.buffers += &G.build_result_buffer;
+      G.build_result_buffer.init(false);
+      G.build_result_pane.buffer.insert(output.slice);
+
+      build_done:
+      util_free(output);
+      break;}
+
     case CONTROL('s'):
       save_buffer(buffer.data);
       break;
@@ -3079,7 +3119,7 @@ static void handle_input(Key key) {
 
     case CONTROL('w'): {
       Pane *p = new Pane{};
-      Pane::init_edit(*p, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+      Pane::init_edit(*p, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
       G.editing_panes += p;
       break;}
 
@@ -4514,8 +4554,10 @@ void BufferView::goto_beginline() {
   }
 }
 
-void BufferData::init() {
+void BufferData::init(bool buffer_is_dynamic) {
+  util_free(*this);
   *this = {};
+  this->is_dynamic = buffer_is_dynamic;
   lines += {};
 }
 
@@ -5191,7 +5233,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
 
 void Pane::add_subpane(BufferData *b, Pos pos) {
   Pane *p = new Pane{};
-  Pane::init_edit(*p, b, (Color*)&G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+  Pane::init_edit(*p, b, (Color*)&G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
   p->buffer.move_to(pos);
   p->parent = this;
   subpanes += {buffer.cursors[0].pos, p};
@@ -5684,8 +5726,6 @@ static void handle_pending_removes() {
   // remove panes
   for (int pane_idx = 0; pane_idx < G.panes_to_remove.size; ++pane_idx) {
     Pane *p = G.panes_to_remove[pane_idx];
-    if (p == &G.menu_pane || p == &G.dropdown_pane || p == &G.status_message_pane)
-      continue;
 
     // remove from parent subpane list
     if (p->parent) {
@@ -5710,48 +5750,44 @@ static void handle_pending_removes() {
     }
     p->subpanes.free_shallow();
 
-    // remove from global pane list
-    Pane **global = G.editing_panes.find(p);
-    if (!global)
-      continue;
-    int i = global - G.editing_panes.items;
-    G.editing_panes.remove_slow(i);
-    if (G.editing_pane == p)
-      G.editing_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-    if (G.selected_pane == p)
-      G.selected_pane = G.editing_panes[clamp(i, 0, G.editing_panes.size-1)];
-
+    // free pane
     util_free(*p);
-    delete p;
+    if (p->is_dynamic)
+      delete p;
+
+    // remove from global pane list
+    int idx = G.editing_panes.find(p) - G.editing_panes.items;
+    G.editing_panes.remove_slow(p);
+
+    // update global pane pointers
+    if (G.editing_pane == p)
+      G.editing_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
+    if (G.selected_pane == p)
+      G.selected_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
   }
   G.panes_to_remove.size = 0;
 
   if (G.editing_panes.size == 0) {
     Pane *main_pane = new Pane{};
-    Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
+    Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
     G.editing_panes += main_pane;
     G.selected_pane = main_pane;
     G.editing_pane = main_pane;
   }
 
   // remove buffers
-  for (int i = 0; i < G.buffers_to_remove.size; ++i) {
-    BufferData *b = G.buffers_to_remove[i];
-    for (int j = 0; j < G.buffers.size; ++j) {
-      if (G.buffers[j] == b) {
-        util_free(*G.buffers[j]);
+  for (BufferData *b : G.buffers_to_remove) {
+    // free buffer
+    util_free(*b);
+    G.buffers.remove_slow(b);
+    if (b->is_dynamic)
+      delete b;
 
-        // reset any panes that are using this buffer
-        for (int k = 0; k < G.editing_panes.size; ++k) {
-          if (G.editing_panes[k]->buffer.data == b) {
-            util_free(*G.editing_panes[k]);
-            Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color);
-          }
-        }
-        delete b;
-
-        G.buffers[j] = G.buffers[--G.buffers.size];
-        break;
+    // reset any panes that were using this buffer
+    for (int k = 0; k < G.editing_panes.size; ++k) {
+      if (G.editing_panes[k]->buffer.data == b) {
+        util_free(*G.editing_panes[k]);
+        Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
       }
     }
   }
