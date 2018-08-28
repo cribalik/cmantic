@@ -34,7 +34,6 @@
 #include "util.hpp"
 #include "graphics.hpp"
 
-
 template<class T>
 struct GroupedData {
   TempAllocator storage;
@@ -353,6 +352,7 @@ struct PasteHighlight {
 
 struct BufferData {
   String filename;
+  Slice description; // only used for special buffers (i.e. if it does not have a filename)
   const char * endline_string; // ENDLINE_WINDOWS or ENDLINE_UNIX
 
   bool is_dynamic;
@@ -376,7 +376,7 @@ struct BufferData {
   Array<String> identifiers;
 
   // methods
-  void init(bool is_dynamic);
+  void init(bool is_dynamic, Slice description = {});
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
@@ -857,7 +857,7 @@ struct State {
 
   String search_term;
 
-  Array<BufferData*> buffers;
+  Array<BufferData*> file_buffers;
 
   // instead of removing stuff on the spot, which can cause issues, we push them to these lists and delete them at the end of the frame
   Array<BufferData*> buffers_to_remove;
@@ -1436,24 +1436,25 @@ static void menu_option_chdir() {
 }
 
 static void menu_option_reload() {
-  if (G.editing_pane->buffer.data == &G.null_buffer)
+  BufferData *b = G.editing_pane->buffer.data;
+  if (!G.file_buffers.find(b))
     return;
 
-  if (BufferData::reload(G.editing_pane->buffer.data))
-    status_message_set("Reloaded {}", (Slice)G.editing_pane->buffer.data->filename.slice);
+  if (BufferData::reload(b))
+    status_message_set("Reloaded {}", (Slice)b->filename.slice);
   else
-    status_message_set("Failed to reload {}", (Slice)G.editing_pane->buffer.data->filename.slice);
+    status_message_set("Failed to reload {}", (Slice)b->filename.slice);
 }
 
 static void menu_option_reloadall() {
-  for (BufferData *b : G.buffers)
+  for (BufferData *b : G.file_buffers)
     BufferData::reload(b);
-  status_message_set("Reloaded %i files", G.buffers.size);
+  status_message_set("Reloaded %i files", G.file_buffers.size);
 }
 
 static void menu_option_close() {
   BufferData *b = G.editing_pane->buffer.data;
-  if (b == &G.null_buffer)
+  if (!G.file_buffers.find(b))
     return;
 
   status_message_set("Closed {}", (Slice)b->filename.slice);
@@ -1462,7 +1463,7 @@ static void menu_option_close() {
 
 static void menu_option_closeall() {
   status_message_set("Closed all buffers");
-  for (BufferData *b : G.buffers)
+  for (BufferData *b : G.file_buffers)
     G.buffers_to_remove += b;
 }
 
@@ -2291,10 +2292,10 @@ static void state_init() {
 
   // @panes
 
-  G.null_buffer.init(false);
+  // default buffer, and initial pane
+  G.null_buffer.init(false, Slice::create("[Scratch]"));
   Pane *main_pane = new Pane{};
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
-
 
   // search pane
   G.menu_pane.type = PANETYPE_MENU;
@@ -2324,10 +2325,6 @@ static void state_init() {
   G.status_message_pane.margin = 5;
   G.status_message_pane.menu.prefix = Slice::create("status");
 
-  // build result pane
-  G.build_result_buffer.init(false);
-  Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
-
   G.editing_pane = main_pane;
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = main_pane;
@@ -2342,7 +2339,7 @@ static void state_init() {
 void state_free() {
   // really none of this matters, since all resouces are freed when program exits
   #if 0
-  util_free(G.buffers);
+  util_free(G.file_buffers);
   util_free(G.null_buffer);
   util_free(G.menu_buffer);
   util_free(G.dropdown_buffer);
@@ -2702,7 +2699,7 @@ static void handle_input(Key key) {
       }
 
       BufferData *b = 0;
-      for (BufferData *bb : G.buffers) {
+      for (BufferData *bb : G.file_buffers) {
         if (filename == bb->filename.slice) {
           b = bb;
           filename = bb->filename.slice;
@@ -2716,7 +2713,7 @@ static void handle_input(Key key) {
       else {
         b = new BufferData{};
         if (BufferData::from_file(filename, b)) {
-          G.buffers.push(b);
+          G.file_buffers += b;
           G.editing_pane->switch_buffer(b);
           status_message_set("Loaded file {} (%s)", (Slice)filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
@@ -3038,7 +3035,7 @@ static void handle_input(Key key) {
 
     case CONTROL('b'): {
       int errcode;
-      String output;
+      String output = {};
       if (!call("build.bat", &errcode, &output)) {
         status_message_set("Failed to call build.bat");
         goto build_done;
@@ -3047,9 +3044,8 @@ static void handle_input(Key key) {
 
       if (!G.editing_panes.find(&G.build_result_pane))
         G.editing_panes += &G.build_result_pane;
-      if (!G.buffers.find(&G.build_result_buffer))
-        G.buffers += &G.build_result_buffer;
-      G.build_result_buffer.init(false);
+      G.build_result_buffer.init(false, Slice::create("[Build Result]"));
+      Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
       G.build_result_pane.buffer.insert(output.slice);
 
       build_done:
@@ -3350,7 +3346,8 @@ static void handle_rendering(float dt) {
   G.search_term_background_color.tick(dt);
 
   // update paste highlights
-  for (BufferData *b : G.buffers) {
+  for (Pane *p : G.editing_panes) {
+    BufferData *b = p->buffer.data;
     for (int i = 0; i < b->paste_highlights.size; ++i) {
       b->paste_highlights[i].alpha -= dt*0.03f;
 
@@ -3490,9 +3487,12 @@ void util_free(BufferData &b) {
   util_free(b.identifiers);
   util_free(b.definitions);
   util_free(b._undo_actions);
+  b.paste_highlights.free_shallow();
 }
 
 bool BufferData::reload(BufferData *b) {
+  if (!b->filename.chars)
+    return false;
   String filename = String::create(b->filename.slice);
   util_free(*b);
   bool succ = BufferData::from_file(filename.slice, b);
@@ -4558,9 +4558,10 @@ void BufferView::goto_beginline() {
   }
 }
 
-void BufferData::init(bool buffer_is_dynamic) {
+void BufferData::init(bool buffer_is_dynamic, Slice descr) {
   util_free(*this);
   *this = {};
+  this->description = descr;
   this->is_dynamic = buffer_is_dynamic;
   lines += {};
 }
@@ -5461,7 +5462,7 @@ void Pane::render_edit() {
 
   // render filename
   // render filename
-  const Slice filename = &d == &G.null_buffer ? Slice::create("[No name]") : Path::name(d.filename.slice);
+  const Slice filename = d.filename.chars ? Path::name(d.filename.slice) : d.description;
   const int header_text_size = header_height - 6;
   push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
 
@@ -5783,7 +5784,7 @@ static void handle_pending_removes() {
   for (BufferData *b : G.buffers_to_remove) {
     // free buffer
     util_free(*b);
-    G.buffers.remove_slow(b);
+    G.file_buffers.remove_slow(b);
     if (b->is_dynamic)
       delete b;
 
@@ -5837,7 +5838,7 @@ int main(int, const char *[])
   bool window_active = true;
   for (;;) {
     static u32 ticks = SDL_GetTicks();
-    float dt = (float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f;
+    const float dt = clamp((float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 0.3f, 3.0f);
     ticks = SDL_GetTicks();
 
     Key key = get_input(&window_active);
