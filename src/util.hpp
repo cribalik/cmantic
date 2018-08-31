@@ -774,6 +774,8 @@ struct Slice {
   const char *chars;
   int length;
 
+  String nullterminated() const;
+
   static Slice slice(const char *str, int len, int a, int b);
 
   static String copy(const char *str, int len);
@@ -1410,6 +1412,10 @@ String Slice::copy(const char *chars, int length) {
   return s;
 }
 
+String Slice::nullterminated() const {
+  return String::create(*this);
+}
+
 STRING_METHODS_IMPL(Slice)
 STRING_METHODS_IMPL(String)
 STRING_METHODS_IMPL(StringBuffer)
@@ -1778,6 +1784,81 @@ LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
 #ifndef UTIL_PROCESS
 #define UTIL_PROCESS
 
+#ifdef OS_WINDOWS
+struct Stream {
+  HANDLE handle;
+  enum {INIT, CONNECTING, CONNECTED, PENDING, READING} state;
+  OVERLAPPED overlap;
+
+  int read(u8 *buffer, int n) {
+    DWORD result = 0;
+    switch (state) {
+      case INIT:
+        // wait for connection
+        if (ConnectNamedPipe(handle, &overlap)) {
+          // log_err("Async pipe operation should return zero\n");
+          return -1;
+        }
+        switch (GetLastError()) {
+          case ERROR_IO_PENDING:
+            // log_info("Initiating wait for connection\n");
+            goto connecting;
+          case ERROR_PIPE_CONNECTED:
+            // log_info("Connection already created\n");
+            goto connected;
+          default:
+            // log_err("Failed to connect to pipe (%i)\n", (int)GetLastError());
+            return -1;
+        }
+
+      case CONNECTING:
+        connecting:
+        state = CONNECTING;
+        // log_info("Waiting for connection\n");
+        if (!HasOverlappedIoCompleted(&overlap))
+          return 0;
+
+      case CONNECTED:
+        connected:
+        state = CONNECTED;
+        // initiate reading
+        // log_info("Initiating async read\n");
+        if (!ReadFile(handle, buffer, n, &result, &overlap)) {
+          if (GetLastError() == ERROR_IO_PENDING) {
+            // log_err("ERROR_IO_PENDING\n");
+            goto pending;
+          }
+          else {
+            // log_err("Error: %i\n", (int)GetLastError());
+            return -1;
+          }
+        }
+        return result;
+
+      case PENDING:
+        pending:
+        state = PENDING;
+        // log_info("Getting result\n");
+        if (!GetOverlappedResult(handle, &overlap, &result, FALSE)) {
+          if (GetLastError() == ERROR_IO_INCOMPLETE) {
+            // log_info("ERROR_IO_INCOMPLETE\n");
+            return 0;
+          }
+          else
+            return -1;
+        }
+        state = CONNECTED;
+    }
+    return result;
+  }
+};
+#else
+#endif
+
+static bool call(Slice command, int *errcode, String *output);
+static bool call_async(Slice command, Stream *output);
+
+#ifdef OS_WINDOWS
 static bool call(Slice command, int *errcode, String *output) {
   // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
   // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
@@ -1801,12 +1882,17 @@ static bool call(Slice command, int *errcode, String *output) {
       goto err;
     }
 
-    // Ensure the read handle to the pipe for STDOUT is not inherited.
-    if ( ! SetHandleInformation(proc_output, HANDLE_FLAG_INHERIT, 0) ) {
-      log_err("Failed SetHandleInformation for stdout\n"); 
+    // // Ensure the read handle to the pipe for STDOUT is not inherited.
+    // if (!SetHandleInformation(proc_output, HANDLE_FLAG_INHERIT, 0)) {
+    //   log_err("Failed SetHandleInformation for stdout\n"); 
+    //   goto err;
+    // }
+
+    // and duplicate the handle for stderr
+    if (!DuplicateHandle(GetCurrentProcess(), info.hStdOutput, GetCurrentProcess(), &info.hStdError, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+      log_err("Failed to duplicate process output handle to stderr (%i)\n", (int)GetLastError());
       goto err;
     }
-    info.hStdError = info.hStdOutput;
   }
 
   // create process
@@ -1819,21 +1905,25 @@ static bool call(Slice command, int *errcode, String *output) {
 
   // we won't be using the write end of the stdout,stderr pipes
   if (output) {
+    // TODO: when we duplicate the pipe for stderr, we must free it here
     CloseHandle(info.hStdOutput);
+    CloseHandle(info.hStdError);
     info.hStdOutput = 0;
+    info.hStdError = 0;
   }
 
   // read stdout from process
   while (1) {
-    bool something_was_read = false;
+    bool keepgoing = false;
     if (output) {
       output_data.reserve(output_data.size + 512);
-      DWORD num_read;
+      DWORD num_read = 0;
       success = ReadFile(proc_output, output_data.items + output_data.size, 512, &num_read, NULL);
-      something_was_read |= (success && num_read);
-      output_data.size += num_read;
+      keepgoing |= (success || GetLastError() == ERROR_MORE_DATA);
+      if (success)
+        output_data.size += num_read;
     }
-    if (!something_was_read)
+    if (!keepgoing)
       break;
   }
   if (output)
@@ -1864,9 +1954,104 @@ static bool call(Slice command, int *errcode, String *output) {
     CloseHandle(proc_output);
     if (info.hStdOutput)
       CloseHandle(info.hStdOutput);
+    if (info.hStdError)
+      CloseHandle(info.hStdError);
   }
   util_free(cmd);
   output_data.free_shallow();
+  return false;
+}
+
+static bool call_async(Slice command, Stream *output) {
+  // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
+  // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
+
+  // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
+  HANDLE shared_pipe = {};
+  HANDLE our_pipe = {};
+  String cmd = {};
+
+  STARTUPINFO info = {sizeof(info)};
+  info.dwFlags |= STARTF_USESTDHANDLES;
+  PROCESS_INFORMATION process_info = {};
+
+  // create pipe for reading from processes stdout
+  SECURITY_ATTRIBUTES sattr = {};
+  sattr.nLength = sizeof(sattr);
+  sattr.bInheritHandle = TRUE;
+  sattr.lpSecurityDescriptor = NULL;
+  char pipe_name[128];
+  static uint unique_pipe_num = 0;
+  sprintf_s(pipe_name, "\\\\.\\pipe\\cmutil.%08x.%08x", GetCurrentProcessId(), ++unique_pipe_num);
+  shared_pipe = CreateNamedPipeA(pipe_name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE, 1, 0, 0, INFINITE, &sattr);
+  if (shared_pipe == INVALID_HANDLE_VALUE) {
+    log_err("Failed to create pipe for stdout\n");
+    goto err;
+  }
+
+  // now we need to create another file that the child process can write to
+  info.hStdOutput = CreateFile(pipe_name, FILE_WRITE_DATA | SYNCHRONIZE, 0, &sattr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+
+  // // Ensure the read handle to the pipe for STDOUT is not inherited.
+  // if (!SetHandleInformation(pipe, HANDLE_FLAG_INHERIT, 0)) {
+  //   log_err("Failed SetHandleInformation for stdout\n"); 
+  //   goto err;
+  // }
+
+  // and duplicate for stderr
+  if (!DuplicateHandle(GetCurrentProcess(), info.hStdOutput, GetCurrentProcess(), &info.hStdError, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+    log_err("Failed to duplicate process output handle to stderr (%i)\n", (int)GetLastError());
+    goto err;
+  }
+
+  // finally we need to create our own non-shareable pipe, and close the shared one (this shouldn't be much of a problem in practice, since the shared pipe will be freed by the child process when it exits)
+  if (!DuplicateHandle(GetCurrentProcess(), shared_pipe, GetCurrentProcess(), &our_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    log_err("Failed to duplicate pipe (%i)\n", (int)GetLastError());
+    goto err;
+  }
+  if (!CloseHandle(shared_pipe)) {
+    log_err("Failed to close shared pipe (%i)\n", (int)GetLastError());
+    goto err;
+  }
+
+  // create process
+  cmd = String::create(command);
+  if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
+    log_err("Failed to create process (%i)\n", GetLastError());
+    goto err;
+  }
+  util_free(cmd);
+
+  *output = Stream{our_pipe};
+  output->overlap.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+  if (!output->overlap.hEvent) {
+    log_err("Failed to create an event for overlapped io (%i)\n", (int)GetLastError());
+    goto err;
+  }
+
+  // close process handles
+  if (process_info.hProcess)
+    CloseHandle(process_info.hProcess);
+  if (process_info.hThread)
+    CloseHandle(process_info.hThread);
+  CloseHandle(info.hStdOutput);
+  CloseHandle(info.hStdError);
+
+  return true;
+
+  err:
+  // close process handles
+  if (process_info.hProcess)
+    CloseHandle(process_info.hProcess);
+  if (process_info.hThread)
+    CloseHandle(process_info.hThread);
+  util_free(cmd);
+  // close pipes
+  if (shared_pipe)
+    CloseHandle(shared_pipe);
+  if (our_pipe)
+    CloseHandle(our_pipe);
+  log_err("Failed to create process\n");
   return false;
 }
 
@@ -2001,12 +2186,19 @@ static bool call(Slice command, int *errcode, String *std_out, String *std_err) 
   return false;
 }
 #endif
+
 static bool call(const char *command, int *errcode, String *output) {
   return call(Slice::create(command), errcode, output);
 }
 
+static bool call_async(const char *command, Stream *output) {
+  return call_async(Slice::create(command), output);
+}
+
+#else
 // TODO: posix version
 // https://jineshkj.wordpress.com/2006/12/22/how-to-capture-stdin-stdout-and-stderr-of-child-program/
+#endif
 
 #endif /* UTIL_PROCESS */
 

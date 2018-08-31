@@ -1,9 +1,12 @@
 /*
  * TODO:
+ * If you have the same buffer open in multiple panes, paste_highlights are updated faster
+ * move_cursors_on_delete to match move_cursors_on_insert (clean up cursor passing to BufferData methods)
+ * listen on file changes and automatically reload
+ * 
  * Have a single build buffer
- * move_cursors_on_delete to match move_cursors_on_insert
+ *
  * Search on word only
- * Fix modified() bug
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
  * make 'dp' use tokens instead of chars
@@ -44,7 +47,6 @@ void util_free(GroupedData<T> &d) {
   util_free(d.storage);
   d = {};
 }
-struct BlameData {int line; char *hash, *author, *summary;};
 #include "git.cpp"
 
 struct FuzzyMatch {
@@ -376,6 +378,8 @@ struct BufferData {
   Array<String> identifiers;
 
   // methods
+  Slice name() const {return filename.chars ? Path::name(filename.slice) : description;}
+  bool is_bound_to_file() {return filename.chars;}
   void init(bool is_dynamic, Slice description = {});
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
@@ -630,7 +634,6 @@ void swap_range(BufferData &buffer, Pos &a, Pos &b) {
   a = b;
   b = tmp;
   buffer.advance(a);
-  // buffer.advance(b);
 }
 
 static void util_free(BufferView &b) {
@@ -857,7 +860,7 @@ struct State {
 
   String search_term;
 
-  Array<BufferData*> file_buffers;
+  Array<BufferData*> buffers;
 
   // instead of removing stuff on the spot, which can cause issues, we push them to these lists and delete them at the end of the frame
   Array<BufferData*> buffers_to_remove;
@@ -1364,7 +1367,8 @@ static void save_buffer(BufferData *b) {
   FILE* f;
   int i;
 
-  assert(b->filename.length);
+  if (!b->is_bound_to_file())
+    return;
 
   if (file_open(&f, b->filename.chars, "wb")) {
     status_message_set("Could not open file {} for writing: %s", (Slice)b->filename.slice, cman_strerror(errno));
@@ -1400,8 +1404,7 @@ static void save_buffer(BufferData *b) {
 }
 
 static void menu_option_save() {
-  if (G.selected_pane)
-    save_buffer(G.editing_pane->buffer.data);
+  save_buffer(G.editing_pane->buffer.data);
 }
 
 void state_free();
@@ -1437,7 +1440,7 @@ static void menu_option_chdir() {
 
 static void menu_option_reload() {
   BufferData *b = G.editing_pane->buffer.data;
-  if (!G.file_buffers.find(b))
+  if (!b->is_bound_to_file())
     return;
 
   if (BufferData::reload(b))
@@ -1447,23 +1450,22 @@ static void menu_option_reload() {
 }
 
 static void menu_option_reloadall() {
-  for (BufferData *b : G.file_buffers)
-    BufferData::reload(b);
-  status_message_set("Reloaded %i files", G.file_buffers.size);
+  int count = 0;
+  for (BufferData *b : G.buffers)
+    if (b->is_bound_to_file())
+      BufferData::reload(b), ++count;
+  status_message_set("Reloaded %i files", count);
 }
 
 static void menu_option_close() {
   BufferData *b = G.editing_pane->buffer.data;
-  if (!G.file_buffers.find(b))
-    return;
-
-  status_message_set("Closed {}", (Slice)b->filename.slice);
+  status_message_set("Closed {}", (Slice)b->name());
   G.buffers_to_remove += b;
 }
 
 static void menu_option_closeall() {
   status_message_set("Closed all buffers");
-  for (BufferData *b : G.file_buffers)
+  for (BufferData *b : G.buffers)
     G.buffers_to_remove += b;
 }
 
@@ -1473,6 +1475,9 @@ static void menu_option_closeall() {
 static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
 static void menu_option_blame() {
   COROUTINE_BEGIN
+
+  if (!G.editing_pane->buffer.data->is_bound_to_file())
+    yield_break;
 
   // ask the user if it's okay we save before blaming
   if (G.editing_pane->buffer.data->modified()) {
@@ -2294,8 +2299,12 @@ static void state_init() {
 
   // default buffer, and initial pane
   G.null_buffer.init(false, Slice::create("[Scratch]"));
+  G.buffers += &G.null_buffer;
   Pane *main_pane = new Pane{};
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
+
+  G.build_result_buffer.init(false, Slice::create("[Build Result]"));
+  G.buffers += &G.build_result_buffer;
 
   // search pane
   G.menu_pane.type = PANETYPE_MENU;
@@ -2339,7 +2348,7 @@ static void state_init() {
 void state_free() {
   // really none of this matters, since all resouces are freed when program exits
   #if 0
-  util_free(G.file_buffers);
+  util_free(G.buffers);
   util_free(G.null_buffer);
   util_free(G.menu_buffer);
   util_free(G.dropdown_buffer);
@@ -2699,7 +2708,7 @@ static void handle_input(Key key) {
       }
 
       BufferData *b = 0;
-      for (BufferData *bb : G.file_buffers) {
+      for (BufferData *bb : G.buffers) {
         if (filename == bb->filename.slice) {
           b = bb;
           filename = bb->filename.slice;
@@ -2713,7 +2722,7 @@ static void handle_input(Key key) {
       else {
         b = new BufferData{};
         if (BufferData::from_file(filename, b)) {
-          G.file_buffers += b;
+          G.buffers += b;
           G.editing_pane->switch_buffer(b);
           status_message_set("Loaded file {} (%s)", (Slice)filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
@@ -2958,6 +2967,11 @@ static void handle_input(Key key) {
       mode_goto_definition();
       break;
 
+    case '?':
+      buffer.data->print_undo_actions();
+      log_info("%i %i\n", buffer.data->_next_undo_action, buffer.data->_last_save_undo_action);
+      break;
+
     case 'x':
       buffer.action_begin();
       buffer.advance();
@@ -3026,12 +3040,20 @@ static void handle_input(Key key) {
       graphics_set_font_options(G.ttf_file.string.chars, G.font_height);
       break;
 
-    case 'q':
-      if (buffer.data->modified())
-        status_message_set("You have unsaved changes. If you really want to exit, use :quit");
-      else
-        editor_exit(0);
-      break;
+    case 'q': {
+      // check if there are any unsaved buffers
+      for (BufferData *b : G.buffers) {
+        if (b->is_bound_to_file() && b->modified()) {
+          G.editing_pane->switch_buffer(b);
+          status_message_set("{} has unsaved changes. If you really want to exit, use :quit", (Slice)b->name());
+          goto quit_done;
+        }
+      }
+      // otherwise exit
+      editor_exit(0);
+
+      quit_done:
+      break;}
 
     case CONTROL('b'): {
       int errcode;
@@ -3346,8 +3368,7 @@ static void handle_rendering(float dt) {
   G.search_term_background_color.tick(dt);
 
   // update paste highlights
-  for (Pane *p : G.editing_panes) {
-    BufferData *b = p->buffer.data;
+  for (BufferData *b : G.buffers) {
     for (int i = 0; i < b->paste_highlights.size; ++i) {
       b->paste_highlights[i].alpha -= dt*0.03f;
 
@@ -3626,7 +3647,10 @@ void BufferData::push_undo_action(UndoAction a) {
   if (_next_undo_action < _undo_actions.size) {
     for (int i = _next_undo_action; i < _undo_actions.size; ++i)
       util_free(_undo_actions[i]);
-    _last_save_undo_action = -1;
+
+    // invalidate the save position
+    if (_last_save_undo_action > _next_undo_action)
+      _last_save_undo_action = -1;
   }
   _undo_actions.size = _next_undo_action;
   _undo_actions += a;
@@ -3814,23 +3838,23 @@ void BufferData::redo(Array<Cursor> &cursors) {
 }
 
 void BufferData::print_undo_actions() {
-  puts("#########################");
+  log_info("#########################\n");
   for (UndoAction &a : _undo_actions) {
     switch (a.type) {
       case ACTIONTYPE_INSERT:
-        puts("   INSERT");
+        log_info("   INSERT\n");
         break;
       case ACTIONTYPE_DELETE:
-        puts("   DELETE");
+        log_info("   DELETE\n");
         break;
       case ACTIONTYPE_CURSOR_SNAPSHOT:
-        puts("   CURSORS");
+        log_info("   CURSORS\n");
         break;
       case ACTIONTYPE_GROUP_BEGIN:
-        puts(">>>");
+        log_info(">>>\n");
         break;
       case ACTIONTYPE_GROUP_END:
-        puts("<<<");
+        log_info("<<<\n");
         break;
     }
   }
@@ -4334,7 +4358,7 @@ static void move_cursors_on_insert(BufferData *buffer, Pos a, Pos b) {
   }
 }
 
-void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_idx) {
+void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_index_hint) {
   if (!s.length)
     return;
 
@@ -4360,7 +4384,7 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
   //   printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   if (!undo_disabled)
-    push_undo_action(UndoAction::insert_slice(a, b, s, cursor_idx));
+    push_undo_action(UndoAction::insert_slice(a, b, s, cursor_index_hint));
 
   if (num_lines == 0)
     lines[a.y].insert(a.x, s);
@@ -5462,7 +5486,7 @@ void Pane::render_edit() {
 
   // render filename
   // render filename
-  const Slice filename = d.filename.chars ? Path::name(d.filename.slice) : d.description;
+  const Slice filename = d.name();
   const int header_text_size = header_height - 6;
   push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
 
@@ -5581,11 +5605,9 @@ static Key get_input(bool *window_active) {
           editor_exit(0);
           break;
         case SDL_WINDOWEVENT_FOCUS_GAINED:
-          puts("Focus gained");
           *window_active = true;
           break;
         case SDL_WINDOWEVENT_FOCUS_LOST:
-          puts("Focus lost");
           *window_active = false;
           break;
         default:
@@ -5782,9 +5804,12 @@ static void handle_pending_removes() {
 
   // remove buffers
   for (BufferData *b : G.buffers_to_remove) {
+    if (!b->is_bound_to_file())
+      continue;
+
     // free buffer
     util_free(*b);
-    G.file_buffers.remove_slow(b);
+    G.buffers.remove_slow(b);
     if (b->is_dynamic)
       delete b;
 
@@ -5807,15 +5832,30 @@ int main(int, const char *[])
 {
   util_init();
 
-  #if 0
-  String out;
-  int errcode;
-  if (!call("git status", &errcode, &out))
-    log_error("Failed to call git status\n"), exit(1);
-  if (errcode)
-    log_warn("Command failed (%i):\n{}\n\n", errcode, (Slice)out.slice);
+  #if 1
+  Stream out;
+  if (!call_async("git status", &out))
+    log_err("Failed to call git status\n"), exit(1);
   else
-    log_info("Command succeeded:\n{}\n\n", (Slice)out.slice);
+    log_info("Command succeeded\n");
+
+  while (1) {
+    u8 buf[256];
+    int n = out.read(buf, 255);
+    if (n == -1) {
+      log_warn("No more output\n");
+      goto read_done;
+    }
+    if (n == 0) {
+      SDL_Delay(10);
+      continue;
+    }
+
+    buf[n] = '\0';
+    log_info((char*)buf);
+  }
+  read_done:
+  editor_exit(0);
   #endif
 
   #if 0
@@ -5858,7 +5898,7 @@ int main(int, const char *[])
         c = COLOR_WHITE;
       else if (G.activation_meter < 20.0f)
         c = COLOR_BLUE;
-      else if ( G.activation_meter < 30.0f)
+      else if (G.activation_meter < 30.0f)
         c = COLOR_ORANGE;
       else
         c = COLOR_DEEP_ORANGE;

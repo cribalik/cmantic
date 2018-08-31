@@ -21,6 +21,8 @@ struct StringCache {
 	}
 };
 
+struct BlameData {int line; char *hash, *author, *summary;};
+
 static bool git_parse_blame(String output, Array<BlameData> *result) {
 	StringCache<64> hash_cache = {};
 	StringCache<64> author_cache = {};
