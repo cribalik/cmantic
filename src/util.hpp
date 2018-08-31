@@ -1789,22 +1789,22 @@ LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
 
 struct Stream {
   HANDLE handle;
-  enum {BEGIN_CONNECTING, WAIT_FOR_CONNECTION, BEGIN_READING, WAIT_FOR_READ} state;
   OVERLAPPED overlap;
+  enum {BEGIN_CONNECTING, WAIT_FOR_CONNECTION, BEGIN_READING, WAIT_FOR_READ} state;
 
   int read(u8 *buffer, int n) {
     DWORD result = 0;
     switch (state) {
       case BEGIN_CONNECTING:
         if (ConnectNamedPipe(handle, &overlap))
-          return -1;
+          goto err;
         switch (GetLastError()) {
           case ERROR_IO_PENDING:
             goto wait_for_connection;
           case ERROR_PIPE_CONNECTED:
             goto begin_reading;
           default:
-            return -1;
+            goto err;
         }
 
       case WAIT_FOR_CONNECTION:
@@ -1817,12 +1817,10 @@ struct Stream {
         begin_reading:
         state = BEGIN_READING;
         if (!ReadFile(handle, buffer, n, &result, &overlap)) {
-          if (GetLastError() == ERROR_IO_PENDING) {
+          if (GetLastError() == ERROR_IO_PENDING)
             goto wait_for_read;
-          }
-          else {
-            return -1;
-          }
+          else
+            goto err;
         }
         return result;
 
@@ -1833,11 +1831,16 @@ struct Stream {
           if (GetLastError() == ERROR_IO_INCOMPLETE)
             return 0;
           else
-            return -1;
+            goto err;
         }
         state = BEGIN_READING;
     }
     return result;
+
+    err:
+    CloseHandle(handle);
+    CloseHandle(overlap.hEvent);
+    return -1;
   }
 };
 
@@ -1853,7 +1856,10 @@ static bool call(Array<Slice> command, int *errcode, String *output);
 static bool call_async(Array<Slice> command, Stream *output);
 
 #ifdef OS_WINDOWS
+
 static bool call(Slice command, int *errcode, String *output) {
+  // TODO: implement this by calling the async version
+
   // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
   // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
 
@@ -2042,8 +2048,6 @@ static bool call_async(Slice command, Stream *output) {
 
 #else
 
-// TODO: posix version
-// https://jineshkj.wordpress.com/2006/12/22/how-to-capture-stdin-stdout-and-stderr-of-child-program/
 static bool call(Array<Slice> command, int *errcode, String *output) {
   int process_pipe[2];
   if (pipe(process_pipe)) {
@@ -2078,9 +2082,7 @@ static bool call(Array<Slice> command, int *errcode, String *output) {
   Array<u8> output_data = {};
   while (1) {
     output_data.reserve(output_data.size + 512);
-    log_info("initiating read...\n");
     int n = read(process_pipe[0], output_data.items + output_data.size, 512);
-    log_info("read %i\n", n);
     if (n == -1) {
       log_err("Failed to read from pipe\n");
       break;
@@ -2089,7 +2091,6 @@ static bool call(Array<Slice> command, int *errcode, String *output) {
       break;
     output_data.size += n;
   }
-  log_info("done\n");
   *output = {(char*)output_data.items, output_data.size};
   close(process_pipe[0]);
   return true;

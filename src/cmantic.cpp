@@ -1,6 +1,5 @@
 /*
  * TODO:
- * If you have the same buffer open in multiple panes, paste_highlights are updated faster
  * move_cursors_on_delete to match move_cursors_on_insert (clean up cursor passing to BufferData methods)
  * listen on file changes and automatically reload
  * 
