@@ -1787,67 +1787,53 @@ LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
 #ifdef OS_WINDOWS
 struct Stream {
   HANDLE handle;
-  enum {INIT, CONNECTING, CONNECTED, PENDING, READING} state;
+  enum {BEGIN_CONNECTING, WAIT_FOR_CONNECTION, BEGIN_READING, WAIT_FOR_READ} state;
   OVERLAPPED overlap;
 
   int read(u8 *buffer, int n) {
     DWORD result = 0;
     switch (state) {
-      case INIT:
-        // wait for connection
-        if (ConnectNamedPipe(handle, &overlap)) {
-          // log_err("Async pipe operation should return zero\n");
+      case BEGIN_CONNECTING:
+        if (ConnectNamedPipe(handle, &overlap))
           return -1;
-        }
         switch (GetLastError()) {
           case ERROR_IO_PENDING:
-            // log_info("Initiating wait for connection\n");
-            goto connecting;
+            goto wait_for_connection;
           case ERROR_PIPE_CONNECTED:
-            // log_info("Connection already created\n");
-            goto connected;
+            goto begin_reading;
           default:
-            // log_err("Failed to connect to pipe (%i)\n", (int)GetLastError());
             return -1;
         }
 
-      case CONNECTING:
-        connecting:
-        state = CONNECTING;
-        // log_info("Waiting for connection\n");
+      case WAIT_FOR_CONNECTION:
+        wait_for_connection:
+        state = BEGIN_READING;
         if (!HasOverlappedIoCompleted(&overlap))
           return 0;
 
-      case CONNECTED:
-        connected:
-        state = CONNECTED;
-        // initiate reading
-        // log_info("Initiating async read\n");
+      case BEGIN_READING:
+        begin_reading:
+        state = BEGIN_READING;
         if (!ReadFile(handle, buffer, n, &result, &overlap)) {
           if (GetLastError() == ERROR_IO_PENDING) {
-            // log_err("ERROR_IO_PENDING\n");
-            goto pending;
+            goto wait_for_read;
           }
           else {
-            // log_err("Error: %i\n", (int)GetLastError());
             return -1;
           }
         }
         return result;
 
-      case PENDING:
-        pending:
-        state = PENDING;
-        // log_info("Getting result\n");
+      case WAIT_FOR_READ:
+        wait_for_read:
+        state = WAIT_FOR_READ;
         if (!GetOverlappedResult(handle, &overlap, &result, FALSE)) {
-          if (GetLastError() == ERROR_IO_INCOMPLETE) {
-            // log_info("ERROR_IO_INCOMPLETE\n");
+          if (GetLastError() == ERROR_IO_INCOMPLETE)
             return 0;
-          }
           else
             return -1;
         }
-        state = CONNECTED;
+        state = BEGIN_READING;
     }
     return result;
   }
@@ -1881,12 +1867,6 @@ static bool call(Slice command, int *errcode, String *output) {
       log_err("Failed to create pipe for stdout\n");
       goto err;
     }
-
-    // // Ensure the read handle to the pipe for STDOUT is not inherited.
-    // if (!SetHandleInformation(proc_output, HANDLE_FLAG_INHERIT, 0)) {
-    //   log_err("Failed SetHandleInformation for stdout\n"); 
-    //   goto err;
-    // }
 
     // and duplicate the handle for stderr
     if (!DuplicateHandle(GetCurrentProcess(), info.hStdOutput, GetCurrentProcess(), &info.hStdError, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
@@ -1963,13 +1943,12 @@ static bool call(Slice command, int *errcode, String *output) {
 }
 
 static bool call_async(Slice command, Stream *output) {
-  // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
-  // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
-
   // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
+  // and for an actual complete example see https://www.daniweb.com/programming/software-development/threads/295780/using-named-pipes-with-asynchronous-i-o-redirection-to-winapi
   HANDLE shared_pipe = {};
   HANDLE our_pipe = {};
   String cmd = {};
+  *output = {};
 
   STARTUPINFO info = {sizeof(info)};
   info.dwFlags |= STARTF_USESTDHANDLES;
@@ -1991,12 +1970,6 @@ static bool call_async(Slice command, Stream *output) {
 
   // now we need to create another file that the child process can write to
   info.hStdOutput = CreateFile(pipe_name, FILE_WRITE_DATA | SYNCHRONIZE, 0, &sattr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-
-  // // Ensure the read handle to the pipe for STDOUT is not inherited.
-  // if (!SetHandleInformation(pipe, HANDLE_FLAG_INHERIT, 0)) {
-  //   log_err("Failed SetHandleInformation for stdout\n"); 
-  //   goto err;
-  // }
 
   // and duplicate for stderr
   if (!DuplicateHandle(GetCurrentProcess(), info.hStdOutput, GetCurrentProcess(), &info.hStdError, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
@@ -2022,6 +1995,7 @@ static bool call_async(Slice command, Stream *output) {
   }
   util_free(cmd);
 
+  // create result
   *output = Stream{our_pipe};
   output->overlap.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
   if (!output->overlap.hEvent) {
@@ -2030,10 +2004,8 @@ static bool call_async(Slice command, Stream *output) {
   }
 
   // close process handles
-  if (process_info.hProcess)
-    CloseHandle(process_info.hProcess);
-  if (process_info.hThread)
-    CloseHandle(process_info.hThread);
+  CloseHandle(process_info.hProcess);
+  CloseHandle(process_info.hThread);
   CloseHandle(info.hStdOutput);
   CloseHandle(info.hStdError);
 
@@ -2045,147 +2017,20 @@ static bool call_async(Slice command, Stream *output) {
     CloseHandle(process_info.hProcess);
   if (process_info.hThread)
     CloseHandle(process_info.hThread);
-  util_free(cmd);
-  // close pipes
+  if (info.hStdOutput)
+    CloseHandle(info.hStdOutput);
+  if (info.hStdError)
+    CloseHandle(info.hStdError);
   if (shared_pipe)
     CloseHandle(shared_pipe);
   if (our_pipe)
     CloseHandle(our_pipe);
+  if (output->overlap.hEvent)
+    CloseHandle(output->overlap.hEvent);
+  util_free(cmd);
   log_err("Failed to create process\n");
   return false;
 }
-
-#if 0
-static bool call(Slice command, int *errcode, String *std_out, String *std_err) {
-  // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
-  // We can fix this by using Named pipes instead of Anonymous pipes (CreatePipe), and using concurrent reads
-
-  // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
-  bool get_output = std_out || std_err;
-  bool success = false;
-  HANDLE proc_stdout = 0;
-  HANDLE proc_stderr = 0;
-  String cmd = {};
-  Array<u8> stdout_data = {};
-  Array<u8> stderr_data = {};
-
-  STARTUPINFO info = {sizeof(info)};
-  if (std_out || std_err)
-    info.dwFlags |= STARTF_USESTDHANDLES;
-  PROCESS_INFORMATION process_info = {};
-
-  // create pipe for stdout
-  if (std_out) {
-    SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
-    if (!CreatePipe(&proc_stdout, &info.hStdOutput, &sattr, 0)) {
-      log_err("Failed to create pipe for stdout\n");
-      goto err;
-    }
-
-    // Ensure the read handle to the pipe for STDOUT is not inherited.
-    if ( ! SetHandleInformation(proc_stdout, HANDLE_FLAG_INHERIT, 0) ) {
-      log_err("Failed SetHandleInformation for stdout\n"); 
-      goto err;
-    }
-  }
-
-  if (std_err) {
-    SECURITY_ATTRIBUTES sattr = {sizeof(sattr), NULL, TRUE};
-    if (!CreatePipe(&proc_stderr, &info.hStdError, &sattr, 0)) {
-      log_err("Failed to create pipe for stderr\n");
-      goto err;
-    }
-
-    // Ensure the read handle to the pipe for STDOUT is not inherited.
-    if ( ! SetHandleInformation(proc_stderr, HANDLE_FLAG_INHERIT, 0) ) {
-      log_err("Failed SetHandleInformation for stderr\n"); 
-      goto err;
-    }
-  }
-
-  // create process
-  cmd = String::create(command);
-  if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_err("Failed to create process (%i)\n", GetLastError());
-    goto err;
-  }
-  util_free(cmd);
-
-  // we won't be using the write end of the stdout,stderr pipes
-  if (std_out) {
-    CloseHandle(info.hStdOutput);
-    info.hStdOutput = 0;
-  }
-
-  if (std_err) {
-    CloseHandle(info.hStdError);
-    info.hStdError = 0;
-  }
-
-  // read stdout from process
-  while (1) {
-    bool something_was_read = false;
-    if (std_out) {
-      stdout_data.reserve(stdout_data.size + 512);
-      DWORD num_read;
-      success = ReadFile(proc_stdout, stdout_data.items + stdout_data.size, 512, &num_read, NULL);
-      something_was_read |= (success && num_read);
-      stdout_data.size += num_read;
-    }
-    if (std_err) {
-      stderr_data.reserve(stderr_data.size + 512);
-      DWORD num_read;
-      success = ReadFile(proc_stderr, stderr_data.items + stderr_data.size, 512, &num_read, NULL);
-      something_was_read |= (success && num_read);
-      stderr_data.size += num_read;
-    }
-    if (!something_was_read)
-      break;
-  }
-  if (std_out)
-    *std_out = {(char*)stdout_data.items, stdout_data.size};
-  if (std_err)
-    *std_err = {(char*)stderr_data.items, stderr_data.size};
-
-  if (errcode) {
-    WaitForSingleObject(process_info.hProcess, INFINITE);
-    DWORD exit_code;
-    if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
-      log_err("Failed to get error code of command {}\n", command.slice);
-      goto err;
-    }
-    *errcode = exit_code;
-  }
-
-  CloseHandle(process_info.hProcess);
-  CloseHandle(process_info.hThread);
-  if (std_out)
-    CloseHandle(proc_stdout);
-  if (std_err)
-    CloseHandle(proc_stderr);
-  return true;
-
-  err:
-  if (process_info.hProcess)
-    CloseHandle(process_info.hProcess);
-  if (process_info.hThread)
-    CloseHandle(process_info.hThread);
-  if (std_out) {
-    CloseHandle(proc_stdout);
-    if (info.hStdOutput)
-      CloseHandle(info.hStdOutput);
-  }
-  if (std_err) {
-    CloseHandle(proc_stderr);
-    if (info.hStdError)
-      CloseHandle(info.hStdError);
-  }
-  util_free(cmd);
-  stdout_data.free_shallow();
-  stderr_data.free_shallow();
-  return false;
-}
-#endif
 
 static bool call(const char *command, int *errcode, String *output) {
   return call(Slice::create(command), errcode, output);
