@@ -544,11 +544,11 @@ static int graphics_text_init(const char *ttf_file, int default_font_size) {
   return 0;
 }
 
-// might return null if it doesn't exist
 static GraphicsTextState::FontData* get_fontdata(int font_size) {
   for (GraphicsTextState::FontData &d : graphics_text_state.fonts)
     if (d.font_size == font_size)
       return &d;
+  return 0;
 }
 
 static void render_textatlas(int x, int y, int w, int h, int font_size) {

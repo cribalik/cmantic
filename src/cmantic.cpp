@@ -1499,10 +1499,14 @@ static void menu_option_blame() {
   save_buffer(&b);
 
   // call git
-  String cmd = String::createf("git blame {} --porcelain", b.filename.slice);
+  Array<Slice> cmd = {};
+  cmd += Slice::create("git");
+  cmd += Slice::create("blame");
+  cmd += b.filename.slice;
+  cmd += Slice::create("--porcelain");
   String out = {};
-  int errcode;
-  if (!call(cmd.slice, &errcode, &out)) {
+  int errcode = 0;
+  if (!call(cmd, &errcode, &out)) {
     status_message_set("System call \"{}\" failed", cmd);
     yield_break;
   }
@@ -3058,7 +3062,9 @@ static void handle_input(Key key) {
     case CONTROL('b'): {
       int errcode;
       String output = {};
-      if (!call("build.bat", &errcode, &output)) {
+      Array<Slice> cmd = {};
+      cmd += Slice::create("build.bat");
+      if (!call(cmd, &errcode, &output)) {
         status_message_set("Failed to call build.bat");
         goto build_done;
       }
@@ -3071,6 +3077,7 @@ static void handle_input(Key key) {
       G.build_result_pane.buffer.insert(output.slice);
 
       build_done:
+      util_free(cmd);
       util_free(output);
       break;}
 
@@ -4398,7 +4405,7 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
     lines[a.y].length = a.x;
 
     // first line
-    int ai = 0, bi;
+    int ai = 0, bi = 0;
     s.find('\n', &bi);
     lines[a.y] += s(0, bi);
     ++bi;
@@ -5787,9 +5794,9 @@ static void handle_pending_removes() {
     G.editing_panes.remove_slow(p);
 
     // update global pane pointers
-    if (G.editing_pane == p)
+    if (G.editing_pane == p && G.editing_panes.size > 0)
       G.editing_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
-    if (G.selected_pane == p)
+    if (G.selected_pane == p && G.editing_panes.size > 0)
       G.selected_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
   }
   G.panes_to_remove.size = 0;

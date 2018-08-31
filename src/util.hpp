@@ -174,7 +174,7 @@ static void *current_alloc_data;
 
 template<class T>
 static T* alloc() {
-  return (T*)current_alloc(current_alloc_data, sizeof(T), alignof(T));
+  return (T*)current_alloc(num_allocators-1, current_alloc_data, sizeof(T), alignof(T));
 }
 
 static void* alloc(size_t size, size_t align = alignof(max_align_t)) {
@@ -805,7 +805,7 @@ struct Slice {
     while (chars && length && *chars == ' ')
       ++chars, --length;
 
-    if (!length || length >= sizeof(buf))
+    if (!length || length >= (int)sizeof(buf))
       return false;
 
     memcpy(buf, chars, length);
@@ -820,7 +820,7 @@ struct Slice {
     while (chars && length && *chars == ' ')
       ++chars, --length;
 
-    if (!length || length >= sizeof(buf))
+    if (!length || length >= (int)sizeof(buf))
       return false;
 
     memcpy(buf, chars, length);
@@ -897,7 +897,7 @@ struct Slice {
   }
 
   static bool contains(const char *s, char c) {
-    for (s; *s; ++s)
+    for (; *s; ++s)
       if (*s == c)
         return true;
     return false;
@@ -1043,7 +1043,7 @@ union String {
     return create(str, strlen(str));
   }
 
-  static String String::create(Slice s) {
+  static String create(Slice s) {
     return create(s.chars, s.length);
   }
 
@@ -1325,7 +1325,7 @@ union StringBuffer {
 
           case 'i': append((long)va_arg(args, int)); break;
 
-          case 'c': append(va_arg(args, char)); break;
+          case 'c': append((char)va_arg(args, int)); break;
 
           case 'u': append((long)va_arg(args, unsigned int)); break;
 
@@ -1666,6 +1666,7 @@ namespace File {
   #endif /* OS */
 
   bool get_contents(const char *path, Array<u8> *result) {
+    size_t size;
     *result = {};
     #ifdef OS_WINDOWS
       FILE *f = 0;
@@ -1678,7 +1679,7 @@ namespace File {
     #endif
     // get file size
     fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
+    size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
     *result = {alloc_array<u8>(size), (int)size, (int)size};
@@ -1785,6 +1786,7 @@ LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
 #define UTIL_PROCESS
 
 #ifdef OS_WINDOWS
+
 struct Stream {
   HANDLE handle;
   enum {BEGIN_CONNECTING, WAIT_FOR_CONNECTION, BEGIN_READING, WAIT_FOR_READ} state;
@@ -1838,11 +1840,17 @@ struct Stream {
     return result;
   }
 };
+
 #else
+
+struct Stream {
+  int read(u8 *buffer, int n);
+};
+
 #endif
 
-static bool call(Slice command, int *errcode, String *output);
-static bool call_async(Slice command, Stream *output);
+static bool call(Array<Slice> command, int *errcode, String *output);
+static bool call_async(Array<Slice> command, Stream *output);
 
 #ifdef OS_WINDOWS
 static bool call(Slice command, int *errcode, String *output) {
@@ -2032,17 +2040,62 @@ static bool call_async(Slice command, Stream *output) {
   return false;
 }
 
-static bool call(const char *command, int *errcode, String *output) {
-  return call(Slice::create(command), errcode, output);
-}
-
-static bool call_async(const char *command, Stream *output) {
-  return call_async(Slice::create(command), output);
-}
-
 #else
+
 // TODO: posix version
 // https://jineshkj.wordpress.com/2006/12/22/how-to-capture-stdin-stdout-and-stderr-of-child-program/
+static bool call(Array<Slice> command, int *errcode, String *output) {
+  int process_pipe[2];
+  if (pipe(process_pipe)) {
+    log_err("Failed to create pipe\n");
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid == -1) {
+    log_err("Failed to fork\n");
+    return false;
+  }
+
+  if (pid == 0) {
+    dup2(process_pipe[1], STDOUT_FILENO);
+    dup2(process_pipe[1], STDERR_FILENO);
+    close(STDIN_FILENO);
+    close(process_pipe[0]);
+    close(process_pipe[1]);
+    Array<char*> argv = {};
+    for (Slice s : command)
+      argv += s.nullterminated().chars;
+    argv += NULL;
+
+    execvp(argv[0], argv.items);
+    printf("Failed to run %s: %s", argv[0], strerror(errno));
+    exit(1);
+  }
+
+  close(process_pipe[1]);
+
+  Array<u8> output_data = {};
+  while (1) {
+    output_data.reserve(output_data.size + 512);
+    log_info("initiating read...\n");
+    int n = read(process_pipe[0], output_data.items + output_data.size, 512);
+    log_info("read %i\n", n);
+    if (n == -1) {
+      log_err("Failed to read from pipe\n");
+      break;
+    }
+    if (n == 0)
+      break;
+    output_data.size += n;
+  }
+  log_info("done\n");
+  *output = {(char*)output_data.items, output_data.size};
+  close(process_pipe[0]);
+  return true;
+}
+
+static bool call_async(Array<Slice> command, Stream *output) {return true;}
 #endif
 
 #endif /* UTIL_PROCESS */
@@ -2415,30 +2468,32 @@ bool Json::_parse_string(const char *&str, const char *end, Slice *result) {
   str -= length;
 
   res = alloc_array<char>(length);
-  char *out = res;
-  bool escaped = false;
-  while (1) {
-    if (str >= end)
-      goto err;
-    char c = *str;
-    if (!c)
-      goto err;
-    if (c == '\\') {
-      if (escaped) {
-        *out++ = '\\';
-        escaped = false;
+  {
+    char *out = res;
+    bool escaped = false;
+    while (1) {
+      if (str >= end)
+        goto err;
+      char c = *str;
+      if (!c)
+        goto err;
+      if (c == '\\') {
+        if (escaped) {
+          *out++ = '\\';
+          escaped = false;
+        }
+        else
+          escaped = true;
+        ++str;
+        continue;
       }
-      else
-        escaped = true;
-      ++str;
-      continue;
-    }
 
-    if (c == '"' && !escaped)
-      break;
-    escaped = false;
-    *out++ = c;
-    ++str;
+      if (c == '"' && !escaped)
+        break;
+      escaped = false;
+      *out++ = c;
+      ++str;
+    }
   }
   ++str;
   *result = {res, length};
