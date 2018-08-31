@@ -5831,48 +5831,7 @@ int main(int, const char *[])
 #endif
 {
   util_init();
-
-  #if 1
-  Stream out;
-  if (!call_async("git status", &out))
-    log_err("Failed to call git status\n"), exit(1);
-  else
-    log_info("Command succeeded\n");
-
-  while (1) {
-    u8 buf[256];
-    int n = out.read(buf, 255);
-    if (n == -1) {
-      log_warn("No more output\n");
-      goto read_done;
-    }
-    if (n == 0) {
-      SDL_Delay(10);
-      continue;
-    }
-
-    buf[n] = '\0';
-    log_info((char*)buf);
-  }
-  read_done:
-  editor_exit(0);
-  #endif
-
-  #if 0
-  TempAllocator tmp;
-  tmp.push();
-
-  JsonBlob j;
-  if (!Json::parse_file(Path::create("test.json"), &j))
-    log_error("Failed to parse json\n"), exit(1);
-  log_debug(j.dump());
-  util_free(j);
-
-  tmp.pop_and_free();
-  #endif
-
   state_init();
-
   test();
 
   bool window_active = true;
