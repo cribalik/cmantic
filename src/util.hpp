@@ -1888,8 +1888,10 @@ int Stream::read(void *buffer, int n) {
   }
 
   // eof
-  if (num_read == 0)
+  if (num_read == 0) {
+    util_free(*this);
     return -1;
+  }
 
   return num_read;
 }
@@ -2819,7 +2821,7 @@ void util_init() {
   #ifdef OS_LINUX
   // In order to clean up child processes, you must call wait() on them, or do this.
   // at the moment we don't support getting exit status from child processes anyway, so we
-  // do this since it's easier
+  // might as well do this since it's easier
   sighandler_t sig = signal(SIGCHLD, SIG_IGN);
   if (sig == SIG_ERR) {
     log_err("Failed to set SIGCHLD to SIG_IGN (%i): %s\n", errno, strerror(errno));

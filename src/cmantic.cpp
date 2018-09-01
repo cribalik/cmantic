@@ -1517,7 +1517,6 @@ static void menu_option_blame() {
   b.blame.storage.pop();
 
   util_free(out);
-  yield_break;
 
   COROUTINE_END
 }
@@ -2461,6 +2460,31 @@ static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
   }
 }
 
+static void begin_build() {
+  COROUTINE_BEGIN
+
+  if (G.build_result_output) {
+    mode_prompt(Slice::create("Build is already running, are you sure? [y/n]"), begin_build, PROMPT_BOOLEAN);
+    yield(wait_for_prompt);
+    if (!G.prompt_success || !G.prompt_result.boolean)
+      yield_break;
+  }
+
+  const char* cmd[] = {"make", NULL};
+  util_free(G.build_result_output);
+  if (!call_async(cmd, &G.build_result_output)) {
+    status_message_set("Failed to call %s", cmd[0]);
+    yield_break;
+  }
+
+  if (!G.editing_panes.find(&G.build_result_pane))
+    G.editing_panes += &G.build_result_pane;
+  G.build_result_buffer.init(false, Slice::create("[Build Result]"));
+  Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
+
+  COROUTINE_END
+}
+
 static void handle_input(Key key) { 
   BufferView &buffer = G.editing_pane->buffer;
 
@@ -2562,9 +2586,9 @@ static void handle_input(Key key) {
       G.prompt_success = false;
       goto prompt_done;
     }
-    else if (G.prompt_type == PROMPT_BOOLEAN && (key == 'y' || key == 'n')) {
+    else if (G.prompt_type == PROMPT_BOOLEAN && (key == 'y' || key == 'n' || key == 'Y' || key == 'N')) {
       G.prompt_success = true;
-      G.prompt_result.boolean = key == 'y';
+      G.prompt_result.boolean = key == 'y' || key == 'Y';
       goto prompt_done;
     }
     else
@@ -3054,21 +3078,9 @@ static void handle_input(Key key) {
       quit_done:
       break;}
 
-    case CONTROL('b'): {
-      const char* cmd[] = {"make", NULL};
-      util_free(G.build_result_output);
-      if (!call_async(cmd, &G.build_result_output)) {
-        status_message_set("Failed to call %s", cmd[0]);
-        goto build_done;
-      }
-
-      if (!G.editing_panes.find(&G.build_result_pane))
-        G.editing_panes += &G.build_result_pane;
-      G.build_result_buffer.init(false, Slice::create("[Build Result]"));
-      Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
-
-      build_done:;
-      break;}
+    case CONTROL('b'):
+      begin_build();
+      break;
 
     case CONTROL('s'):
       save_buffer(buffer.data);

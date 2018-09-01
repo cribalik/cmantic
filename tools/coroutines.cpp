@@ -70,6 +70,7 @@ int main(int argc, char const *argv[])
 		out.append("}");
 
 		out += data(a, b);
+		out += "yield_break;";
 		b += strlen("COROUTINE_END");
 		a = b;
 	}
