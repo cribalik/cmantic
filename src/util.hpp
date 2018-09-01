@@ -13,6 +13,7 @@
   #include <sys/types.h>
   #include <dirent.h>
   #include <fcntl.h>
+  #include <signal.h>
 #else
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN 1
@@ -2812,4 +2813,19 @@ void util_init() {
   }
 
   #endif /* UTIL_LOGGING */
+
+  #ifdef UTIL_PROCESS
+
+  #ifdef OS_LINUX
+  // In order to clean up child processes, you must call wait() on them, or do this.
+  // at the moment we don't support getting exit status from child processes anyway, so we
+  // do this since it's easier
+  sighandler_t sig = signal(SIGCHLD, SIG_IGN);
+  if (sig == SIG_ERR) {
+    log_err("Failed to set SIGCHLD to SIG_IGN (%i): %s\n", errno, strerror(errno));
+    exit(1);
+  }
+  #endif /* OS_LINUX */
+
+  #endif /* UTIL_PROCESS */
 }
