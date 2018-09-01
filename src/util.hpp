@@ -12,6 +12,7 @@
   #include <sys/select.h>
   #include <sys/types.h>
   #include <dirent.h>
+  #include <fcntl.h>
 #else
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN 1
@@ -1792,72 +1793,116 @@ struct Stream {
   OVERLAPPED overlap;
   enum {BEGIN_CONNECTING, WAIT_FOR_CONNECTION, BEGIN_READING, WAIT_FOR_READ} state;
 
-  int read(u8 *buffer, int n) {
-    DWORD result = 0;
-    switch (state) {
-      case BEGIN_CONNECTING:
-        if (ConnectNamedPipe(handle, &overlap))
-          goto err;
-        switch (GetLastError()) {
-          case ERROR_IO_PENDING:
-            goto wait_for_connection;
-          case ERROR_PIPE_CONNECTED:
-            goto begin_reading;
-          default:
-            goto err;
-        }
+  operator bool() {return handle;}
 
-      case WAIT_FOR_CONNECTION:
-        wait_for_connection:
-        state = BEGIN_READING;
-        if (!HasOverlappedIoCompleted(&overlap))
-          return 0;
-
-      case BEGIN_READING:
-        begin_reading:
-        state = BEGIN_READING;
-        if (!ReadFile(handle, buffer, n, &result, &overlap)) {
-          if (GetLastError() == ERROR_IO_PENDING)
-            goto wait_for_read;
-          else
-            goto err;
-        }
-        return result;
-
-      case WAIT_FOR_READ:
-        wait_for_read:
-        state = WAIT_FOR_READ;
-        if (!GetOverlappedResult(handle, &overlap, &result, FALSE)) {
-          if (GetLastError() == ERROR_IO_INCOMPLETE)
-            return 0;
-          else
-            goto err;
-        }
-        state = BEGIN_READING;
-    }
-    return result;
-
-    err:
-    CloseHandle(handle);
-    CloseHandle(overlap.hEvent);
-    return -1;
-  }
+  int read(void *buffer, int n);
+  
 };
+
+static void util_free(Stream &s) {
+  if (s.handle)
+    CloseHandle(s.handle);
+  if (s.overlap.hEvent)
+    CloseHandle(s.overlap.hEvent);
+  s = {};
+}
+
+int Stream::read(void *buffer, int n) {
+  DWORD result = 0;
+  switch (state) {
+    case BEGIN_CONNECTING:
+      if (ConnectNamedPipe(handle, &overlap))
+        goto err;
+      switch (GetLastError()) {
+        case ERROR_IO_PENDING:
+          goto wait_for_connection;
+        case ERROR_PIPE_CONNECTED:
+          goto begin_reading;
+        default:
+          goto err;
+      }
+
+    case WAIT_FOR_CONNECTION:
+      wait_for_connection:
+      state = BEGIN_READING;
+      if (!HasOverlappedIoCompleted(&overlap))
+        return 0;
+
+    case BEGIN_READING:
+      begin_reading:
+      state = BEGIN_READING;
+      if (!ReadFile(handle, buffer, n, &result, &overlap)) {
+        if (GetLastError() == ERROR_IO_PENDING)
+          goto wait_for_read;
+        else
+          goto err;
+      }
+      return result;
+
+    case WAIT_FOR_READ:
+      wait_for_read:
+      state = WAIT_FOR_READ;
+      if (!GetOverlappedResult(handle, &overlap, &result, FALSE)) {
+        if (GetLastError() == ERROR_IO_INCOMPLETE)
+          return 0;
+        else
+          goto err;
+      }
+      state = BEGIN_READING;
+  }
+  return result;
+
+  err:
+  util_free(*this);
+  return -1;
+}
 
 #else
 
 struct Stream {
-  int read(u8 *buffer, int n);
+  int fd;
+
+  operator bool() {return fd;}
+
+  int read(void *buffer, int n);
 };
+
+static void util_free(Stream &s) {
+  if (s.fd)
+    close(s.fd);
+  s = {};
+}
+
+int Stream::read(void *buffer, int n) {
+  int num_read = ::read(fd, buffer, n);
+
+  if (num_read == -1) {
+    // currently no data to read
+    if (errno == EINTR || errno == EAGAIN)
+      return 0;
+    // error
+    log_err("An error occured while reading (%i): %s\n", errno, strerror(errno));
+    util_free(*this);
+    return -1;
+  }
+
+  // eof
+  if (num_read == 0)
+    return -1;
+
+  return num_read;
+}
+
 
 #endif
 
-static bool call(Array<Slice> command, int *errcode, String *output);
-static bool call_async(Array<Slice> command, Stream *output);
+// command list must be null terminated
+static bool call(const char* command[], int *errcode, String *output);
+static bool call_async(const char *command[], Stream *output);
 
 #ifdef OS_WINDOWS
 
-static bool call(Slice command, int *errcode, String *output) {
+static bool call(const char *command[], int *errcode, String *output) {
   // TODO: implement this by calling the async version
 
   // TODO: currently, we use blocking IO which causes a problem when reading both from stdout and stderr.
@@ -1889,13 +1934,15 @@ static bool call(Slice command, int *errcode, String *output) {
     }
   }
 
+  StringBuffer command = {};
+  for (const char **s = command; *s; ++s)
+    command.appendf("\"%s\" ", *s);
   // create process
-  cmd = String::create(command);
-  if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
+  if (!CreateProcessA(NULL, command.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
     log_err("Failed to create process (%i)\n", GetLastError());
     goto err;
   }
-  util_free(cmd);
+  util_free(command);
 
   // we won't be using the write end of the stdout,stderr pipes
   if (output) {
@@ -1951,7 +1998,7 @@ static bool call(Slice command, int *errcode, String *output) {
     if (info.hStdError)
       CloseHandle(info.hStdError);
   }
-  util_free(cmd);
+  util_free(command);
   output_data.free_shallow();
   return false;
 }
@@ -2048,7 +2095,7 @@ static bool call_async(Slice command, Stream *output) {
 
 #else
 
-static bool call(Array<Slice> command, int *errcode, String *output) {
+static bool call(const char *command[], int *errcode, String *output) {
   int process_pipe[2];
   if (pipe(process_pipe)) {
     log_err("Failed to create pipe\n");
@@ -2067,13 +2114,8 @@ static bool call(Array<Slice> command, int *errcode, String *output) {
     close(STDIN_FILENO);
     close(process_pipe[0]);
     close(process_pipe[1]);
-    Array<char*> argv = {};
-    for (Slice s : command)
-      argv += s.nullterminated().chars;
-    argv += NULL;
-
-    execvp(argv[0], argv.items);
-    printf("Failed to run %s: %s", argv[0], strerror(errno));
+    execvp(command[0], (char*const*)command);
+    fprintf(stderr, "Failed to run %s: %s", command[0], strerror(errno));
     exit(1);
   }
 
@@ -2096,7 +2138,57 @@ static bool call(Array<Slice> command, int *errcode, String *output) {
   return true;
 }
 
-static bool call_async(Array<Slice> command, Stream *output) {return true;}
+static bool call_async(const char *command[], Stream *output) {
+  int process_pipe[2] = {};
+  if (pipe(process_pipe)) {
+    log_err("Failed to create pipe\n");
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid == -1) {
+    log_err("Failed to fork\n");
+    goto err;
+  }
+
+  if (!pid) {
+    dup2(process_pipe[1], STDOUT_FILENO);
+    dup2(process_pipe[1], STDERR_FILENO);
+    close(STDIN_FILENO);
+    close(process_pipe[0]);
+    close(process_pipe[1]);
+    execvp(command[0], (char*const*)command);
+    fprintf(stderr, "Failed to run %s: %s", command[0], strerror(errno));
+    exit(1);
+  }
+
+  close(process_pipe[1]);
+  // set O_NONBLOCK
+  {
+    int fl = fcntl(process_pipe[0], F_GETFL);
+    if (fl == -1) {
+      log_err("Failed to get flags for pipe (%i): %s\n", errno, strerror(errno));
+      goto err;
+    }
+    if (fcntl(process_pipe[0], F_SETFL, fl | O_NONBLOCK)) {
+      log_err("Failed to call fcntl to set O_NONBLOCK on pipe (%i): %s\n", errno, strerror(errno));
+      goto err;
+    }
+  }
+
+  *output = Stream{process_pipe[0]};
+  return true;
+
+  err:
+  if (process_pipe[0])
+    close(process_pipe[0]);
+  if (process_pipe[1])
+    close(process_pipe[1]);
+  if (process_pipe[1])
+    close(process_pipe[1]);
+  return false;
+}
+
 #endif
 
 #endif /* UTIL_PROCESS */

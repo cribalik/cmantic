@@ -383,7 +383,7 @@ struct BufferData {
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
-  bool modified() {return _next_undo_action != _last_save_undo_action;}
+  bool modified() {return is_bound_to_file() && _next_undo_action != _last_save_undo_action;}
   void raw_begin() {++_raw_mode_depth;}
   void raw_end() {--_raw_mode_depth;}
   bool raw_mode() {return _raw_mode_depth;}
@@ -854,6 +854,7 @@ struct State {
   BufferData null_buffer;
   Pane build_result_pane;
   BufferData build_result_buffer;
+  Stream build_result_output;
 
   float activation_meter;
 
@@ -1498,11 +1499,7 @@ static void menu_option_blame() {
   save_buffer(&b);
 
   // call git
-  Array<Slice> cmd = {};
-  cmd += Slice::create("git");
-  cmd += Slice::create("blame");
-  cmd += b.filename.slice;
-  cmd += Slice::create("--porcelain");
+  const char* cmd[] = {"git", "blame", b.filename.chars, "--porcelain", NULL};
   String out = {};
   int errcode = 0;
   if (!call(cmd, &errcode, &out)) {
@@ -1520,7 +1517,6 @@ static void menu_option_blame() {
   b.blame.storage.pop();
 
   util_free(out);
-  util_free(cmd);
   yield_break;
 
   COROUTINE_END
@@ -3059,25 +3055,19 @@ static void handle_input(Key key) {
       break;}
 
     case CONTROL('b'): {
-      int errcode;
-      String output = {};
-      Array<Slice> cmd = {};
-      cmd += Slice::create("build.bat");
-      if (!call(cmd, &errcode, &output)) {
-        status_message_set("Failed to call build.bat");
+      const char* cmd[] = {"make", NULL};
+      util_free(G.build_result_output);
+      if (!call_async(cmd, &G.build_result_output)) {
+        status_message_set("Failed to call %s", cmd[0]);
         goto build_done;
       }
-      output.convert_to_unix_endlines();
 
       if (!G.editing_panes.find(&G.build_result_pane))
         G.editing_panes += &G.build_result_pane;
       G.build_result_buffer.init(false, Slice::create("[Build Result]"));
       Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
-      G.build_result_pane.buffer.insert(output.slice);
 
-      build_done:
-      util_free(cmd);
-      util_free(output);
+      build_done:;
       break;}
 
     case CONTROL('s'):
@@ -3356,8 +3346,8 @@ static int num_top_level_panes() {
   return x;
 }
 
-static void handle_rendering(float dt) {
-  // boost marker when you move or change modes
+static void do_update(float dt) {
+    // boost marker when you move or change modes
   static Pos prev_pos;
   static Mode prev_mode;
   if (prev_pos != G.editing_pane->buffer.cursors[0].pos || (prev_mode != G.mode && G.mode != MODE_SEARCH && G.mode != MODE_MENU)) {
@@ -3387,6 +3377,24 @@ static void handle_rendering(float dt) {
   G.default_marker_background_color.tick(dt);
   G.marker_background_color.popped_color = G.default_marker_background_color.color;
 
+  // get some build data
+  if (G.build_result_output) {
+    G.build_result_buffer.description = Slice::create("[Building..]");
+    while (1) {
+      char buf[256];
+      int n = G.build_result_output.read(buf, 256);
+      if (n == -1) {
+        G.build_result_buffer.description = Slice::create("[Build Done]");
+        break;
+      }
+      if (n == 0)
+        break;
+      G.build_result_pane.buffer.insert(Slice::create(buf, n));
+    }
+  }
+}
+
+static void do_render(float dt) {
   // render
   G.font_width = graphics_get_font_advance(G.font_height);
   G.line_height = G.font_height + G.line_margin;
@@ -5708,6 +5716,8 @@ static Key get_input(bool *window_active) {
   return KEY_NONE;
 }
 
+
+static Stream test_async_command_output;
 static void test() {
   assert(memmem("a", 1, "a", 1));
   assert(!memmem("", 0, "", 0));
@@ -5748,6 +5758,22 @@ static void test() {
   puts(p.string.chars);
   assert(p.string.slice == "some_file\\some\\h");
   #endif
+
+  // test async reading
+  const char *command[] = {"./test.sh", NULL};
+  if (!call_async(command, &test_async_command_output)) {
+    log_err("Call to %s failed\n", command[0]);
+    editor_exit(1);
+  }
+}
+
+static void test_update() {
+  while (test_async_command_output) {
+    char buf[256];
+    int n = test_async_command_output.read(buf, 255);
+    if (n <= 0) break;
+    log_info(Slice::create(buf, n));
+  }
 }
 
 #if 1
@@ -5838,7 +5864,10 @@ int main(int, const char *[])
 {
   util_init();
   state_init();
+
+  #ifdef DEBUG
   test();
+  #endif
 
   bool window_active = true;
   for (;;) {
@@ -5852,7 +5881,13 @@ int main(int, const char *[])
 
     if (key)
       handle_input(key);
-    handle_rendering(dt);
+
+    #ifdef DEBUG
+    test_update();
+    #endif
+
+    do_update(dt);
+    do_render(dt);
 
     // draw activation meter
     {
