@@ -1,7 +1,8 @@
 /*
  * TODO:
  * move_cursors_on_delete to match move_cursors_on_insert (clean up cursor passing to BufferData methods)
- * listen on file changes and automatically reload
+ * replace + movement: replace range with paste
+ * listen on file changes and automatically reload (or show a warning?)
  * 
  * Have a single build buffer
  *
@@ -564,6 +565,15 @@ struct BufferView {
   Array<Pos> jumplist;
   int jumplist_pos;
 
+  BufferView copy() {
+    BufferView bv = {};
+    bv.data = data;
+    bv.cursors = cursors.copy_shallow();
+    bv.jumplist = jumplist.copy_shallow();
+    bv.jumplist_pos = jumplist_pos;
+    return bv;
+  }
+
   void jumplist_push();
   void jumplist_pop();
   void jumplist_prev();
@@ -661,6 +671,7 @@ struct Pane {
   bool is_dynamic; // some panes are statically allocated because they are singletons, like the build result pane, status message pane, etc.
 
   Array<SubPane> subpanes;
+  int selected_subpane;
   Pane *parent;
 
   // visual settings
@@ -688,7 +699,7 @@ struct Pane {
   };
 
   // methods
-  void add_subpane(BufferData *buffer, Pos p);
+  Pane* add_subpane(BufferData *buffer, Pos p);
   void render();
   void update_suggestions();
   void clear_suggestions();
@@ -730,6 +741,7 @@ struct Pane {
 
 void util_free(Pane &p) {
   util_free(p.buffer);
+  p = {};
 }
 
 void Pane::init_edit(Pane &p,
@@ -739,7 +751,6 @@ void Pane::init_edit(Pane &p,
                       Color *active_highlight_background_color,
                       Color *inactive_highlight_background_color, bool is_dynamic) {
   util_free(p);
-  p = {};
   p.type = PANETYPE_EDIT;
   p.buffer = {b, Array<Cursor>{}};
   p.buffer.cursors += {};
@@ -1022,6 +1033,7 @@ static Keyword keywords[] = {
   {"delete", KEYWORD_CONSTANT},
   {"new", KEYWORD_CONSTANT},
   {"null", KEYWORD_CONSTANT},
+  {"this", KEYWORD_CONSTANT},
 
   // types
 
@@ -2638,10 +2650,10 @@ static void handle_input(Key key) {
         if (!def)
           break;
 
-        G.editing_pane->add_subpane(buffer.data, def->a);
-        // buffer.jumplist_push();
-        // buffer.move_to(def->a);
-        // buffer.jumplist_push();
+        // G.editing_pane->add_subpane(buffer.data, def->a);
+        buffer.jumplist_push();
+        buffer.move_to(def->a);
+        buffer.jumplist_push();
         break;}
     }
     G.goto_line_number = 0;
@@ -2701,10 +2713,10 @@ static void handle_input(Key key) {
         break;
       }
 
-      G.editing_pane->add_subpane(buffer.data, def->a);
-      // buffer.jumplist_push();
-      // buffer.move_to(def->a);
-      // buffer.jumplist_push();
+      // G.editing_pane->add_subpane(buffer.data, def->a);
+      buffer.jumplist_push();
+      buffer.move_to(def->a);
+      buffer.jumplist_push();
       mode_normal(true);
       break;
     }
@@ -2793,7 +2805,6 @@ static void handle_input(Key key) {
 
   case MODE_YANK: {
     // TODO: is it more performant to check if it is a movement command first?
-    buffer.action_begin();
 
     Array<Cursor> cursors = buffer.cursors.copy_shallow();
     if (!movement_default(buffer, key))
@@ -2804,7 +2815,6 @@ static void handle_input(Key key) {
     // some movements we want to include the end position
     // for (Cursor &c : cursors)
       // buffer.data->advance(c.pos);
-
     range_to_clipboard(*buffer.data, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
 
     // go back to where we started
@@ -2812,7 +2822,6 @@ static void handle_input(Key key) {
       buffer.cursors[i].pos = cursors[i].pos;
 
     yank_done:;
-    buffer.action_end();
     util_free(cursors);
     mode_normal(true);
     break;}
@@ -3144,9 +3153,11 @@ static void handle_input(Key key) {
       break;}
 
     case CONTROL('w'): {
-      Pane *p = new Pane{};
-      Pane::init_edit(*p, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
-      G.editing_panes += p;
+      Pane *p = G.editing_pane->add_subpane(buffer.data, {});
+      if (G.editing_pane) {
+        p->switch_buffer(G.editing_pane->buffer.data);
+        p->buffer = G.editing_pane->buffer.copy();
+      }
       break;}
 
     case CONTROL('q'):
@@ -3155,7 +3166,8 @@ static void handle_input(Key key) {
 
     case CONTROL('l'): {
       if (G.editing_pane->subpanes.size > 0) {
-        G.editing_pane = G.editing_pane->subpanes[0].pane;
+        int i = clamp(G.editing_pane->selected_subpane, 0, G.editing_pane->subpanes.size-1);
+        G.editing_pane = G.editing_pane->subpanes[i].pane;
         G.selected_pane = G.editing_pane;
         break;
       }
@@ -3176,32 +3188,28 @@ static void handle_input(Key key) {
       // Find sibling below
       Pane *p = G.editing_pane;
       while (p->parent) {
-        for (int i = 0; i < p->parent->subpanes.size-1; ++i) {
-          if (p->parent->subpanes[i].pane == p) {
-            G.editing_pane = p->parent->subpanes[i+1].pane;
-            G.selected_pane = p->parent->subpanes[i+1].pane;
-            goto sibling_below_done;
-          }
+        if (p->parent->selected_subpane < p->parent->subpanes.size-1) {
+          ++p->parent->selected_subpane;
+          G.editing_pane = p->parent->subpanes[p->parent->selected_subpane].pane;
+          G.selected_pane = G.editing_pane;
+          break;
         }
         p = p->parent;
       }
-      sibling_below_done:
       break;}
 
     case CONTROL('k'): {
       // Find sibling above
       Pane *p = G.editing_pane;
       while (p->parent) {
-        for (int i = 1; i < p->parent->subpanes.size; ++i) {
-          if (p->parent->subpanes[i].pane == p) {
-            G.editing_pane = p->parent->subpanes[i-1].pane;
-            G.selected_pane = p->parent->subpanes[i-1].pane;
-            goto sibling_above_done;
-          }
+        if (p->parent->selected_subpane > 0) {
+          --p->parent->selected_subpane;
+          G.editing_pane = p->parent->subpanes[p->parent->selected_subpane].pane;
+          G.selected_pane = G.editing_pane;
+          break;
         }
         p = p->parent;
       }
-      sibling_above_done:
       break;}
 
     case CONTROL('h'): {
@@ -3406,7 +3414,7 @@ static void do_update(float dt) {
   }
 }
 
-static void do_render(float dt) {
+static void do_render() {
   // render
   G.font_width = graphics_get_font_advance(G.font_height);
   G.line_height = G.font_height + G.line_margin;
@@ -5286,13 +5294,14 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
   }
 }
 
-void Pane::add_subpane(BufferData *b, Pos pos) {
+Pane* Pane::add_subpane(BufferData *b, Pos pos) {
   Pane *p = new Pane{};
   Pane::init_edit(*p, b, (Color*)&G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
   p->buffer.move_to(pos);
   p->parent = this;
   subpanes += {buffer.cursors[0].pos, p};
   G.editing_panes += p;
+  return p;
 }
 
 void Pane::render() {
@@ -5772,20 +5781,24 @@ static void test() {
   #endif
 
   // test async reading
+  #ifdef OS_LINUX
   const char *command[] = {"./test.sh", NULL};
   if (!call_async(command, &test_async_command_output)) {
     log_err("Call to %s failed\n", command[0]);
     editor_exit(1);
   }
+  #endif
 }
 
 static void test_update() {
+  #ifdef OS_LINUX
   while (test_async_command_output) {
     char buf[256];
     int n = test_async_command_output.read(buf, 255);
     if (n <= 0) break;
     log_info(Slice::create(buf, n));
   }
+  #endif
 }
 
 #if 1
@@ -5812,6 +5825,7 @@ static void handle_pending_removes() {
           break;
         }
       }
+      p->parent->selected_subpane = clamp(p->parent->selected_subpane, 0, p->parent->subpanes.size-1);
     }
 
     // remove subpanes
@@ -5820,6 +5834,7 @@ static void handle_pending_removes() {
       G.panes_to_remove += sp.pane;
     }
     p->subpanes.free_shallow();
+    p->selected_subpane = 0;
 
     // free pane
     util_free(*p);
@@ -5899,7 +5914,7 @@ int main(int, const char *[])
     #endif
 
     do_update(dt);
-    do_render(dt);
+    do_render();
 
     // draw activation meter
     {

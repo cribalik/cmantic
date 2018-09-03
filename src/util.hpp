@@ -1914,7 +1914,7 @@ static bool call(const char *command[], int *errcode, String *output) {
   // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
   bool success = false;
   HANDLE proc_output = 0;
-  String cmd = {};
+  StringBuffer cmd = {};
   Array<u8> output_data = {};
 
   STARTUPINFO info = {sizeof(info)};
@@ -1937,15 +1937,14 @@ static bool call(const char *command[], int *errcode, String *output) {
     }
   }
 
-  StringBuffer command = {};
   for (const char **s = command; *s; ++s)
-    command.appendf("\"%s\" ", *s);
+    cmd.appendf("\"%s\" ", *s);
   // create process
-  if (!CreateProcessA(NULL, command.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
+  if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
     log_err("Failed to create process (%i)\n", GetLastError());
     goto err;
   }
-  util_free(command);
+  util_free(cmd);
 
   // we won't be using the write end of the stdout,stderr pipes
   if (output) {
@@ -1977,7 +1976,7 @@ static bool call(const char *command[], int *errcode, String *output) {
     WaitForSingleObject(process_info.hProcess, INFINITE);
     DWORD exit_code;
     if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) {
-      log_err("Failed to get error code of command {}\n", command.slice);
+      log_err("Failed to get error code of command {}\n", command[0]);
       goto err;
     }
     *errcode = exit_code;
@@ -2001,17 +2000,17 @@ static bool call(const char *command[], int *errcode, String *output) {
     if (info.hStdError)
       CloseHandle(info.hStdError);
   }
-  util_free(command);
+  util_free(cmd);
   output_data.free_shallow();
   return false;
 }
 
-static bool call_async(Slice command, Stream *output) {
+static bool call_async(const char *command[], Stream *output) {
   // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
   // and for an actual complete example see https://www.daniweb.com/programming/software-development/threads/295780/using-named-pipes-with-asynchronous-i-o-redirection-to-winapi
   HANDLE shared_pipe = {};
   HANDLE our_pipe = {};
-  String cmd = {};
+  StringBuffer cmd = {};
   *output = {};
 
   STARTUPINFO info = {sizeof(info)};
@@ -2037,24 +2036,26 @@ static bool call_async(Slice command, Stream *output) {
 
   // and duplicate for stderr
   if (!DuplicateHandle(GetCurrentProcess(), info.hStdOutput, GetCurrentProcess(), &info.hStdError, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-    log_err("Failed to duplicate process output handle to stderr (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to duplicate process output handle to stderr (%i)\n", command[0], (int)GetLastError());
     goto err;
   }
 
-  // finally we need to create our own non-shareable pipe, and close the shared one (this shouldn't be much of a problem in practice, since the shared pipe will be freed by the child process when it exits)
+  // finally we need to create our own non-shareable pipe, and close the shared one (in practice, this shouldn't be much of a problem, since the shared pipe will be freed by the child process when it exits)
   if (!DuplicateHandle(GetCurrentProcess(), shared_pipe, GetCurrentProcess(), &our_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-    log_err("Failed to duplicate pipe (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to duplicate pipe (%i)\n", command[0], (int)GetLastError());
     goto err;
   }
+
   if (!CloseHandle(shared_pipe)) {
-    log_err("Failed to close shared pipe (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to close shared pipe (%i)\n", command[0], (int)GetLastError());
     goto err;
   }
 
   // create process
-  cmd = String::create(command);
+  for (const char **s = command; *s; ++s)
+    cmd.appendf("\"%s\" ", *s);
   if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_err("Failed to create process (%i)\n", GetLastError());
+    log_err("%s: Failed to create process (%i)\n", command[0], GetLastError());
     goto err;
   }
   util_free(cmd);
@@ -2063,7 +2064,7 @@ static bool call_async(Slice command, Stream *output) {
   *output = Stream{our_pipe};
   output->overlap.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
   if (!output->overlap.hEvent) {
-    log_err("Failed to create an event for overlapped io (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to create an event for overlapped io (%i)\n", command[0], (int)GetLastError());
     goto err;
   }
 
@@ -2092,7 +2093,6 @@ static bool call_async(Slice command, Stream *output) {
   if (output->overlap.hEvent)
     CloseHandle(output->overlap.hEvent);
   util_free(cmd);
-  log_err("Failed to create process\n");
   return false;
 }
 
