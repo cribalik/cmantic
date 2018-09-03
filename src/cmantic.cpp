@@ -1,11 +1,7 @@
 /*
  * TODO:
- * move_cursors_on_delete to match move_cursors_on_insert (clean up cursor passing to BufferData methods)
- * replace + movement: replace range with paste
+ * Have a global unified list of Locations/cursors
  * listen on file changes and automatically reload (or show a warning?)
- * 
- * Have a single build buffer
- *
  * Search on word only
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
@@ -155,6 +151,7 @@ enum Mode {
   MODE_GOTO_DEFINITION,
   MODE_CWD,
   MODE_PROMPT,
+  MODE_REPLACE,
   MODE_COUNT
 };
 
@@ -439,13 +436,13 @@ struct BufferData {
   //
   // Every action on the buffer that mutates it (basically insert/delete) will add that action to the undo/redo list.
   // But sometimes you want a series of actions to be grouped together for undo/redo.
-  // To do that you can call action_group_begin() and action_group_end() before and after your actions
+  // To do that you can call action_begin() and action_end() before and after your actions
   //
   // Example:
   //
-  // buffer.action_group_begin();
+  // buffer.action_begin(cursors);
   // .. call methods on buffer that mutate it
-  // buffer.action_group_end();
+  // buffer.action_end(cursors);
   //
   // TODO: Use a fixed buffer (circular queue) of undo actions
   bool undo_disabled;
@@ -954,6 +951,7 @@ static void status_message_set(const char *fmt, ...) {
       --i;
     G.status_message_buffer[0].length = i;
   }
+  G.bottom_pane = &G.status_message_pane;
 }
 
 // MUST BE REVERSE SIZE ORDER
@@ -1760,21 +1758,24 @@ static void mode_goto() {
   mode_cleanup();
   G.mode = MODE_GOTO;
   G.goto_line_number = 0;
-  G.bottom_pane = &G.status_message_pane;
   status_message_set("goto");
+}
+
+static void mode_replace() {
+  mode_cleanup();
+  G.mode = MODE_REPLACE;
+  status_message_set("replace");
 }
 
 static void mode_yank() {
   mode_cleanup();
   G.mode = MODE_YANK;
-  G.bottom_pane = &G.status_message_pane;
   status_message_set("yank");
 }
 
 static void mode_delete() {
   mode_cleanup();
   G.mode = MODE_DELETE;
-  G.bottom_pane = &G.status_message_pane;
   status_message_set("delete");
 }
 
@@ -2429,22 +2430,6 @@ static void range_to_clipboard(BufferData &buffer, View<Pos> from, View<Pos> to)
   util_free(sb);
 }
 
-static void move_cursor_due_to_remove(Pos a, Pos b, Pos *pos) {
-  if (b <= a)
-    return;
-  // All cursors that are inside range should be moved to beginning of range
-  if (a <= *pos && *pos <= b)
-    *pos = a;
-  // If lines were deleted, all cursors below b.y should move up
-  else if (b.y > a.y && pos->y > b.y)
-    pos->y -= b.y-a.y;
-  // All cursors that are on the same row as b, but after b should be merged onto line a
-  else if (pos->y == b.y && pos->x >= b.x-1) {
-    pos->y = a.y;
-    pos->x = a.x + pos->x - b.x;
-  }
-}
-
 // frees visual_start if invalid
 static bool check_visual_start(BufferView &buffer) {
   if (G.editing_pane->buffer.data != G.visual_start.buffer)
@@ -2495,6 +2480,165 @@ static void begin_build() {
   Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
 
   COROUTINE_END
+}
+
+static bool do_paste() {
+  BufferView &buffer = G.editing_pane->buffer;
+  if (G.editing_pane != G.selected_pane || !SDL_HasClipboardText())
+    return false;
+  char *s = SDL_GetClipboardText();
+  // if we're on windows, remove \r
+  #ifdef OS_WINDOWS
+    char *out = s;
+    for (char *in = s; *in; ++in)
+      if (*in != '\r')
+        *out++ = *in;
+    *out = '\0';
+  #endif
+
+  int num_endlines = 0;
+  for (char *t = s; *t; ++t)
+    num_endlines += (*t == '\n');
+
+  buffer.action_begin();
+  buffer.data->raw_begin();
+
+  // split clipboard among cursors
+  if (num_endlines == buffer.cursors.size-1) {
+    char *start = s;
+    char *end = start;
+    for (int i = 0; i < buffer.cursors.size; ++i) {
+      start = end;
+      while (*end && *end != '\n')
+        ++end;
+      buffer.insert(Slice::create(start, end-start), i);
+      ++end;
+    }
+  }
+  // otherwise just paste out the whole thing for all cursors
+  else {
+    Slice sl = Slice::create(s);
+    if (sl.chars[sl.length-1] == '\n') {
+      buffer.insert_newline_below();
+      --sl.length;
+    }
+    buffer.insert(sl);
+  }
+
+  buffer.data->raw_end();
+  buffer.action_end();
+  SDL_free(s);
+  return true;
+}
+
+static bool do_delete_movement(Key key) {
+  BufferView &buffer = G.editing_pane->buffer;
+
+  // TODO: is it more performant to check if it is a movement command first?
+  buffer.action_begin();
+  Array<Cursor> cursors = buffer.cursors.copy_shallow();
+  switch (key) {
+    // delete line
+    case 'd':
+      buffer.delete_line();
+      break;
+
+    // delete block
+    case 'b': {
+      move_to_right_brace(buffer, '{', '}', true);
+      buffer.advance();
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        if (buffer.getchar(i) == ';')
+          buffer.advance(i);
+        buffer.remove_range(cursors[i].pos, buffer.cursors[i].pos, i);
+      }
+      break;}
+
+    case 'p': {
+      for (int i = 0; i < buffer.cursors.size; ++i) {
+        int depth = 0;
+        Utf8char c;
+        // find beginning
+        Pos a = buffer.cursors[i].pos;
+        depth = 0;
+        c = buffer.getchar(a);
+        bool left_was_brace = false;
+        if (c == '(' || c == '[' || c == '{') {
+          buffer.advance(a);
+          left_was_brace = true;
+        }
+        else if (c == ',') {}
+        else {
+          while(!buffer.advance_r(a)) {
+            c = buffer.getchar(a);
+            if (c == ')' || c == ']' || c == '}')
+              --depth;
+            else if (c == '(' || c == '[' || c == '{')
+              ++depth;
+            else if (c == ',' && depth == 0)
+              break;
+            if (depth > 0) {
+              left_was_brace = true;
+              buffer.advance(a);
+              break;
+            }
+          }
+        }
+
+        // find end
+        Pos b = buffer.cursors[i].pos;
+        depth = 0;
+        c = buffer.getchar(b);
+        if (c != ')' && c != ']' && c != '}') {
+          while (!buffer.advance(b)) {
+            c = buffer.getchar(b);
+            if (c == ')' || c == ']' || c == '}')
+              --depth;
+            else if (c == '(' || c == '[' || c == '{')
+              ++depth;
+            else if (c == ',' && depth == 0) {
+              // if left was brace, consume comma
+              if (left_was_brace) {
+                buffer.advance(b);
+                while (c = buffer.getchar(b), c.isspace())
+                  if (buffer.advance(b))
+                    break;
+              }
+              break;
+            }
+            if (depth < 0)
+              break;
+          }
+        }
+
+        buffer.remove_range(a, b, i);
+      }
+      break;}
+
+    default:
+      if (!movement_default(buffer, key))
+        goto fail;
+      if (cursors.size != buffer.cursors.size)
+        goto fail;
+      // delete movement range
+      for (int i = 0; i < cursors.size; ++i) {
+        Pos a = cursors[i].pos;
+        Pos b = buffer.cursors[i].pos;
+        if (b < a)
+          swap_range(*buffer.data,a,b);
+        buffer.remove_range(a, b, i);
+      }
+      break;
+  }
+
+  buffer.action_end();
+  util_free(cursors);
+  return true;
+
+  fail:
+  buffer.action_end();
+  util_free(cursors);
+  return false;
 }
 
 static void handle_input(Key key) { 
@@ -2801,141 +2945,41 @@ static void handle_input(Key key) {
           G.search_term = String::create(G.menu_buffer.lines[0].slice);
       }
     }
-  } break;
+    break;}
+
+  case MODE_REPLACE: {
+    buffer.action_begin();
+    do_delete_movement(key);
+    do_paste();
+    buffer.action_end();
+    mode_normal(true);
+    break;}
 
   case MODE_YANK: {
     // TODO: is it more performant to check if it is a movement command first?
 
-    Array<Cursor> cursors = buffer.cursors.copy_shallow();
+    Array<Cursor> prev = buffer.cursors.copy_shallow();
     if (!movement_default(buffer, key))
       goto yank_done;
-    if (cursors.size != buffer.cursors.size)
+    if (prev.size != buffer.cursors.size)
       goto yank_done;
 
     // some movements we want to include the end position
     // for (Cursor &c : cursors)
       // buffer.data->advance(c.pos);
-    range_to_clipboard(*buffer.data, VIEW(cursors, pos), VIEW(buffer.cursors, pos));
+    range_to_clipboard(*buffer.data, VIEW(prev, pos), VIEW(buffer.cursors, pos));
 
     // go back to where we started
-    for (int i = 0; i < cursors.size; ++i)
-      buffer.cursors[i].pos = cursors[i].pos;
+    for (int i = 0; i < prev.size; ++i)
+      buffer.cursors[i].pos = prev[i].pos;
 
     yank_done:;
-    util_free(cursors);
+    util_free(prev);
     mode_normal(true);
     break;}
 
   case MODE_DELETE: {
-    // TODO: is it more performant to check if it is a movement command first?
-    buffer.action_begin();
-    Array<Cursor> cursors = buffer.cursors.copy_shallow();
-    switch (key) {
-      // delete line
-      case 'd':
-        buffer.delete_line();
-        break;
-
-      // delete block
-      case 'b': {
-        buffer.action_begin();
-        Array<Cursor> prev = buffer.cursors.copy_shallow();
-        move_to_right_brace(buffer, '{', '}', true);
-        buffer.advance();
-        for (int i = 0; i < buffer.cursors.size; ++i) {
-          if (buffer.getchar(i) == ';')
-            buffer.advance(i);
-          buffer.remove_range(prev[i].pos, buffer.cursors[i].pos, i);
-        }
-        util_free(prev);
-        buffer.action_end();
-        break;}
-
-      case 'p': {
-        buffer.action_begin();
-        for (int i = 0; i < buffer.cursors.size; ++i) {
-          int depth = 0;
-          Utf8char c;
-          // find beginning
-          Pos a = buffer.cursors[i].pos;
-          depth = 0;
-          c = buffer.getchar(a);
-          bool left_was_brace = false;
-          if (c == '(' || c == '[' || c == '{') {
-            buffer.advance(a);
-            left_was_brace = true;
-          }
-          else if (c == ',') {}
-          else {
-            while(!buffer.advance_r(a)) {
-              c = buffer.getchar(a);
-              if (c == ')' || c == ']' || c == '}')
-                --depth;
-              else if (c == '(' || c == '[' || c == '{')
-                ++depth;
-              else if (c == ',' && depth == 0)
-                break;
-              if (depth > 0) {
-                left_was_brace = true;
-                buffer.advance(a);
-                break;
-              }
-            }
-          }
-
-          // find end
-          Pos b = buffer.cursors[i].pos;
-          depth = 0;
-          c = buffer.getchar(b);
-          if (c != ')' && c != ']' && c != '}') {
-            while (!buffer.advance(b)) {
-              c = buffer.getchar(b);
-              if (c == ')' || c == ']' || c == '}')
-                --depth;
-              else if (c == '(' || c == '[' || c == '{')
-                ++depth;
-              else if (c == ',' && depth == 0) {
-                // if left was brace, consume comma
-                if (left_was_brace) {
-                  buffer.advance(b);
-                  while (c = buffer.getchar(b), c.isspace())
-                    if (buffer.advance(b))
-                      break;
-                }
-                break;
-              }
-              if (depth < 0)
-                break;
-            }
-          }
-
-          buffer.remove_range(a, b, i);
-        }
-        buffer.action_end();
-        break;}
-
-      default:
-        if (!movement_default(buffer, key))
-          break;
-        if (cursors.size != buffer.cursors.size)
-          break;
-        // delete movement range
-        for (int i = 0; i < cursors.size; ++i) {
-          Pos a = cursors[i].pos;
-          Pos b = buffer.cursors[i].pos;
-          if (b < a) {
-            swap_range(*buffer.data,a,b);
-          }
-          // else
-          //   if (b.x != buffer.data->lines[b.y].length)
-          //     buffer.advance(b);
-          buffer.remove_range(a, b, i);
-        }
-        break;
-    }
-    buffer.action_end();
-
-    util_free(cursors);
+    do_delete_movement(key);
     mode_normal(true);
     break;}
 
@@ -2997,6 +3041,10 @@ static void handle_input(Key key) {
 
     case CONTROL('g'):
       mode_goto_definition();
+      break;
+
+    case 'r':
+      mode_replace();
       break;
 
     case '?':
@@ -3100,50 +3148,7 @@ static void handle_input(Key key) {
       break;
 
     case 'p':
-      if (G.editing_pane == G.selected_pane && SDL_HasClipboardText()) {
-        char *s = SDL_GetClipboardText();
-        // if we're on windows, remove \r
-        #ifdef OS_WINDOWS
-          char *out = s;
-          for (char *in = s; *in; ++in)
-            if (*in != '\r')
-              *out++ = *in;
-          *out = '\0';
-        #endif
-
-        int num_endlines = 0;
-        for (char *t = s; *t; ++t)
-          num_endlines += (*t == '\n');
-
-        buffer.action_begin();
-        buffer.data->raw_begin();
-
-        // split clipboard among cursors
-        if (num_endlines == buffer.cursors.size-1) {
-          char *start = s;
-          char *end = start;
-          for (int i = 0; i < buffer.cursors.size; ++i) {
-            start = end;
-            while (*end && *end != '\n')
-              ++end;
-            buffer.insert(Slice::create(start, end-start), i);
-            ++end;
-          }
-        }
-        // otherwise just paste out the whole thing for all cursors
-        else {
-          Slice sl = Slice::create(s);
-          if (sl.chars[sl.length-1] == '\n') {
-            buffer.insert_newline_below();
-            --sl.length;
-          }
-          buffer.insert(sl);
-        }
-
-        buffer.data->raw_end();
-        buffer.action_end();
-        SDL_free(s);
-      }
+      do_paste();
       break;
 
     case 'm': {
@@ -3323,8 +3328,6 @@ static void handle_input(Key key) {
             ++pb.y;
           }
           buffer.remove_range(pa, pb, i);
-          for (Pos &p : G.visual_start.cursors)
-            move_cursor_due_to_remove(pa, pb, &p);
         }
 
         util_free(G.visual_start);
@@ -3751,40 +3754,52 @@ void BufferData::action_end(Array<Cursor> &cursors) {
     if (buffer_changed)
       tokenize(*this);
 
-    // build up clipboard from removed strings
-    Array<StringBuffer> clips = {};
-    // find start of group
-    UndoAction *a = &_undo_actions[_next_undo_action-1];
-    assert(a->type == ACTIONTYPE_GROUP_END);
-    while (a[-1].type != ACTIONTYPE_GROUP_BEGIN)
-      --a;
-    assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
-    clips.resize(a->cursors.size);
-    clips.zero();
-    // find every delete action, and if there is a cursor for that, add that delete that cursors 
-    bool clip_filled = false;
-    for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
-      if (a->type != ACTIONTYPE_DELETE)
-        continue;
-      if (a->remove.cursor_idx == -1)
-        continue;
+    // CLIPBOARD
+    {
+      Array<StringBuffer> clips = {};
 
-      clips[a->remove.cursor_idx] += a->remove.s;
-      clip_filled = true;
-    }
+      // find start of group
+      UndoAction *a = &_undo_actions[_next_undo_action-1];
+      assert(a->type == ACTIONTYPE_GROUP_END);
+      while (a[-1].type != ACTIONTYPE_GROUP_BEGIN) --a;
+      assert(a->type == ACTIONTYPE_CURSOR_SNAPSHOT);
 
-    if (clip_filled) {
-      StringBuffer clip = {};
-      for (int i = 0; i < clips.size; ++i) {
-        clip += clips[i];
-        if (i < clips.size-1)
-          clip += '\n';
+      // only do clipboard if no inserts were done
+      for (UndoAction *act = a; act->type != ACTIONTYPE_GROUP_END; ++act)
+        if (act->type == ACTIONTYPE_INSERT)
+          goto clipboard_done;
+
+      // create stringbuffers
+      clips.resize(a->cursors.size);
+      clips.zero();
+
+      // find every delete action, and if there is a cursor for that, add that delete that cursors 
+      bool clip_filled = false;
+      for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
+        if (a->type != ACTIONTYPE_DELETE)
+          continue;
+        if (a->remove.cursor_idx == -1)
+          continue;
+
+        clips[a->remove.cursor_idx] += a->remove.s;
+        clip_filled = true;
       }
-      clip += '\0';
-      SDL_SetClipboardText(clip.chars);
-      util_free(clip);
+
+      if (clip_filled) {
+        StringBuffer clip = {};
+        for (int i = 0; i < clips.size; ++i) {
+          clip += clips[i];
+          if (i < clips.size-1)
+            clip += '\n';
+        }
+        clip += '\0';
+        SDL_SetClipboardText(clip.chars);
+        util_free(clip);
+      }
+
+      clipboard_done:
+      util_free(clips);
     }
-    util_free(clips);
   }
 }
 
@@ -4131,6 +4146,81 @@ void BufferData::delete_line(Array<Cursor> &cursors) {
   action_end(cursors);
 }
 
+static void move_on_insert(Pos &p, Pos a, Pos b) {
+  if (p.y == a.y && p.x >= a.x) {
+    p.y += b.y - a.y;
+    p.x = b.x + p.x - a.x;
+  }
+  else if (p.y > a.y) {
+    p.y += b.y - a.y;
+  }
+}
+static void move_on_insert(Cursor &c, Pos a, Pos b) {
+  move_on_insert(c.pos, a, b);
+  c.ghost_x = c.x;
+}
+
+static void move_on_delete(Pos &p, Pos a, Pos b) {
+  if (b <= a)
+    return;
+  // All cursors that are inside range should be moved to beginning of range
+  if (a <= p && p <= b)
+    p = a;
+  // If lines were deleted, all cursors below b.y should move up
+  else if (b.y > a.y && p.y > b.y)
+    p.y -= b.y-a.y;
+  // All cursors that are on the same row as b, but after b should be merged onto line a
+  else if (p.y == b.y && p.x >= b.x-1) {
+    p.y = a.y;
+    p.x = a.x + p.x - b.x;
+  }
+}
+static void move_on_delete(Cursor &c, Pos a, Pos b) {
+  move_on_delete(c.pos, a, b);
+  c.ghost_x = c.x;
+}
+
+#define UPDATE_CURSORS(name, move_function) \
+static void name(BufferData *buffer, Pos a, Pos b) { \
+  if (buffer == &G.status_message_buffer) { \
+    move_function(G.status_message_pane.buffer.cursors[0].pos, a, b); \
+    return; \
+  } \
+  if (buffer == &G.menu_buffer) { \
+    move_function(G.menu_pane.buffer.cursors[0].pos, a, b); \
+    return; \
+  } \
+\
+  if (G.visual_start.buffer == buffer) \
+    for (Pos &p : G.visual_start.cursors) \
+      move_function(p, a, b); \
+    \
+  /* move cursors */ \
+  for (Pane *pane : G.editing_panes) {  \
+    if (pane->buffer.data != buffer)  \
+      continue;  \
+\
+    /* cursors */ \
+    for (Cursor &c : pane->buffer.cursors) {  \
+      move_function(c, a, b); \
+    } \
+\
+    /* jumplist */ \
+    for (Pos &pos : pane->buffer.jumplist) \
+      move_function(pos, a, b); \
+\
+  } \
+\
+  /* paste highlights */ \
+  for (PasteHighlight &ph : buffer->paste_highlights) { \
+    move_function(ph.a, a, b); \
+    move_function(ph.b, a, b); \
+  } \
+}
+
+UPDATE_CURSORS(move_cursors_on_insert, move_on_insert)
+UPDATE_CURSORS(move_cursors_on_delete, move_on_delete)
+
 void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx) {
   if (b <= a)
     return;
@@ -4138,15 +4228,8 @@ void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_i
   action_begin(cursors);
   G.flags.cursor_dirty = true;
 
-  if (!undo_disabled) {
-    UndoAction act = UndoAction::delete_range({a,b}, range_to_string({a,b}).string, cursor_idx);
-    push_undo_action(act);
-  }
-
-  for (Cursor &c : cursors) {
-    move_cursor_due_to_remove(a, b, &c.pos);
-    c.ghost_x = c.x;
-  }
+  if (!undo_disabled)
+    push_undo_action(UndoAction::delete_range({a,b}, range_to_string({a,b}).string, cursor_idx));
 
   if (a.y == b.y)
     lines[a.y].remove(a.x, b.x-a.x);
@@ -4158,6 +4241,8 @@ void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_i
     // delete lines a+1 to and including b
     lines.remove_slow_and_free(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
+
+  move_cursors_on_delete(this, a, b);
 
   action_end(cursors);
 }
@@ -4350,48 +4435,6 @@ void BufferData::insert(Array<Cursor> &cursors, Slice s, int cursor_idx) {
   insert(cursors, cursors[cursor_idx].pos, s, cursor_idx);
 }
 
-static void move_on_insert(Pos &p, Pos a, Pos b) {
-  if (p.y == a.y && p.x >= a.x) {
-    p.y += b.y - a.y;
-    p.x = b.x + p.x - a.x;
-  }
-  else if (p.y > a.y) {
-    p.y += b.y - a.y;
-  }
-}
-
-static void move_cursors_on_insert(BufferData *buffer, Pos a, Pos b) {
-  if (buffer == &G.status_message_buffer) {
-    move_on_insert(G.status_message_pane.buffer.cursors[0].pos, a, b);
-    return;
-  }
-  if (buffer == &G.menu_buffer) {
-    move_on_insert(G.menu_pane.buffer.cursors[0].pos, a, b);
-    return;
-  }
-
-  // move cursors
-  for (Pane *pane : G.editing_panes) {
-    if (pane->buffer.data != buffer)
-      continue;
-
-    // cursors
-    for (Cursor &c : pane->buffer.cursors) {
-      move_on_insert(c.pos, a, b);
-      c.ghost_x = c.x;
-    }
-
-    // jumplist
-    for (Pos &pos : pane->buffer.jumplist)
-      move_on_insert(pos, a, b);
-
-    for (PasteHighlight &ph : buffer->paste_highlights) {
-      move_on_insert(ph.a, a, b);
-      move_on_insert(ph.b, a, b);
-    }
-  }
-}
-
 void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_index_hint) {
   if (!s.length)
     return;
@@ -4413,9 +4456,6 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
     b = {s.length - last_endline - 1, a.y + num_lines};
   else
     b = {a.x + s.length, a.y};
-
-  // if (this == G.editing_pane->buffer.data)
-  //   printf("insert: {%i %i} {%i %i} '%.*s'\n", a.x, a.y, b.x, b.y, s.length, s.chars);
 
   if (!undo_disabled)
     push_undo_action(UndoAction::insert_slice(a, b, s, cursor_index_hint));
