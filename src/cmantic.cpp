@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * Fix git blame parsing (git blame doesn't re-output author etc for hashes it's already output)
+ * Support for multiple languages
  * Have a global unified list of Locations/cursors
  * listen on file changes and automatically reload (or show a warning?)
  * Search on word only
@@ -5509,6 +5511,7 @@ void Pane::render_edit() {
     StringBuffer msg = {};
     int i = 0;
     for (int y = buf_offset.y; y < buf_y1; ++y) {
+      // TODO: binary search
       while (i < d.blame.data.size && d.blame.data[i].line <= y)
         ++i;
       BlameData bd = d.blame.data[i-1];
