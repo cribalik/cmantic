@@ -3776,27 +3776,29 @@ void BufferData::action_end(Array<Cursor> &cursors) {
       clips.zero();
 
       // find every delete action, and if there is a cursor for that, add that delete that cursors 
-      bool clip_filled = false;
-      for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
-        if (a->type != ACTIONTYPE_DELETE)
-          continue;
-        if (a->remove.cursor_idx == -1)
-          continue;
+      {
+        bool clip_filled = false;
+        for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
+          if (a->type != ACTIONTYPE_DELETE)
+            continue;
+          if (a->remove.cursor_idx == -1)
+            continue;
 
-        clips[a->remove.cursor_idx] += a->remove.s;
-        clip_filled = true;
-      }
-
-      if (clip_filled) {
-        StringBuffer clip = {};
-        for (int i = 0; i < clips.size; ++i) {
-          clip += clips[i];
-          if (i < clips.size-1)
-            clip += '\n';
+          clips[a->remove.cursor_idx] += a->remove.s;
+          clip_filled = true;
         }
-        clip += '\0';
-        SDL_SetClipboardText(clip.chars);
-        util_free(clip);
+
+        if (clip_filled) {
+          StringBuffer clip = {};
+          for (int i = 0; i < clips.size; ++i) {
+            clip += clips[i];
+            if (i < clips.size-1)
+              clip += '\n';
+          }
+          clip += '\0';
+          SDL_SetClipboardText(clip.chars);
+          util_free(clip);
+        }
       }
 
       clipboard_done:
@@ -5825,7 +5827,7 @@ static void test() {
 
   // test async reading
   #ifdef OS_LINUX
-  const char *command[] = {"./test.sh", NULL};
+  const char *command[] = {"sleep", "3", NULL};
   if (!call_async(command, &test_async_command_output)) {
     log_err("Call to %s failed\n", command[0]);
     editor_exit(1);
