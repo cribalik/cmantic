@@ -3,6 +3,8 @@
  * always distinguish block selection on inner and outer?
  * enter on search does not choose the current selection
  * delete token
+ * Goto definition should show entire function parameter list
+ * Definition parsing should support templates
  * Fix git blame parsing (git blame doesn't re-output author etc for hashes it's already output)
  * Support for multiple languages
  * Have a global unified list of Locations/cursors
@@ -345,8 +347,20 @@ struct UndoAction {
   static UndoAction insert_slice(Pos a, Pos b, Slice s, int cursor_idx = -1);
 };
 
+struct ParseResult {
+  Array<TokenInfo> tokens;
+  Array<Range> definitions;
+  Array<String> identifiers;
+};
+
+static void util_free(ParseResult &p) {
+  util_free(p.tokens);
+  util_free(p.definitions);
+  util_free(p.identifiers);
+}
+
 static void util_free(UndoAction &a);
-static void tokenize(BufferData &b);
+static ParseResult tokenize(const BufferData &b);
 
 struct PasteHighlight {
   Pos a;
@@ -375,17 +389,16 @@ struct BufferData {
   int _raw_mode_depth;
 
   /* parser stuff */
-  Array<TokenInfo> tokens;
-  Array<Range> definitions;
-  Array<String> identifiers;
+  ParseResult parser;
 
   // methods
   Slice name() const {return filename.chars ? Path::name(filename.slice) : description;}
+  void tokenize() {util_free(parser); parser = ::tokenize(*this);}
   bool is_bound_to_file() {return filename.chars;}
   void init(bool is_dynamic, Slice description = {});
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
-  Slice getslice(Range r) {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
+  Slice getslice(Range r) const {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
   bool modified() {return is_bound_to_file() && _next_undo_action != _last_save_undo_action;}
   void raw_begin() {++_raw_mode_depth;}
   void raw_end() {--_raw_mode_depth;}
@@ -1163,10 +1176,11 @@ static Keyword keywords[] = {
 
 /****** @TOKENIZER ******/
 
-static void tokenize(BufferData &b) {
-  Array<TokenInfo> tokens = b.tokens;
-  util_free(tokens);
-  util_free(b.identifiers);
+static ParseResult tokenize(const BufferData &b) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
   int x = 0;
   int y = 0;
 
@@ -1200,9 +1214,9 @@ static void tokenize(BufferData &b) {
         NEXT(1);
       Slice identifier = line(identifier_start, x);
       // check if identifier is already added
-      String *s = b.identifiers.find(identifier);
+      String *s = identifiers.find(identifier);
       if (!s)
-        b.identifiers += String::create(identifier);
+        identifiers += String::create(identifier);
       goto token_done;
     }
 
@@ -1298,11 +1312,7 @@ static void tokenize(BufferData &b) {
 
   tokens += {TOKEN_EOF, 0, b.lines.size, 0, b.lines.size};
 
-  b.tokens = tokens;
-
   // TODO: find definitions
-  Array<Range> definitions = b.definitions;
-  util_free(definitions);
   for (int i = 0; i < tokens.size; ++i) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
@@ -1356,7 +1366,7 @@ static void tokenize(BufferData &b) {
         break;
     }
   }
-  b.definitions = definitions;
+  return {tokens, definitions, identifiers};
 }
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
@@ -1445,7 +1455,7 @@ static void menu_option_show_tab_type() {
 
 static void menu_option_print_definitions() {
   BufferData &b = *G.editing_pane->buffer.data;
-  for (Range r : b.definitions) {
+  for (Range r : b.parser.definitions) {
     Slice s = b.getslice(r);
     printf("%.*s\n", s.length, s.chars);
   }
@@ -1632,7 +1642,7 @@ static void mode_cleanup() {
 }
 
 static Array<String> get_search_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->identifiers, slice), false);
+  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->parser.identifiers, slice), false);
 }
 
 static void mode_search() {
@@ -1743,8 +1753,8 @@ static void mode_prompt(Slice msg, void (*callback)(void), PromptType type) {
 static Array<String> get_goto_definition_suggestions() {
   BufferData &b = *G.editing_pane->buffer.data;
   Array<Slice> defs = {};
-  defs.reserve(b.definitions.size);
-  for (Range r : b.definitions)
+  defs.reserve(b.parser.definitions.size);
+  for (Range r : b.parser.definitions)
     defs += b.getslice(r);
 
   Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs), false);
@@ -1838,7 +1848,7 @@ static void mode_insert() {
 
   // so even if the caller did some changes, and commits them with action_end, it will not have an effect
   // since we do action_begin here. So we need to do things that action_end do manually here
-  tokenize(*G.editing_pane->buffer.data);
+  G.editing_pane->buffer.data->tokenize();
 
   status_message_set("insert");
 }
@@ -1929,7 +1939,7 @@ static void render_dropdown(Pane *pane) {
   if (G.flags.cursor_dirty) {
     Slice identifier = b.data->gettoken(identifier_start)->str;
     StackArray<FuzzyMatch, 10> best_matches;
-    View<Slice> input = VIEW(b.data->identifiers, slice);
+    View<Slice> input = VIEW(b.data->parser.identifiers, slice);
     best_matches.size = fuzzy_match(identifier, input, view(best_matches), true);
 
     G.dropdown_pane.buffer.empty();
@@ -1992,18 +2002,22 @@ static bool insert_default(Pane &p, Key key) {
   return false;
 }
 
-static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace, bool allow_inner_blocks = false) {
+static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace) {
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
     TokenInfo *t = buffer.data->gettoken(p);
-    if (t && t->token == leftbrace && t->a < p) {
+    if (!t || t->token == TOKEN_EOF)
+      continue;
+
+    bool allow_inner_blocks = t->token != rightbrace;
+    if (t->token == leftbrace && t->a < p) {
       buffer.move_to(i, t->a);
       continue;
     }
-    if (t && (t->token == leftbrace || t->token == rightbrace))
+    if (t->token == leftbrace || t->token == rightbrace)
       --t;
-    for (; t >= buffer.data->tokens.begin(); --t) {
+    for (; t >= buffer.data->parser.tokens.begin(); --t) {
       if (t->token == rightbrace)
         ++depth;
       if (t->token == leftbrace) {
@@ -2017,18 +2031,22 @@ static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbra
   }
 }
 
-static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbrace, bool allow_inner_blocks = false) {
+static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbrace) {
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
     int depth = 0;
     TokenInfo *t = buffer.data->gettoken(p);
+    if (!t || t->token == TOKEN_EOF)
+      continue;
+
+    bool allow_inner_blocks = t->token != rightbrace;
     if (t && t->token == rightbrace && p < t->a) {
       buffer.move_to(i, t->a);
       continue;
     }
     if (t && (t->token == leftbrace || t->token == rightbrace))
       ++t;
-    for (; t < buffer.data->tokens.end(); ++t) {
+    for (; t < buffer.data->parser.tokens.end(); ++t) {
       if (t->token == leftbrace) 
         ++depth;
       if (t->token == rightbrace) {
@@ -2592,6 +2610,7 @@ static bool do_delete_movement(Key key) {
       buffer.delete_line();
       break;
 
+    #if 0
     // delete block
     case 'b': {
       move_to_right_brace(buffer, '{', '}', true);
@@ -2602,6 +2621,7 @@ static bool do_delete_movement(Key key) {
         buffer.remove_range(cursors[i].pos, buffer.cursors[i].pos, i);
       }
       break;}
+    #endif
 
     case 'p': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
@@ -3075,7 +3095,7 @@ static void handle_input(Key key) {
         break;
     }
     if (insert_occured)
-      tokenize(*buffer.data);
+      buffer.data->tokenize();
     break;}
 
   case MODE_NORMAL:
@@ -3452,6 +3472,8 @@ static void do_update(float dt) {
 
   // get some build data
   if (G.build_result_output) {
+    BufferData &b = G.build_result_buffer;
+    Pane &p = G.build_result_pane;
     G.build_result_buffer.description = Slice::create("[Building..]");
     while (1) {
       static char buf[256];
@@ -3463,7 +3485,9 @@ static void do_update(float dt) {
       }
       if (n == 0)
         break;
-      G.build_result_pane.buffer.insert(Slice::create(buf, n));
+      p.buffer.move_to(b.lines.last().length, b.lines.size-1);
+      p.buffer.insert(Slice::create(buf, n));
+      p.buffer.cursors[0].pos = {};
     }
   }
 }
@@ -3592,9 +3616,7 @@ void BufferView::move_y(int dy) {
 void util_free(BufferData &b) {
   util_free(b.lines);
   util_free(b.filename);
-  util_free(b.tokens);
-  util_free(b.identifiers);
-  util_free(b.definitions);
+  util_free(b.parser);
   util_free(b._undo_actions);
   b.paste_highlights.free_shallow();
 }
@@ -3658,7 +3680,7 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
   }
 
   // token type
-  tokenize(b);
+  b.tokenize();
 
   // guess tab type
   b.guess_tab_type();
@@ -3697,28 +3719,28 @@ StringBuffer BufferData::range_to_string(const Range r) {
 }
 
 Range* BufferData::getdefinition(Slice s) {
-  for (Range &r : definitions)
+  for (Range &r : parser.definitions)
     if (getslice(r) == s)
       return &r;
   return 0;
 }
 
 TokenInfo* BufferData::gettoken(Pos p) {
-  for (int i = 0; i < tokens.size; ++i)
-    if (p < tokens[i].b)
-      return &tokens[i];
-  return tokens.end();
+  for (int i = 0; i < parser.tokens.size; ++i)
+    if (p < parser.tokens[i].b)
+      return &parser.tokens[i];
+  return parser.tokens.end();
 }
 
 #if 0
 TokenInfo* BufferData::gettoken(Pos p) {
-  int a = 0, b = tokens.size-1;
+  int a = 0, b = parser.tokens.size-1;
 
   while (a <= b) {
     int mid = (a+b)/2;
-    if (tokens[mid].a <= p && p < tokens[mid].b)
-      return &tokens[mid];
-    if (tokens[mid].a < p)
+    if (parser.tokens[mid].a <= p && p < parser.tokens[mid].b)
+      return &parser.tokens[mid];
+    if (parser.tokens[mid].a < p)
       a = mid+1;
     else
       b = mid-1;
@@ -3803,7 +3825,7 @@ void BufferData::action_end(Array<Cursor> &cursors) {
 
     // retokenize
     if (buffer_changed)
-      tokenize(*this);
+      this->tokenize();
 
     // CLIPBOARD
     {
@@ -3825,27 +3847,29 @@ void BufferData::action_end(Array<Cursor> &cursors) {
       clips.zero();
 
       // find every delete action, and if there is a cursor for that, add that delete that cursors 
-      bool clip_filled = false;
-      for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
-        if (a->type != ACTIONTYPE_DELETE)
-          continue;
-        if (a->remove.cursor_idx == -1)
-          continue;
+      {
+        bool clip_filled = false;
+        for (; a->type != ACTIONTYPE_GROUP_END; ++a) {
+          if (a->type != ACTIONTYPE_DELETE)
+            continue;
+          if (a->remove.cursor_idx == -1)
+            continue;
 
-        clips[a->remove.cursor_idx] += a->remove.s;
-        clip_filled = true;
-      }
-
-      if (clip_filled) {
-        StringBuffer clip = {};
-        for (int i = 0; i < clips.size; ++i) {
-          clip += clips[i];
-          if (i < clips.size-1)
-            clip += '\n';
+          clips[a->remove.cursor_idx] += a->remove.s;
+          clip_filled = true;
         }
-        clip += '\0';
-        SDL_SetClipboardText(clip.chars);
-        util_free(clip);
+
+        if (clip_filled) {
+          StringBuffer clip = {};
+          for (int i = 0; i < clips.size; ++i) {
+            clip += clips[i];
+            if (i < clips.size-1)
+              clip += '\n';
+          }
+          clip += '\0';
+          SDL_SetClipboardText(clip.chars);
+          util_free(clip);
+        }
       }
 
       clipboard_done:
@@ -3892,7 +3916,7 @@ void BufferData::undo(Array<Cursor> &cursors) {
   undo_disabled = false;
 
   // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-  tokenize(*this);
+  this->tokenize();
   raw_end();
 }
 
@@ -3933,7 +3957,7 @@ void BufferData::redo(Array<Cursor> &cursors) {
   ++_next_undo_action;
   undo_disabled = false;
   // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-  tokenize(*this);
+  this->tokenize();
   raw_end();
 }
 
@@ -5327,7 +5351,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
   TokenInfo *t = b.data->gettoken(pos);
 
   if (t) {
-    for (; t < b.data->tokens.end() && t->a.y <= y1; ++t) {
+    for (; t < b.data->parser.tokens.end() && t->a.y <= y1; ++t) {
       if (t->token == TOKEN_NULL)
         break;
       switch (t->token) {
@@ -5376,7 +5400,7 @@ void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
   }
 
   // syntax highlight definitions
-  for (Range r : buffer.data->definitions) {
+  for (Range r : buffer.data->parser.definitions) {
     if (r.a.y > y1)
       break;
     if (r.b.y < y0)
@@ -5693,7 +5717,6 @@ int Pane::calc_max_subpane_depth() const {
   return result;
 }
 
-
 Pos Pane::slot2pixel(Pos p) const {
   return {this->bounds.x + p.x*G.font_width, this->bounds.y + p.y*G.line_height};
 }
@@ -5874,7 +5897,7 @@ static void test() {
 
   // test async reading
   #ifdef OS_LINUX
-  const char *command[] = {"./test.sh", NULL};
+  const char *command[] = {"sleep", "3", NULL};
   if (!call_async(command, &test_async_command_output)) {
     log_err("Call to %s failed\n", command[0]);
     editor_exit(1);
