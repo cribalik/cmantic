@@ -736,6 +736,7 @@ struct Utf8Iter {
   bool begins_with(int offset, StringBuffer s) const; \
   bool begins_with(int offset, const char *str, int n) const; \
   bool begins_with(int offset, const char *str) const; \
+  bool ends_with(const char *str) const; \
   bool empty() const {return length;}; \
   String copy() const;
 
@@ -768,6 +769,7 @@ struct Utf8Iter {
   bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, const char *str, int n) const {return Slice::begins_with(chars, length, offset, str, n);} \
   bool classname::begins_with(int offset, const char *str) const {return Slice::begins_with(chars, length, offset, str);} \
+  bool classname::ends_with(const char *str) const {return Slice::ends_with(chars, length, str);} \
   String classname::copy() const {return Slice::copy(chars, length);};
 
 // A non-owning string
@@ -985,6 +987,11 @@ struct Slice {
   static bool begins_with(const char *chars, int length, int offset, const char *str) {
     int n = strlen(str);
     return length - offset >= n && !memcmp(str, chars+offset, n);
+  }
+
+  static bool ends_with(const char *chars, int length, const char *str) {
+    int n = strlen(str);
+    return length >= n && !memcmp(str, chars+length-n, n);
   }
 
   static Slice create(const char *s, int len) {
