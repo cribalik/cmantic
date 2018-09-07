@@ -2086,15 +2086,18 @@ static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
   for (int y = y0; y <= y1; ++y) {
     int x  = buffer.data->begin_of_line(y);
     Pos a = {x, y};
-    if (buffer.data->lines[y].begins_with(x, Slice::create("//"))) {
+    const Slice comment = line_comments[buffer.data->language];
+    if (buffer.data->lines[y].begins_with(x, comment)) {
       Pos b = a;
       b.x += 2;
       while (b.x < buffer.data->lines[y].length && buffer.data->getchar(b).isspace())
         ++b.x;
       buffer.remove_range(a, b, cursor_idx);
     }
-    else
-      buffer.insert(a, Slice::create("// "), cursor_idx);
+    else {
+      buffer.insert(a, Slice::create(" "), cursor_idx);
+      buffer.insert(a, comment, cursor_idx);
+    }
   }
 }
 

@@ -283,6 +283,16 @@ StaticArray<Keyword> keywords[] = {
 };
 STATIC_ASSERT(ARRAY_LEN(keywords) == NUM_LANGUAGES, all_keywords_defined);
 
+Slice line_comments[] = {
+  // LANGUAGE_NULL
+  {},
+  // LANGUAGE_C
+  Slice::create("//"),
+  // LANGUAGE_PYTHON
+  Slice::create("#")
+};
+STATIC_ASSERT(ARRAY_LEN(line_comments) == NUM_LANGUAGES, all_line_comments_defined);
+
 // MUST BE REVERSE SIZE ORDER
 static const Slice cpp_operators[] = {
   {(char*)"===", 3},
