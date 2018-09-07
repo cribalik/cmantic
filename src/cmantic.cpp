@@ -333,7 +333,7 @@ struct BufferData {
 
   // methods
   Slice name() const {return filename.chars ? Path::name(filename.slice) : description;}
-  void tokenize() {util_free(parser); parser = ::tokenize(lines, language);}
+  void parse() {util_free(parser); parser = ::parse(lines, language);}
   bool is_bound_to_file() {return filename.chars;}
   void init(bool is_dynamic, Slice description = {});
   Range* getdefinition(Slice s);
@@ -365,6 +365,7 @@ struct BufferData {
   void delete_line(Array<Cursor> &cursors, int y);
   void remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx = -1);
   void delete_char(Array<Cursor>& cursors);
+  void delete_char(Array<Cursor> &cursors, int cursor_idx);
   void insert_tab(Array<Cursor> &cursors);
   void insert_tab(Array<Cursor> &cursors, Pos pos);
   int getindent(int y);
@@ -388,7 +389,6 @@ struct BufferData {
   StringBuffer range_to_string(Range r);
   // Finds the token at or before given position
   TokenInfo* gettoken(Pos p);
-  TokenResult token_read(Pos *p, int y_end);
 
   // Undo functionality:
   //
@@ -585,6 +585,7 @@ struct BufferView {
   Utf8char getchar(int cursor_idx) {return data->getchar(cursors[cursor_idx].pos);}
   Utf8char getchar(Pos p) {return data->getchar(p);}
   int getindent(int y) {return data->getindent(y);}
+  void add_indent(int y, int diff) {return data->add_indent(cursors, y, diff);}
 
   static BufferView create(BufferData *data) {
     BufferView b = {data, {}};
@@ -1235,7 +1236,8 @@ static Array<String> get_cwd_suggestions() {
   // get folder
 
   // first try relative path, and then try absolute
-  Path rel = G.current_working_directory.copy(); rel.push(G.menu_buffer.lines[0].slice);
+  Path rel = G.current_working_directory.copy();
+  rel.push(G.menu_buffer.lines[0].slice);
   Path rel_dir = rel.copy();
   Path abs = Path::create(G.menu_buffer.lines[0].slice);
   Path abs_dir = abs.copy();
@@ -1243,12 +1245,12 @@ static Array<String> get_cwd_suggestions() {
   Path *p = &rel;
   Path *dir = &rel_dir;
 
-  if (!File::isdir(rel_dir)) {
+  if (rel_dir.string[rel_dir.string.length-1] != Path::separator || !File::isdir(rel_dir)) {
     rel_dir.pop();
-    if (!File::isdir(rel_dir)) {
+    if (rel_dir.string[rel_dir.string.length-1] != Path::separator  || !File::isdir(rel_dir)) {
       p = &abs;
       dir = &abs_dir;
-      if (!File::isdir(*dir))
+      if (dir->string.length && (dir->string[dir->string.length-1] != Path::separator || !File::isdir(*dir)))
         dir->pop();
     }
   }
@@ -1416,7 +1418,7 @@ static void mode_insert() {
 
   // so even if the caller did some changes, and commits them with action_end, it will not have an effect
   // since we do action_begin here. So we need to do things that action_end do manually here
-  G.editing_pane->buffer.data->tokenize();
+  G.editing_pane->buffer.data->parse();
 
   status_message_set("insert");
 }
@@ -1562,9 +1564,29 @@ static bool insert_default(Pane &p, Key key) {
       b.insert_tab();
       return true;
 
-    case KEY_BACKSPACE:
-      b.data->delete_char(b.cursors);
+    case KEY_BACKSPACE: {
+      // if there is only whitespace to the left, go backwards by tabsize
+      for (int i = 0; i < b.cursors.size; ++i) {
+        if (b.cursors[i].x > 0) {
+          const StringBuffer line = b.data->lines[b.cursors[i].y];
+
+          for (int x = b.cursors[i].x-1; x >= 0; --x)
+            if (!isspace(line[x]))
+              goto default_backspace;
+
+          int indent = b.getindent(b.cursors[i].y); 
+          if (indent == 0)
+            goto default_backspace;
+
+          b.add_indent(b.cursors[i].y, -1);
+          continue;
+        }
+
+        default_backspace:
+        b.data->delete_char(b.cursors, i);
+      }
       return true;
+    }
   }
 
   return false;
@@ -2663,7 +2685,7 @@ static void handle_input(Key key) {
         break;
     }
     if (insert_occured)
-      buffer.data->tokenize();
+      buffer.data->parse();
     break;}
 
   case MODE_NORMAL:
@@ -2727,7 +2749,14 @@ static void handle_input(Key key) {
     case '>':
       buffer.action_begin();
       for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.insert_tab({0, buffer.cursors[i].y});
+        buffer.add_indent(buffer.cursors[i].y, 1);
+      buffer.action_end();
+      break;
+
+    case '<':
+      buffer.action_begin();
+      for (int i = 0; i < buffer.cursors.size; ++i)
+        buffer.add_indent(buffer.cursors[i].y, -1);
       buffer.action_end();
       break;
 
@@ -3206,8 +3235,10 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
   BufferData &b = *buffer;
 
   // try to figure out the language
-  if (filename.ends_with(".cpp") || filename.ends_with(".h") || filename.ends_with(".hpp") || filename.ends_with(".c"))
-    b.language = LANGUAGE_CPP;
+  if (filename.ends_with(".cpp") || filename.ends_with(".h") || filename.ends_with(".hpp") || filename.ends_with(".c") || filename.ends_with(".cs"))
+    b.language = LANGUAGE_C;
+  else if (filename.ends_with(".py"))
+    b.language = LANGUAGE_PYTHON;
 
   b.endline_string = ENDLINE_UNIX;
 
@@ -3253,7 +3284,7 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
   }
 
   // token type
-  b.tokenize();
+  b.parse();
 
   // guess tab type
   b.guess_tab_type();
@@ -3398,7 +3429,7 @@ void BufferData::action_end(Array<Cursor> &cursors) {
 
     // retokenize
     if (buffer_changed)
-      this->tokenize();
+      this->parse();
 
     // CLIPBOARD
     {
@@ -3489,7 +3520,7 @@ void BufferData::undo(Array<Cursor> &cursors) {
   undo_disabled = false;
 
   // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-  this->tokenize();
+  this->parse();
   raw_end();
 }
 
@@ -3530,7 +3561,7 @@ void BufferData::redo(Array<Cursor> &cursors) {
   ++_next_undo_action;
   undo_disabled = false;
   // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-  this->tokenize();
+  this->parse();
   raw_end();
 }
 
@@ -3778,9 +3809,9 @@ void BufferData::remove_trailing_whitespace(Array<Cursor> &cursors, int cursor_i
     return;
 
   // TODO: @utf8
-  while (x > 0 && getchar(x, y).isspace())
+  while (x >= 0 && getchar(x, y).isspace())
     --x;
-  remove_range(cursors, {x, y}, {lines[y].length, y}, cursor_idx);
+  remove_range(cursors, {x+1, y}, {lines[y].length, y}, cursor_idx);
 }
 
 void BufferData::delete_line(Array<Cursor> &cursors, int y) {
@@ -3895,23 +3926,31 @@ void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_i
   action_end(cursors);
 }
 
+void BufferData::delete_char(Array<Cursor> &cursors, int cursor_idx) {
+  action_begin(cursors);
+  G.flags.cursor_dirty = true;
+
+  Pos pos = cursors[cursor_idx].pos;
+  if (pos.x == 0) {
+    if (pos.y == 0)
+      return;
+    remove_range(cursors, {lines[pos.y-1].length, pos.y-1}, {0, pos.y}, cursor_idx);
+  }
+  else {
+    Pos p = pos;
+    advance_r(p);
+    remove_range(cursors, p, pos, cursor_idx);
+  }
+
+  action_end(cursors);
+}
+
 void BufferData::delete_char(Array<Cursor> &cursors) {
   action_begin(cursors);
   G.flags.cursor_dirty = true;
 
-  for (int i = 0; i < cursors.size; ++i) {
-    Pos pos = cursors[i].pos;
-    if (pos.x == 0) {
-      if (pos.y == 0)
-        return;
-      remove_range(cursors, {lines[pos.y-1].length, pos.y-1}, {0, pos.y}, i);
-    }
-    else {
-      Pos p = pos;
-      advance_r(p);
-      remove_range(cursors, p, pos, i);
-    }
-  }
+  for (int i = 0; i < cursors.size; ++i)
+    delete_char(cursors, i);
 
   action_end(cursors);
 }
@@ -3944,33 +3983,19 @@ int BufferData::indentdepth(int y, bool *has_statement) {
   Pos p = {0,y};
 
   bool first = true;
-  while (1) {
-    auto t = token_read(&p, y+1);
-
-    if (t.tok == TOKEN_NULL)
-      break;
-
-    switch (t.tok) {
-      case '{': ++depth; break;
-      case '}': --depth; break;
-      case '[': ++depth; break;
-      case ']': --depth; break;
-      case '(': ++depth; break;
-      case ')': --depth; break;
-      case TOKEN_IDENTIFIER: {
-        Slice s = lines[y](t.a.x, t.b.x+1);
-        assert(t.b.y == t.a.y);
-        if (first && (
-            s == "for" ||
-            s == "if" ||
-            s == "while" ||
-            s == "else"
-            )) {
-          if (has_statement)
-            *has_statement = true;
-        }
-      } break;
-      default: break;
+  for (TokenInfo *t = gettoken(p); t != parser.tokens.end() && t->b.y == y; ++t) {
+    if      (t->token == '{' || t->token == '[' || t->token == '(') ++depth;
+    else if (t->token == '}' || t->token == ']' || t->token == ')') --depth;
+    else if (t->token == TOKEN_IDENTIFIER) {
+      if (first && (
+          t->str == "for" ||
+          t->str == "if" ||
+          t->str == "while" ||
+          t->str == "else"
+          )) {
+        if (has_statement)
+          *has_statement = true;
+      }
     }
     first = false;
   }
@@ -4410,170 +4435,6 @@ Utf8char BufferData::getchar(int x, int y) {
 
 Utf8char BufferData::getchar(Pos p) {
   return getchar(p.x, p.y);
-}
-
-TokenResult BufferData::token_read(Pos *p, int y_end) {
-  TokenResult result = {};
-  int x,y;
-  x = p->x, y = p->y;
-
-  for (;;) {
-    if (y >= y_end || y >= lines.size) {
-      result.tok = TOKEN_NULL;
-      goto done;
-    }
-
-    // endline
-    if (x >= lines[y].length) {
-      x = 0;
-      ++y;
-      continue;
-    }
-
-    char c = lines[y][x];
-
-    if (isspace(c)) {
-      ++x;
-      continue;
-    }
-
-    /* identifier */
-    if (is_identifier_head(c)) {
-      result.tok = TOKEN_IDENTIFIER;
-      result.a = {x, y};
-      while (x < lines[y].length) {
-        result.b = {x, y};
-        c = lines[y][++x];
-        if (!is_identifier_tail(c))
-          break;
-      }
-      goto done;
-    }
-
-    /* block comment */
-    if (c == '/' && x+1 < lines[y].length && lines[y][x+1] == '*') {
-      result.tok = TOKEN_BLOCK_COMMENT;
-      result.a = {x, y};
-      x += 2;
-      /* goto matching end block */
-      for (;;) {
-        if (y >= y_end || y >= lines.size) {
-          result.b = {x, y};
-          result.tok = TOKEN_BLOCK_COMMENT_BEGIN;
-          break;
-        }
-        if (x >= lines[y].length) {
-          ++y;
-          x = 0;
-          continue;
-        }
-        c = lines[y][x];
-        if (c == '*' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-          result.b = {x+1, y};
-          x += 2;
-          break;
-        }
-        ++x;
-      }
-      break;
-    }
-
-    /* end of block comment */
-    if (c == '*' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-      result.tok = TOKEN_BLOCK_COMMENT_END;
-      result.a = {x, y};
-      result.b = {x+1, y};
-      x += 2;
-      goto done;
-    }
-
-    /* line comment */
-    if (c == '/' && x+1 < lines[y].length && lines[y][x+1] == '/') {
-      result.tok = TOKEN_LINE_COMMENT;
-      result.a = {x, y};
-      result.b = {lines[y].length-1, y};
-      x = lines[y].length;
-      goto done;
-    }
-
-    /* number */
-    if (is_number_head(c)) {
-      result.tok = TOKEN_NUMBER;
-      result.a = {x, y};
-      while (x < lines[y].length) {
-        result.b = {x, y};
-        c = lines[y][++x];
-        if (!is_number_tail(c))
-          break;
-      }
-      if (x == lines[y].length)
-        goto done;
-      if (c == '.' && x+1 < lines[y].length && isdigit(lines[y][x+1])) {
-        c = lines[y][++x];
-        while (isdigit(c) && x < lines[y].length) {
-          result.b = {x, y};
-          c = lines[y][++x];
-        }
-        if (x == lines[y].length)
-          goto done;
-      }
-      while ((c == 'u' || c == 'l' || c == 'L' || c == 'f') && x < lines[y].length) {
-        result.b = {x, y};
-        c = lines[y][++x];
-      }
-      goto done;
-    }
-
-    /* string */
-    if (c == '"' || c == '\'') {
-      char str_char = c;
-      result.tok = TOKEN_STRING;
-      result.a = {x, y};
-      ++x;
-      for (;;) {
-        if (x >= lines[y].length) {
-          result.tok = TOKEN_STRING_BEGIN;
-          result.b = {x, y};
-          ++y;
-          x = 0;
-          break;
-        }
-
-        c = lines[y][x];
-        if (c == str_char) {
-          result.b = {x, y};
-          ++x;
-          break;
-        }
-        ++x;
-      }
-      goto done;
-    }
-
-    /* operators */
-    for (int i = 0; i < (int)ARRAY_LEN(operators); ++i) {
-      if (lines[y].begins_with(x, operators[i])) {
-        result.tok = TOKEN_OPERATOR;
-        result.a = {x,y};
-        result.b = {x+operators[i].length-1, y};
-        result.operator_str = lines[y](x, x + operators[i].length);
-        x += operators[i].length;
-        goto done;
-      }
-    }
-
-    /* single char token */
-    result.tok = c;
-    result.a = {x, y};
-    result.b = {x, y};
-    ++x;
-    goto done;
-  }
-
-  done:
-  p->x = x;
-  p->y = y;
-  return result;
 }
 
 void Canvas::init(int width, int height) {
