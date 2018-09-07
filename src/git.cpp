@@ -1,7 +1,7 @@
 template<int N>
 struct StringCache {
 	String cache[N];
-	int index;
+	int num;
 
 	IF_DEBUG(
 		int num_misses;
@@ -17,16 +17,26 @@ struct StringCache {
 		}
 		IF_DEBUG(++num_misses);
 		IF_DEBUG(num_bytes_alloced += s.length);
-		return cache[(index++)%N] = String::create(s);
+		return cache[(num++)%N] = String::create(s);
 	}
 };
 
+template<int N>
+static void util_free(StringCache<N> &s) {
+	for (int i = 0; i < s.num; ++i)
+		util_free(s.cache[i]);
+	s.num = 0;
+}
+
 struct BlameData {int line; char *hash, *author, *summary;};
 
+// TODO: we might be able to optimize this by storing only the unique commits, and having references to them
 static bool git_parse_blame(String output, Array<BlameData> *result) {
 	StringCache<64> hash_cache = {};
 	StringCache<64> author_cache = {};
 	StringCache<64> summary_cache = {};
+	struct Data {String hash, author, summary;};
+	Array<Data> mem = {};
 
 	*result = {};
 
@@ -45,7 +55,6 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 				++num_lines, last = key;
 		}
 	}
-	// printf("%i %i\n", num_lines, num_lines * sizeof(BlameData));
 	result->reserve(num_lines+1);
 
 	Slice hash = {};
@@ -67,9 +76,20 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 		Slice key = row.token(&col, ' ');
 		if (key.length == 40) {
 			if (key != hash) {
-				*result += BlameData{current_line, hash_cache.get(hash(0, 8)).chars, author_cache.get(author).chars, summary_cache.get(summary).chars};
-				current_line = line;
+				// if we've seen the key before, it should be in mem
+				Data *d;
+				ARRAY_FIND(mem, &d, d->hash == key);
+				if (!d) {
+					mem += Data{
+						hash_cache.get(hash(0, 8)),
+						author_cache.get(author),
+						summary_cache.get(summary),
+					};
+					d = &mem.last();
+				}
 				last_hash = hash;
+				*result += BlameData{current_line, d->hash.chars, d->author.chars, d->summary.chars};
+				current_line = line;
 				hash = key;
 			}
 			++line;
@@ -77,7 +97,7 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 			final_file_line_number = row.token(&col, ' ');
 			if (items_left_in_group == 0)
 				if (!row(col, -1).toint(&items_left_in_group))
-					return false;
+					goto err;
 			--items_left_in_group;
 		}
 		else if (key == "author")
@@ -87,11 +107,20 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 	}
 	if (hash != last_hash)
 		*result += BlameData{current_line, hash_cache.get(hash(0, 8)).chars, author_cache.get(author).chars, summary_cache.get(summary).chars};
+
 	#if 0
 	printf("%i %i %i\n", hash_cache.num_misses, hash_cache.num_hits, hash_cache.num_bytes_alloced);
 	printf("%i %i %i\n", author_cache.num_misses, author_cache.num_hits, author_cache.num_bytes_alloced);
 	printf("%i %i %i\n", summary_cache.num_misses, summary_cache.num_hits, summary_cache.num_bytes_alloced);
 	printf("%i\n", result->size);
 	#endif
+	mem.free_shallow();
 	return true;
+
+	err:
+	mem.free_shallow();
+	util_free(hash_cache);
+	util_free(author_cache);
+	util_free(summary_cache);
+	return false;
 }

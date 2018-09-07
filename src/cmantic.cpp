@@ -1,5 +1,8 @@
 /*
  * TODO:
+ * always distinguish block selection on inner and outer?
+ * enter on search does not choose the current selection
+ * delete token
  * Fix git blame parsing (git blame doesn't re-output author etc for hashes it's already output)
  * Support for multiple languages
  * Have a global unified list of Locations/cursors
@@ -910,6 +913,9 @@ struct State {
   /* some settings */
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
+
+  /* build stuff */
+  String build_command;
 };
 
 State G;
@@ -1485,8 +1491,28 @@ static void menu_option_closeall() {
 #define yield_break do {step = {}; return;} while(0)
 
 static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
+static void menu_option_set_build_command() {
+  COROUTINE_BEGIN;
+
+  mode_prompt(Slice::create("Build command"), menu_option_set_build_command, PROMPT_STRING);
+  yield(check_prompt_result);
+  if (!G.prompt_success)
+    yield_break;
+  
+  if (!G.prompt_result.string.length) {
+    status_message_set("Command must be non-empty");
+    yield_break;
+  }
+  
+  util_free(G.build_command);
+  G.build_command = G.prompt_result.string;
+  status_message_set("Build command set");
+
+  COROUTINE_END;
+}
+
 static void menu_option_blame() {
-  COROUTINE_BEGIN
+  COROUTINE_BEGIN;
 
   if (!G.editing_pane->buffer.data->is_bound_to_file())
     yield_break;
@@ -1494,7 +1520,7 @@ static void menu_option_blame() {
   // ask the user if it's okay we save before blaming
   if (G.editing_pane->buffer.data->modified()) {
     mode_prompt(Slice::create("Will save buffer in order to blame, ok? [y/n]"), menu_option_blame, PROMPT_BOOLEAN);
-    yield(CHECK_PROMPT_RESULT);
+    yield(check_prompt_result);
     if (!G.prompt_success || !G.prompt_result.boolean) {
       status_message_set("Cancelling blame");
       yield_break;
@@ -1530,7 +1556,7 @@ static void menu_option_blame() {
 
   util_free(out);
 
-  COROUTINE_END
+  COROUTINE_END;
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1545,37 +1571,37 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     menu_option_save
   },
   {
-    Slice::create("show_tab_type"),
+    Slice::create("show tab type"),
     Slice::create("Show if tab type is spaces or tab"),
     menu_option_show_tab_type
   },
   {
-    Slice::create("show_definitions"),
+    Slice::create("show definitions"),
     Slice::create("Show all definitions in current buffer"),
     menu_option_print_definitions
   },
   {
-    Slice::create("chdir"),
+    Slice::create("change directory"),
     Slice::create("Change current working directory"),
     menu_option_chdir
   },
   {
-    Slice::create("reload"),
+    Slice::create("reload buffer"),
     Slice::create("Reload current buffer"),
     menu_option_reload
   },
   {
-    Slice::create("reloadall"),
+    Slice::create("reload all buffers"),
     Slice::create("Reload all buffers"),
     menu_option_reloadall
   },
   {
-    Slice::create("close"),
+    Slice::create("close buffer"),
     Slice::create("Close current buffer"),
     menu_option_close
   },
   {
-    Slice::create("closeall"),
+    Slice::create("close all buffers"),
     Slice::create("Close all open buffers"),
     menu_option_closeall
   },
@@ -1583,6 +1609,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("blame"),
     Slice::create("git blame on current file"),
     menu_option_blame
+  },
+  {
+    Slice::create("set build command"),
+    Slice::create("set build command"),
+    menu_option_set_build_command
   }
 };
 
@@ -2460,8 +2491,9 @@ static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
 }
 
 static void begin_build() {
-  COROUTINE_BEGIN
+  COROUTINE_BEGIN;
 
+  // if build already running, prompt user
   if (G.build_result_output) {
     mode_prompt(Slice::create("Build is already running, are you sure? [y/n]"), begin_build, PROMPT_BOOLEAN);
     yield(wait_for_prompt);
@@ -2469,19 +2501,34 @@ static void begin_build() {
       yield_break;
   }
 
-  const char* cmd[] = {"make", NULL};
-  util_free(G.build_result_output);
-  if (!call_async(cmd, &G.build_result_output)) {
-    status_message_set("Failed to call %s", cmd[0]);
+  // build arg list
+  if (!G.build_command.length) {
+    status_message_set("No build command set. Please set with :set-build-command");
     yield_break;
   }
 
+  Array<const char *> cmd = {};
+  int offset = 0;
+  for (Slice arg; arg = G.build_command.token(&offset, ' '), arg.length;)
+    cmd += arg.chars;
+  cmd += 0;
+
+  // call subprocess
+  util_free(G.build_result_output);
+  bool success = call_async(cmd, &G.build_result_output);
+  cmd.free_shallow();
+  if (!success) {
+    status_message_set("Failed to call {}", (Slice)G.build_command.slice);
+    yield_break;
+  }
+
+  // reset buffer and pane
   if (!G.editing_panes.find(&G.build_result_pane))
     G.editing_panes += &G.build_result_pane;
   G.build_result_buffer.init(false, Slice::create("[Build Result]"));
   Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
 
-  COROUTINE_END
+  COROUTINE_END;
 }
 
 static bool do_paste() {
@@ -2834,9 +2881,10 @@ static void handle_input(Key key) {
     }
     else if (key == KEY_ESCAPE)
       mode_normal(true);
+    else if (key == KEY_BACKSPACE && G.menu_buffer[0].length == 0)
+      mode_normal(true);
     else
       handle_menu_insert(key);
-    /* FIXME: if backspace so that menu_buffer is empty, exit menu mode */
     break;
 
   case MODE_GOTO_DEFINITION: {
@@ -3406,10 +3454,11 @@ static void do_update(float dt) {
   if (G.build_result_output) {
     G.build_result_buffer.description = Slice::create("[Building..]");
     while (1) {
-      char buf[256];
+      static char buf[256];
       int n = G.build_result_output.read(buf, 256);
       if (n == -1) {
         G.build_result_buffer.description = Slice::create("[Build Done]");
+        util_free(G.build_result_output);
         break;
       }
       if (n == 0)

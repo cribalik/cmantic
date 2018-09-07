@@ -552,7 +552,7 @@ void util_free(Array<T> &a) {
 }
 
 
-#define ARRAY_FIND(a, ptr, expr) {for ((ptr) = (a).items; (ptr) < (a).items+(a).size; ++(ptr)) {if (expr) break;} if ((ptr) == (a).items+(a).size) {(ptr) = 0;}}
+#define ARRAY_FIND(a, pptr, expr) {for ((*pptr) = (a).items; (*pptr) < (a).items+(a).size; ++(*pptr)) {if (expr) break;} if ((*pptr) == (a).items+(a).size) {(*pptr) = 0;}}
 #define ARRAY_MIN_BY(a, field) (VIEW(a, field).min())
 #define ARRAY_MAX_BY(a, field) (VIEW(a, field).max())
 #define ARRAY_MAXVAL_BY(a, field) VIEW(a, field).maxval()
@@ -889,6 +889,9 @@ struct Slice {
 
   static Slice token(const char *chars, int length, int *offset, char c) {
     int i = *offset;
+    if (i >= length)
+      return {};
+
     while (i < length && chars[i] != c)
       ++i;
     Slice s = {chars + *offset, i - *offset};
@@ -906,6 +909,9 @@ struct Slice {
   }
   static Slice token(const char *chars, int length, int *offset, const char *c) {
     int i = *offset;
+    if (i >= length)
+      return {};
+
     while (i < length && !contains(c, chars[i]))
       ++i;
     Slice s = {chars + *offset, i - *offset};
@@ -1790,21 +1796,21 @@ LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
 #ifdef OS_WINDOWS
 
 struct Stream {
+  bool valid;
   HANDLE handle;
   OVERLAPPED overlap;
   enum {BEGIN_CONNECTING, WAIT_FOR_CONNECTION, BEGIN_READING, WAIT_FOR_READ} state;
 
-  operator bool() {return handle;}
+  operator bool() {return valid;}
 
   int read(void *buffer, int n);
-  
 };
 
 static void util_free(Stream &s) {
-  if (s.handle)
+  if (s.valid) {
     CloseHandle(s.handle);
-  if (s.overlap.hEvent)
     CloseHandle(s.overlap.hEvent);
+  }
   s = {};
 }
 
@@ -1825,7 +1831,7 @@ int Stream::read(void *buffer, int n) {
 
     case WAIT_FOR_CONNECTION:
       wait_for_connection:
-      state = BEGIN_READING;
+      state = WAIT_FOR_CONNECTION;
       if (!HasOverlappedIoCompleted(&overlap))
         return 0;
 
@@ -1989,15 +1995,16 @@ static bool call(const char *command[], int *errcode, String *output) {
   return true;
 
   err:
-  if (process_info.hProcess)
+  if (process_info.hProcess && process_info.hProcess != INVALID_HANDLE_VALUE)
     CloseHandle(process_info.hProcess);
-  if (process_info.hThread)
+  if (process_info.hThread && process_info.hThread != INVALID_HANDLE_VALUE)
     CloseHandle(process_info.hThread);
   if (output) {
-    CloseHandle(proc_output);
-    if (info.hStdOutput)
+    if (proc_output && proc_output != INVALID_HANDLE_VALUE)
+      CloseHandle(proc_output);
+    if (info.hStdOutput && info.hStdOutput != INVALID_HANDLE_VALUE)
       CloseHandle(info.hStdOutput);
-    if (info.hStdError)
+    if (info.hStdError && info.hStdError != INVALID_HANDLE_VALUE)
       CloseHandle(info.hStdError);
   }
   util_free(cmd);
@@ -2008,8 +2015,6 @@ static bool call(const char *command[], int *errcode, String *output) {
 static bool call_async(const char *command[], Stream *output) {
   // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
   // and for an actual complete example see https://www.daniweb.com/programming/software-development/threads/295780/using-named-pipes-with-asynchronous-i-o-redirection-to-winapi
-  HANDLE shared_pipe = {};
-  HANDLE our_pipe = {};
   StringBuffer cmd = {};
   *output = {};
 
@@ -2025,47 +2030,52 @@ static bool call_async(const char *command[], Stream *output) {
   char pipe_name[128];
   static uint unique_pipe_num = 0;
   sprintf_s(pipe_name, "\\\\.\\pipe\\cmutil.%08x.%08x", GetCurrentProcessId(), ++unique_pipe_num);
-  shared_pipe = CreateNamedPipeA(pipe_name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE, 1, 0, 0, INFINITE, &sattr);
+  HANDLE shared_pipe = CreateNamedPipeA(pipe_name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE, 1, 0, 0, INFINITE, &sattr);
   if (shared_pipe == INVALID_HANDLE_VALUE) {
-    log_err("Failed to create pipe for stdout\n");
+    log_err("Failed to create pipe for stdout (%i)\n", (int)GetLastError());
     goto err;
   }
 
   // now we need to create another file that the child process can write to
   info.hStdOutput = CreateFile(pipe_name, FILE_WRITE_DATA | SYNCHRONIZE, 0, &sattr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+  if (info.hStdOutput == INVALID_HANDLE_VALUE) {
+    log_err("Failed to open writeable pipe for child process (%i)\n", (int)GetLastError());
+    goto err_1;
+  }
 
   // and duplicate for stderr
   if (!DuplicateHandle(GetCurrentProcess(), info.hStdOutput, GetCurrentProcess(), &info.hStdError, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
     log_err("%s: Failed to duplicate process output handle to stderr (%i)\n", command[0], (int)GetLastError());
-    goto err;
+    goto err_2;
   }
 
   // finally we need to create our own non-shareable pipe, and close the shared one (in practice, this shouldn't be much of a problem, since the shared pipe will be freed by the child process when it exits)
+  HANDLE our_pipe;
   if (!DuplicateHandle(GetCurrentProcess(), shared_pipe, GetCurrentProcess(), &our_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
     log_err("%s: Failed to duplicate pipe (%i)\n", command[0], (int)GetLastError());
-    goto err;
+    goto err_3;
   }
 
   if (!CloseHandle(shared_pipe)) {
     log_err("%s: Failed to close shared pipe (%i)\n", command[0], (int)GetLastError());
-    goto err;
+    goto err_4;
   }
+  shared_pipe = INVALID_HANDLE_VALUE;
 
   // create process
   for (const char **s = command; *s; ++s)
     cmd.appendf("\"%s\" ", *s);
   if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_err("%s: Failed to create process (%i)\n", command[0], GetLastError());
-    goto err;
+    log_err("%s: Failed to create process (%i)\n", command[0], (int)GetLastError());
+    goto err_4;
   }
-  util_free(cmd);
 
   // create result
-  *output = Stream{our_pipe};
+  *output = Stream{true, our_pipe};
   output->overlap.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
   if (!output->overlap.hEvent) {
     log_err("%s: Failed to create an event for overlapped io (%i)\n", command[0], (int)GetLastError());
-    goto err;
+    goto err_5;
   }
 
   // close process handles
@@ -2076,22 +2086,25 @@ static bool call_async(const char *command[], Stream *output) {
 
   return true;
 
-  err:
-  // close process handles
-  if (process_info.hProcess)
-    CloseHandle(process_info.hProcess);
-  if (process_info.hThread)
-    CloseHandle(process_info.hThread);
-  if (info.hStdOutput)
-    CloseHandle(info.hStdOutput);
-  if (info.hStdError)
-    CloseHandle(info.hStdError);
-  if (shared_pipe)
+  err_5:
+  log_info("err_5:");
+  CloseHandle(process_info.hProcess);
+  CloseHandle(process_info.hThread);
+  err_4:
+  log_info("err_4:");
+  CloseHandle(our_pipe);
+  err_3:
+  log_info("err_3:");
+  CloseHandle(info.hStdError);
+  err_2:
+  log_info("err_2:");
+  CloseHandle(info.hStdOutput);
+  err_1:
+  log_info("err_1:");
+  if (shared_pipe != INVALID_HANDLE_VALUE)
     CloseHandle(shared_pipe);
-  if (our_pipe)
-    CloseHandle(our_pipe);
-  if (output->overlap.hEvent)
-    CloseHandle(output->overlap.hEvent);
+  err:
+  log_info("err:");
   util_free(cmd);
   return false;
 }
