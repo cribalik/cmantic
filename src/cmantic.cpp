@@ -26,7 +26,6 @@
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
  * Compress undo history?
  * Multiuser editing
- * Listen to changes in current directory and update file list accordingly
  * Update markers in other panes with same buffer (or at least make sure they are in range)
  */
 
@@ -170,15 +169,24 @@ static int fuzzy_match(Slice string, View<Slice> strings, View<FuzzyMatch> resul
   return num_results;
 }
 
-static Array<String> easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings) {
+static void easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings, Array<int> *result) {
   StackArray<FuzzyMatch, 15> matches = {};
+  *result = {};
 
   int n = fuzzy_match(input, options, view(matches), ignore_identical_strings);
 
-  Array<String> result = {};
   for (int i = 0; i < n; ++i)
-    result += String::create(matches[i].str);
-  return result;
+    *result += matches[i].idx;
+}
+
+static void easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings, Array<String> *result) {
+  StackArray<FuzzyMatch, 15> matches = {};
+  *result = {};
+
+  int n = fuzzy_match(input, options, view(matches), ignore_identical_strings);
+
+  for (int i = 0; i < n; ++i)
+    *result += String::create(matches[i].str);
 }
 
 enum Mode {
@@ -489,7 +497,7 @@ struct v2 {
   int y;
 };
 
-struct Canvas {
+struct TextCanvas {
   Utf8char *chars;
   Color *background_colors;
   Color *text_colors;
@@ -517,7 +525,7 @@ struct Canvas {
   void _normalize_range(Pos &a, Pos &b);
 };
 
-void util_free(Canvas &c) {
+void util_free(TextCanvas &c) {
   delete [] c.chars;
   delete [] c.background_colors;
   delete [] c.text_colors;
@@ -635,6 +643,16 @@ struct SubPane {
   Pane *pane;
 };
 
+struct MenuSuggestion {
+  String value;
+  String description;
+};
+void util_free(MenuSuggestion &m) {
+  util_free(m.value);
+  util_free(m.description);
+  m = {};
+}
+
 struct Pane {
   PaneType type;
   BufferView buffer;
@@ -664,12 +682,15 @@ struct Pane {
 
     // PANETYPE_MENU
     struct {
+      bool is_verbose;
       // callbacks
       Array<String> (*get_suggestions)();
+      Array<MenuSuggestion> (*get_verbose_suggestions)();
       Slice prefix;
 
       int current_suggestion;
       Array<String> suggestions;
+      Array<MenuSuggestion> verbose_suggestions;
     } menu;
 
     // PANETYPE_DROPDOWN
@@ -678,6 +699,28 @@ struct Pane {
   };
 
   // methods
+  void menu_init(Slice prefix) {
+    menu.get_suggestions = 0;
+    menu.get_verbose_suggestions = 0;
+    util_free(menu.suggestions);
+    util_free(menu.verbose_suggestions);
+    menu.current_suggestion = 0;
+    menu.prefix = prefix;
+    buffer.empty();
+  }
+
+  void menu_init(Slice prefix, Array<String> (*get_suggestions_fn)()) {
+    menu_init(prefix);
+    menu.is_verbose = false;
+    menu.get_suggestions = get_suggestions_fn;
+  }
+
+  void menu_init(Slice prefix, Array<MenuSuggestion> (*get_suggestions_fn)()) {
+    menu_init(prefix);
+    menu.is_verbose = true;
+    menu.get_verbose_suggestions = get_suggestions_fn;
+  }
+
   Pane* add_subpane(BufferData *buffer, Pos p);
   void render();
   Rect get_buffer_visibility_rect();
@@ -695,7 +738,7 @@ struct Pane {
   void render_menu();
   void render_single_line();
   void render_menu_popup();
-  void render_syntax_highlight(Canvas &canvas, int y1);
+  void render_syntax_highlight(TextCanvas &canvas, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
   int calc_max_subpane_depth() const;
@@ -705,6 +748,12 @@ struct Pane {
       return 0;
     int i = clamp(menu.current_suggestion, 0, menu.suggestions.size);
     return &menu.suggestions[i].slice;
+  };
+
+  int menu_get_selection_idx() {
+    if (!menu.suggestions.size)
+      return -1;
+    return clamp(menu.current_suggestion, 0, menu.suggestions.size);
   };
 
   int numchars_x() const;
@@ -897,6 +946,10 @@ struct State {
 
   /* goto state */
   unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
+
+  /* goto_definition state */
+  Pos goto_definition_begin_pos;
+  Array<Pos> definition_positions;
 
   /* search state */
   int search_failed;
@@ -1226,22 +1279,23 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   }
 };
 
-static Array<String> easy_fuzzy_match(Slice input, View<Slice> options, bool ignore_identical_strings);
-
 static void mode_cleanup() {
   G.flags.cursor_dirty = true;
 
-  if (G.mode == MODE_FILESEARCH || G.mode == MODE_SEARCH || G.mode == MODE_CWD) {
+  if (G.mode == MODE_FILESEARCH || G.mode == MODE_SEARCH || G.mode == MODE_CWD)
     G.menu_pane.buffer.empty();
-  }
-  G.menu_pane.clear_suggestions();
+
+  if (G.mode == MODE_GOTO_DEFINITION)
+    util_free(G.definition_positions);
 
   if (G.mode == MODE_INSERT)
     G.editing_pane->buffer.action_end();
 }
 
 static Array<String> get_search_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->parser.identifiers, slice), false);
+  Array<String> result;
+  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->parser.identifiers, slice), false, &result);
+  return result;
 }
 
 static void mode_search() {
@@ -1256,8 +1310,7 @@ static void mode_search() {
   G.search_failed = 0;
 
   G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu.get_suggestions = &get_search_suggestions;
-  G.menu_pane.menu.prefix = Slice::create("search");
+  G.menu_pane.menu_init(Slice::create("search"), get_search_suggestions);
 
   G.menu_pane.buffer.empty();
 }
@@ -1327,10 +1380,7 @@ static void mode_cwd() {
 
   G.selected_pane = &G.menu_pane;
   G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu.get_suggestions = &get_cwd_suggestions;
-  G.menu_pane.menu.prefix = Slice::create("chdir");
-
-  G.menu_pane.buffer.empty();
+  G.menu_pane.menu_init(Slice::create("chdir"), get_cwd_suggestions);
   G.menu_pane.buffer.insert(G.current_working_directory.string.slice);
   G.menu_pane.buffer.insert(Utf8char::create(Path::separator));
   G.menu_pane.update_suggestions();
@@ -1345,9 +1395,7 @@ static void mode_prompt(Slice msg, void (*callback)(void), PromptType type) {
 
   G.selected_pane = &G.menu_pane;
   G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu.get_suggestions = 0;
-
-  G.menu_pane.buffer.empty();
+  G.menu_pane.menu_init(Slice{});
 }
 
 static Array<String> get_goto_definition_suggestions() {
@@ -1357,8 +1405,18 @@ static Array<String> get_goto_definition_suggestions() {
   for (Range r : b.parser.definitions)
     defs += b.getslice(r);
 
-  Array<String> result = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs), false);
+  Array<int> matches;
+  easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs), false, &matches);
+
+  Array<String> result = {};
+  for (int i : matches)
+    result += String::create(defs[i]);
   util_free(defs);
+
+  G.definition_positions.size = 0;
+  for (int i : matches)
+    G.definition_positions += b.parser.definitions[i].a;
+
   return result;
 }
 
@@ -1367,12 +1425,14 @@ static void mode_goto_definition() {
   G.mode = MODE_GOTO_DEFINITION;
   G.selected_pane = &G.menu_pane;
 
-  G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu.get_suggestions = &get_goto_definition_suggestions;
-  G.menu_pane.menu.prefix = Slice::create("goto def");
+  G.editing_pane->buffer.collapse_cursors();
+  G.goto_definition_begin_pos = G.editing_pane->buffer.cursors[0].pos;
 
-  G.menu_pane.buffer.empty();
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu_init(Slice::create("goto def"), get_goto_definition_suggestions);
   G.menu_pane.update_suggestions();
+  if (G.definition_positions.size)
+    G.editing_pane->buffer.move_to(G.definition_positions[0]);
 }
 
 static Array<String> get_filesearch_suggestions() {
@@ -1380,9 +1440,17 @@ static Array<String> get_filesearch_suggestions() {
   filenames.reserve(G.files.size);
   for (Path p : G.files)
     filenames += p.name();
-  Array<String> match = easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(filenames), false);
+  Array<int> match;
+  easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(filenames), false, &match);
   util_free(filenames);
-  return match;
+
+  Array<String> result = {};
+  result.reserve(match.size);
+  for (int i : match)
+    result += String::create(G.files[i].string.slice(G.current_working_directory.string.length+1, -1));
+
+  util_free(match);
+  return result;
 }
 
 static void mode_filesearch() {
@@ -1391,9 +1459,7 @@ static void mode_filesearch() {
   G.bottom_pane_highlight.reset();
   G.selected_pane = &G.menu_pane;
   G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu.get_suggestions = &get_filesearch_suggestions;
-  G.menu_pane.menu.prefix = Slice::create("open");
-  G.menu_pane.buffer.empty();
+  G.menu_pane.menu_init(Slice::create("open"), get_filesearch_suggestions);
   G.menu_pane.update_suggestions();
 }
 
@@ -1454,7 +1520,9 @@ static void mode_insert() {
 }
 
 static Array<String> get_menu_suggestions() {
-  return easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW_FROM_ARRAY(menu_options, opt.name), false);
+  Array<String> result;
+  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW_FROM_ARRAY(menu_options, opt.name), false, &result);
+  return result;
 }
 
 static void mode_menu() {
@@ -1463,9 +1531,7 @@ static void mode_menu() {
   G.selected_pane = &G.menu_pane;
   G.bottom_pane_highlight.reset();
   G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu.get_suggestions = &get_menu_suggestions;
-  G.menu_pane.menu.prefix = Slice::create("menu");
-  G.menu_pane.buffer.empty();
+  G.menu_pane.menu_init(Slice::create("menu"), get_menu_suggestions);
   G.menu_pane.update_suggestions();
 }
 
@@ -2067,12 +2133,18 @@ static void handle_menu_insert(int key) {
 
     case KEY_ARROW_DOWN:
     case CONTROL('j'):
-      G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion+1, 0, G.menu_pane.menu.suggestions.size-1);
+      if (G.menu_pane.menu.is_verbose)
+        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion+1, 0, G.menu_pane.menu.verbose_suggestions.size-1);
+      else
+        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion+1, 0, G.menu_pane.menu.suggestions.size-1);
       break;
 
     case KEY_ARROW_UP:
     case CONTROL('k'):
-      G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion-1, 0, G.menu_pane.menu.suggestions.size-1);
+      if (G.menu_pane.menu.is_verbose)
+        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion-1, 0, G.menu_pane.menu.verbose_suggestions.size-1);
+      else
+        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion-1, 0, G.menu_pane.menu.suggestions.size-1);
       break;
 
     case KEY_TAB: {
@@ -2610,6 +2682,7 @@ static void handle_input(Key key) {
 
   case MODE_GOTO_DEFINITION: {
     if (key == KEY_ESCAPE) {
+      G.editing_pane->buffer.move_to(G.goto_definition_begin_pos);
       mode_normal(true);
       break;
     }
@@ -2622,6 +2695,7 @@ static void handle_input(Key key) {
         break;
       }
 
+      // TODO: do something better here
       Range *def = buffer.data->getdefinition(*opt);
       if (!def) {
         mode_normal(true);
@@ -2637,6 +2711,11 @@ static void handle_input(Key key) {
     }
 
     handle_menu_insert(key);
+
+    int i = G.menu_pane.menu_get_selection_idx();
+    if (i != -1)
+      G.editing_pane->buffer.move_to(G.definition_positions[i]);
+
     break;}
 
   case MODE_FILESEARCH:
@@ -4555,7 +4634,7 @@ Utf8char BufferData::getchar(Pos p) {
   return getchar(p.x, p.y);
 }
 
-void Canvas::init(int width, int height) {
+void TextCanvas::init(int width, int height) {
   (*this) = {};
   this->w = width;
   this->h = height;
@@ -4564,7 +4643,7 @@ void Canvas::init(int width, int height) {
   this->text_colors = new Color[w*h]();
 }
 
-void Canvas::resize(int width, int height) {
+void TextCanvas::resize(int width, int height) {
   if (this->chars)
     delete [] this->chars;
   if (this->background_colors)
@@ -4574,24 +4653,24 @@ void Canvas::resize(int width, int height) {
   this->init(width, height);
 }
 
-void Canvas::fill(Utf8char c) {
+void TextCanvas::fill(Utf8char c) {
   for (int i = 0; i < w*h; ++i)
     this->chars[i] = c;
 }
 
-void Canvas::fill(Color text, Color backgrnd) {
+void TextCanvas::fill(Color text, Color backgrnd) {
   for (int i = 0; i < w*h; ++i)
     background_colors[i] = backgrnd;
   for (int i = 0; i < w*h; ++i)
     text_colors[i] = text;
 }
 
-void Canvas::invert_color(Pos p) {
+void TextCanvas::invert_color(Pos p) {
   swap(text_colors[p.y*w + p.x], background_colors[p.y*w + p.x]);
 }
 
 #if 0
-void Canvas:fit_range_to_bounds() {
+void TextCanvas:fit_range_to_bounds() {
   Pos a = range.a;
   Pos b = range.b;
   a -= offset;
@@ -4623,7 +4702,7 @@ void Canvas:fit_range_to_bounds() {
 }
 #endif
 
-void Canvas::_normalize_range(Pos &a, Pos &b) {
+void TextCanvas::_normalize_range(Pos &a, Pos &b) {
   a -= offset;
   b -= offset;
   a.x = clamp(a.x, 0, w-1);
@@ -4632,7 +4711,7 @@ void Canvas::_normalize_range(Pos &a, Pos &b) {
   b.y = clamp(b.y, 0, h-1);
 }
 
-void Canvas::blend_textcolor(Range range, Color c) {
+void TextCanvas::blend_textcolor(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
   _normalize_range(a, b);
@@ -4653,7 +4732,7 @@ void Canvas::blend_textcolor(Range range, Color c) {
     this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
 }
 
-void Canvas::blend_textcolor_additive(Range range, Color c) {
+void TextCanvas::blend_textcolor_additive(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
   _normalize_range(a, b);
@@ -4675,7 +4754,7 @@ void Canvas::blend_textcolor_additive(Range range, Color c) {
 }
 
 // fills a to b but only inside the bounds 
-void Canvas::fill_textcolor(Range range, Color c) {
+void TextCanvas::fill_textcolor(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
   _normalize_range(a, b);
@@ -4697,7 +4776,7 @@ void Canvas::fill_textcolor(Range range, Color c) {
 }
 
 // w,h: use -1 to say it goes to the end
-void Canvas::fill_textcolor(Rect r, Color c) {
+void TextCanvas::fill_textcolor(Rect r, Color c) {
   r.x -= offset.x;
   r.y -= offset.y;
   if (r.w == -1)
@@ -4715,7 +4794,7 @@ void Canvas::fill_textcolor(Rect r, Color c) {
 }
 
 // w,h: use -1 to say it goes to the end
-void Canvas::fill_background(Rect r, Color c) {
+void TextCanvas::fill_background(Rect r, Color c) {
   r.x -= offset.x;
   r.y -= offset.y;
   if (r.w == -1)
@@ -4742,7 +4821,7 @@ void Canvas::fill_background(Rect r, Color c) {
     background_colors[y*this->w + x] = c;
 }
 
-void Canvas::render_char(Pos p, Color text_color, const Color *background_color, char c) {
+void TextCanvas::render_char(Pos p, Color text_color, const Color *background_color, char c) {
   p.x -= offset.x;
   p.y -= offset.y;
 
@@ -4755,7 +4834,7 @@ void Canvas::render_char(Pos p, Color text_color, const Color *background_color,
     background_colors[p.y*w + p.x] = *background_color;
 }
 
-void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
+void TextCanvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
   if (!s.length)
     return;
 
@@ -4793,7 +4872,7 @@ void Canvas::render_str(Pos p, const Color *text_color, const Color *background_
   }
 }
 
-void Canvas::render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
+void TextCanvas::render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args) {
   if (p.x >= w)
     return;
   G.tmp_render_buffer.clear();
@@ -4801,14 +4880,14 @@ void Canvas::render_str_v(Pos p, const Color *text_color, const Color *backgroun
   render_str(p, text_color, background_color, x0, x1, G.tmp_render_buffer.slice);
 }
 
-void Canvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
+void TextCanvas::render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   this->render_str_v(p, text_color, background_color, x0, x1, fmt, args);
   va_end(args);
 }
 
-void Canvas::render(Pos pos) {
+void TextCanvas::render(Pos pos) {
   #if 0
   printf("PRINTING SCREEN\n\n");
   for (int i = 0; i < h; ++i) {
@@ -4880,7 +4959,7 @@ void Canvas::render(Pos pos) {
 void Pane::render_as_dropdown() {
   BufferView &b = buffer;
 
-  Canvas canvas;
+  TextCanvas canvas;
   int y_max = this->numchars_y();
   canvas.init(this->numchars_x(), this->numchars_y());
   canvas.background = *this->background_color;
@@ -4906,7 +4985,7 @@ void Pane::render_as_dropdown() {
   render_text();
 }
 
-void Pane::render_syntax_highlight(Canvas &canvas, int y1) {
+void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
   #define render_highlight(color) canvas.fill_textcolor(Range{b.data->to_visual_pos(t->a), b.data->to_visual_pos(t->b)}, color)
 
   BufferView &b = this->buffer;
@@ -5006,15 +5085,14 @@ void Pane::render() {
 void Pane::update_suggestions() {
   if (!G.flags.cursor_dirty)
     return;
-  if (!menu.get_suggestions)
+  if (!menu.get_suggestions && !menu.get_verbose_suggestions)
     return;
   util_free(menu.suggestions);
-  menu.suggestions = menu.get_suggestions();
-  menu.current_suggestion = 0;
-}
-
-void Pane::clear_suggestions() {
-  util_free(menu.suggestions);
+  util_free(menu.verbose_suggestions);
+  if (menu.get_suggestions)
+    menu.suggestions = menu.get_suggestions();
+  else
+    menu.verbose_suggestions = menu.get_verbose_suggestions();
   menu.current_suggestion = 0;
 }
 
@@ -5024,7 +5102,7 @@ void Pane::render_single_line() {
   Pos buf_offset = {menu.prefix.length+2, 0};
 
   // render the editing line
-  Canvas canvas;
+  TextCanvas canvas;
   canvas.init(this->numchars_x(), 1);
   canvas.fill(*this->text_color, *this->background_color);
   canvas.background = *this->background_color;
@@ -5048,33 +5126,42 @@ void Pane::render_single_line() {
 }
 
 void Pane::render_menu_popup() {
-  if (!menu.suggestions.size)
-    return;
 
-  // resize dropdown pane
-  int width = ARRAY_MAXVAL_BY(menu.suggestions, length);
-  int height = at_most(menu.suggestions.size, pixel2chary(G.win_height) - 10);
-  if (height <= 0)
-    return;
+  if (menu.is_verbose) {
+    if (!menu.verbose_suggestions.size)
+      return;
+    // TODO: implement
+  }
+  else {
+    if (!menu.suggestions.size)
+      return;
 
-  Canvas canvas;
-  canvas.init(width, height);
-  canvas.fill(*text_color, *background_color);
-  canvas.background = *this->background_color;
-  canvas.margin = this->margin;
+    // resize dropdown pane
+    int width = ARRAY_MAXVAL_BY(menu.suggestions, length);
+    int height = at_most(menu.suggestions.size, pixel2chary(G.win_height) - 10);
+    if (height <= 0)
+      return;
 
-  // position this pane
-  Pos p = this->bounds.p;
-  p.y -= char2pixely(height) + margin;
+    TextCanvas canvas;
+    canvas.init(width, height);
+    canvas.fill(*text_color, *background_color);
+    canvas.background = *this->background_color;
+    canvas.margin = this->margin;
 
-  for (int i = 0; i < at_most(menu.suggestions.size, height); ++i)
-    canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i].slice);
+    // position this pane
+    Pos p = this->bounds.p;
+    p.y -= char2pixely(height) + margin;
 
-  // highlight
-  canvas.fill_background({0, menu.current_suggestion, {-1, 1}}, *this->active_highlight_background_color);
+    for (int i = 0; i < at_most(menu.suggestions.size, height); ++i)
+      canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i].slice);
 
-  canvas.render(p);
-  util_free(canvas);
+    // highlight
+    canvas.fill_background({0, menu.current_suggestion, {-1, 1}}, *this->active_highlight_background_color);
+
+    canvas.render(p);
+    util_free(canvas);
+  }
+
 
   render_quads();
   render_text();
@@ -5107,7 +5194,7 @@ void Pane::render_edit() {
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   {
-    Canvas gutter;
+    TextCanvas gutter;
     gutter.init(_gutter_width, numchars_y());
     gutter.background = *background_color;
     for (int y = 0, line = buf_offset.y; line < buf_y1; ++y, ++line)
@@ -5121,7 +5208,7 @@ void Pane::render_edit() {
 
   buffer_viewport = {buf_offset.x, buf_offset.y, numchars_x()-_gutter_width, buf_y1 - buf_offset.y-1};
 
-  Canvas canvas;
+  TextCanvas canvas;
   canvas.init(buffer_viewport.w, numchars_y());
   canvas.fill(*text_color, *background_color);
   canvas.background = *background_color;
@@ -5530,7 +5617,7 @@ static void handle_pending_removes() {
 
     // remove from global pane list
     int idx = G.editing_panes.find(p) - G.editing_panes.items;
-    G.editing_panes.remove_slow(p);
+    G.editing_panes.remove_item_slow(p);
 
     // update global pane pointers
     if (G.editing_pane == p && G.editing_panes.size > 0)
@@ -5555,7 +5642,7 @@ static void handle_pending_removes() {
 
     // free buffer
     util_free(*b);
-    G.buffers.remove_slow(b);
+    G.buffers.remove_item_slow(b);
     if (b->is_dynamic)
       delete b;
 

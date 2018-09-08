@@ -85,6 +85,7 @@ void util_free(Path &p);
 void util_free(StringBuffer &s);
 void util_free(String &s);
 void util_free(Slice &s);
+void util_free(int) {}
 template<class T> union Array;
 template<class T> struct View;
 template<class T> union StrideView;
@@ -470,7 +471,7 @@ union Array {
   }
 
   // only removes one item, so you better make sure it's unique
-  void remove_slow(T t) {
+  void remove_item_slow(T t) {
     remove_slow(find(t));
   }
 
