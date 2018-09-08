@@ -1185,7 +1185,7 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     menu_option_closeall
   },
   {
-    Slice::create("blame"),
+    Slice::create("git blame"),
     Slice::create("git blame on current file"),
     menu_option_blame
   },
