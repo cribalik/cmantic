@@ -307,6 +307,28 @@ struct PasteHighlight {
   float alpha; // 1 -> 0
 };
 
+struct BufferRectIter {
+  Pos p;
+  Array<StringBuffer> lines;
+  Rect r; // y+h will never be more than lines.size-1
+
+  bool next() {
+    ++p.x;
+    int w = at_most(r.x+r.w, lines[p.y].length);
+    if (p.x > w) {
+      ++p.y;
+      p.x = r.x;
+    }
+    return p.y <= r.y+r.h;
+  }
+
+  char operator*() {
+    if (p.x == lines[p.y].length)
+      return '\n';
+    return lines[p.y][p.x];
+  }
+};
+
 struct BufferData {
   String filename;
   Slice description; // only used for special buffers (i.e. if it does not have a filename)
@@ -339,6 +361,7 @@ struct BufferData {
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) const {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
+  BufferRectIter getrect(Rect r) {return BufferRectIter{r.p, lines, {r.x, r.y, r.w, at_most(r.y+r.h, lines.size-1) - r.y}};}
   bool modified() {return is_bound_to_file() && _next_undo_action != _last_save_undo_action;}
   void raw_begin() {++_raw_mode_depth;}
   void raw_end() {--_raw_mode_depth;}
@@ -482,6 +505,7 @@ struct Canvas {
   void render(Pos offset);
   void render_str_v(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, va_list args);
   void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s);
+  void render_char(Pos p, Color text_color, const Color *background_color, char c);
   void fill(Color text, Color background);
   void fill_background(Rect r, Color c);
   void fill_textcolor(Rect r, Color c);
@@ -637,6 +661,7 @@ struct Pane {
   union {
     // PANETYPE_EDIT
     struct {
+      Rect buffer_viewport;
     };
 
     // PANETYPE_MENU
@@ -657,6 +682,7 @@ struct Pane {
   // methods
   Pane* add_subpane(BufferData *buffer, Pos p);
   void render();
+  Rect get_buffer_visibility_rect();
   void update_suggestions();
   void clear_suggestions();
   void switch_buffer(BufferData *d) {
@@ -767,11 +793,30 @@ void util_free(Location &l) {
   l.buffer = 0;
 }
 
+typedef int Key;
+enum SpecialKey {
+  KEY_NONE = 0,
+  KEY_UNKNOWN = 257,
+  KEY_ESCAPE      = 258,
+  KEY_RETURN      = 259,
+  KEY_TAB         = 260,
+  KEY_BACKSPACE   = 261,
+  KEY_ARROW_UP    = 262,
+  KEY_ARROW_DOWN  = 263,
+  KEY_ARROW_LEFT  = 264,
+  KEY_ARROW_RIGHT = 265,
+  KEY_END         = 266,
+  KEY_HOME        = 267,
+
+  KEY_CONTROL = 1 << 10
+};
+
 enum PromptType {
   PROMPT_STRING,
   PROMPT_INT,
   PROMPT_FLOAT,
-  PROMPT_BOOLEAN
+  PROMPT_BOOLEAN,
+  PROMPT_KEY
 };
 
 struct State {
@@ -804,6 +849,8 @@ struct State {
   PoppedColor active_highlight_background_color;
   RotatingColor default_marker_background_color;
   PoppedColor bottom_pane_highlight;
+  PoppedColor visual_jump_color;
+  PoppedColor visual_jump_background_color;
 
   /* editor state */
   Path current_working_directory;
@@ -821,7 +868,6 @@ struct State {
   BufferData null_buffer;
   Pane build_result_pane;
   BufferData build_result_buffer;
-  Stream build_result_output;
 
   float activation_meter;
 
@@ -847,6 +893,7 @@ struct State {
     int integer;
     double floating;
     bool boolean;
+    Key key;
   } prompt_result;
   void (*prompt_callback)(void);
 
@@ -868,8 +915,13 @@ struct State {
   int tab_width; /* how wide are tabs when rendered */
   int default_tab_type; /* 0 for tabs, 1+ for spaces */
 
-  /* build stuff */
+  /* build state */
   String build_command;
+  Stream build_result_output;
+
+  /* visual jump */
+  Pane *current_visual_jump_pane;
+  Array<Pos> visual_jump_positions;
 };
 
 State G;
@@ -877,26 +929,6 @@ State G;
 static int get_text_offset_y(int font_height) {
   return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
 }
-
-typedef int Key;
-enum SpecialKey {
-  KEY_NONE = 0,
-  KEY_UNKNOWN = 257,
-  KEY_ESCAPE      = 258,
-  KEY_RETURN      = 259,
-  KEY_TAB         = 260,
-  KEY_BACKSPACE   = 261,
-  KEY_ARROW_UP    = 262,
-  KEY_ARROW_DOWN  = 263,
-  KEY_ARROW_LEFT  = 264,
-  KEY_ARROW_RIGHT = 265,
-  KEY_END         = 266,
-  KEY_HOME        = 267,
-
-  KEY_CONTROL = 1 << 10
-};
-
-/* @TOKENIZER */
 
 static void status_message_set(const char *fmt, ...) {
   va_list args;
@@ -1928,6 +1960,20 @@ static void state_init() {
   G.bottom_pane_highlight.min = 0.05f;
   G.bottom_pane_highlight.max = 0.15f;
 
+  G.visual_jump_color.base_color = COLOR_WHITE;
+  G.visual_jump_color.popped_color = COLOR_WHITE;
+  G.visual_jump_color.speed = 1.3f;
+  G.visual_jump_color.cooldown = 0.4f;
+  G.visual_jump_color.min = 0.0f;
+  G.visual_jump_color.max = 0.0f;
+
+  G.visual_jump_background_color.base_color = G.default_background_color;
+  G.visual_jump_background_color.popped_color = COLOR_LIGHT_BLUE;
+  G.visual_jump_background_color.speed = 1.3f;
+  G.visual_jump_background_color.cooldown = 0.4f;
+  G.visual_jump_background_color.min = 0.4f;
+  G.visual_jump_background_color.max = 0.7f;
+
   G.default_marker_background_color.speed = 0.2f;
   G.default_marker_background_color.saturation = 0.8f;
   G.default_marker_background_color.light = 0.7f;
@@ -2138,6 +2184,64 @@ static void begin_build() {
     G.editing_panes += &G.build_result_pane;
   G.build_result_buffer.init(false, Slice::create("[Build Result]"));
   Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
+
+  COROUTINE_END;
+}
+
+static char visual_jump_highlight_keys[] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'x', 'y', 'z', '.', '/', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '{', '}', '[', ']', '\\', '\'', '-', '=', '?', ':', ';', '"', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'X', 'Y', 'Z'};
+Pos _pos_to_distance_compare;
+static int pos_distance_compare(const void *a, const void *b) {
+  return abs(((Pos*)a)->y - _pos_to_distance_compare.y) - abs(((Pos*)b)->y - _pos_to_distance_compare.y);
+}
+static void do_visual_jump() {
+  COROUTINE_BEGIN;
+
+  mode_prompt(Slice::create("jump"), do_visual_jump, PROMPT_KEY);
+  yield(wait_for_initial_key);
+  if (!G.prompt_success)
+    yield_break;
+
+  // find the chars to highlight
+  {
+    char target = (char)G.prompt_result.key;
+    Array<Pos> matches = {};
+    Rect r = G.editing_pane->buffer_viewport;
+    for (BufferRectIter it = G.editing_pane->buffer.data->getrect(r); it.next();)
+      if (*it == target)
+        matches += it.p;
+
+    // now go inside-out
+    _pos_to_distance_compare = G.editing_pane->buffer.cursors[0].pos;
+    qsort(matches.items, matches.size, sizeof(matches[0]), pos_distance_compare);
+
+    util_free(G.visual_jump_positions);
+    for (int i = 0; i < at_most(matches.size, (int)ARRAY_LEN(visual_jump_highlight_keys)); ++i)
+      G.visual_jump_positions += matches[i];
+    util_free(matches);
+
+    G.current_visual_jump_pane = G.editing_pane;
+    G.visual_jump_color.reset();
+    G.visual_jump_background_color.reset();
+  }
+
+  mode_prompt(Slice::create("jump"), do_visual_jump, PROMPT_KEY);
+  yield(wait_for_second_key);
+  if (!G.prompt_success) {
+    G.current_visual_jump_pane = 0;
+    goto done;
+  }
+
+  // go to char
+  for (int i = 0; i < at_most((int)ARRAY_LEN(visual_jump_highlight_keys), (int)G.visual_jump_positions.size); ++i) {
+    if (visual_jump_highlight_keys[i] == G.prompt_result.key) {
+      G.editing_pane->buffer.move_to(G.visual_jump_positions[i]);
+      goto done;
+    }
+  }
+
+  done:
+  util_free(G.visual_jump_positions);
+  G.current_visual_jump_pane = 0;
 
   COROUTINE_END;
 }
@@ -2398,6 +2502,7 @@ static void handle_input(Key key) {
             goto prompt_keepgoing;
           }
           goto prompt_done;
+
       }
     }
     else if (key == KEY_ESCAPE) {
@@ -2407,6 +2512,11 @@ static void handle_input(Key key) {
     else if (G.prompt_type == PROMPT_BOOLEAN && (key == 'y' || key == 'n' || key == 'Y' || key == 'N')) {
       G.prompt_success = true;
       G.prompt_result.boolean = key == 'y' || key == 'Y';
+      goto prompt_done;
+    }
+    else if (G.prompt_type == PROMPT_KEY) {
+      G.prompt_success = true;
+      G.prompt_result.key = key;
       goto prompt_done;
     }
     else
@@ -2704,6 +2814,10 @@ static void handle_input(Key key) {
 
     case CONTROL('g'):
       mode_goto_definition();
+      break;
+
+    case 's':
+      do_visual_jump();
       break;
 
     case 'r':
@@ -3055,6 +3169,8 @@ static void do_update(float dt) {
   G.active_highlight_background_color.tick(dt);
   G.bottom_pane_highlight.tick(dt);
   G.search_term_background_color.tick(dt);
+  G.visual_jump_color.tick(dt);
+  G.visual_jump_background_color.tick(dt);
 
   // update paste highlights
   for (BufferData *b : G.buffers) {
@@ -4627,6 +4743,19 @@ void Canvas::fill_background(Rect r, Color c) {
     background_colors[y*this->w + x] = c;
 }
 
+void Canvas::render_char(Pos p, Color text_color, const Color *background_color, char c) {
+  p.x -= offset.x;
+  p.y -= offset.y;
+
+  if (p.x > w || p.x < 0 || p.y > h || p.y < 0)
+    return;
+
+  chars[p.y*w + p.x] = c;
+  text_colors[p.y*w + p.x] = text_color;
+  if (background_color)
+    background_colors[p.y*w + p.x] = *background_color;
+}
+
 void Canvas::render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s) {
   if (!s.length)
     return;
@@ -4961,6 +5090,7 @@ void Pane::render_edit() {
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
 
+  // TODO: cleanup. this is super hacky, since we change the bounds, and then call numchars_x which depends on bounds
   Rect orig_bounds = bounds;
   const int header_height = 25;
   bounds.y += header_height;
@@ -4979,33 +5109,35 @@ void Pane::render_edit() {
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   {
     Canvas gutter;
-    gutter.init(_gutter_width, this->numchars_y());
-    gutter.background = *this->background_color;
+    gutter.init(_gutter_width, numchars_y());
+    gutter.background = *background_color;
     for (int y = 0, line = buf_offset.y; line < buf_y1; ++y, ++line)
       if (line < d.lines.size)
         gutter.render_strf({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, " %i", line + 1);
       else
         gutter.render_str({0, y}, &G.default_gutter_text_color, background_color, 0, _gutter_width, Slice::create(" ~"));
-    gutter.render(this->bounds.p);
+    gutter.render(bounds.p);
     util_free(gutter);
   }
 
+  buffer_viewport = {buf_offset.x, buf_offset.y, numchars_x()-_gutter_width, buf_y1 - buf_offset.y-1};
+  log_info("(%i, %i, %i, %i)\n", buffer_viewport.x, buffer_viewport.y, buffer_viewport.w, buffer_viewport.h);
+
   Canvas canvas;
-  canvas.init(this->numchars_x()-_gutter_width, this->numchars_y());
-  canvas.fill(*this->text_color, *this->background_color);
-  canvas.background = *this->background_color;
-  canvas.margin = this->margin;
+  canvas.init(buffer_viewport.w, numchars_y());
+  canvas.fill(*text_color, *background_color);
+  canvas.background = *background_color;
+  canvas.margin = margin;
   canvas.offset = buf_offset;
 
   // draw each line 
   for (int y = buf_offset.y; y < buf_y1; ++y)
-    canvas.render_str({0, y}, this->text_color, NULL, 0, -1, d.lines[y].slice);
+    canvas.render_str({0, y}, text_color, NULL, 0, -1, d.lines[y].slice);
 
   // draw syntax highlighting
-  this->render_syntax_highlight(canvas, buf_y1);
+  render_syntax_highlight(canvas, buf_y1);
 
   // draw paste highlight
-  #if 1
   for (PasteHighlight ph : d.paste_highlights) {
     if (ph.b.y < buf_offset.y || ph.a.y > buf_y1)
       continue;
@@ -5013,7 +5145,6 @@ void Pane::render_edit() {
     color.a = (u8)(ph.alpha*255.0f);
     canvas.blend_textcolor(Range{d.to_visual_pos(ph.a), d.to_visual_pos(ph.b)}, color);
   }
-  #endif
 
   // draw blame
   if (d.blame.data.size) {
@@ -5039,7 +5170,7 @@ void Pane::render_edit() {
   }
 
   // highlight the line you're on
-  const Color *highlight_background_color = G.editing_pane == this ? this->active_highlight_background_color : this->inactive_highlight_background_color;
+  const Color *highlight_background_color = G.editing_pane == this ? active_highlight_background_color : inactive_highlight_background_color;
   if (highlight_background_color)
     for (Cursor c : b.cursors)
       canvas.fill_background({d.to_visual_pos(Pos{0, c.y}), {-1, 1}}, *highlight_background_color);
@@ -5047,7 +5178,7 @@ void Pane::render_edit() {
   // highlight visual start
   if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
     for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({d.to_visual_pos({0, pos.y}), {-1, 1}}, *this->inactive_highlight_background_color);
+      canvas.fill_background({d.to_visual_pos({0, pos.y}), {-1, 1}}, *inactive_highlight_background_color);
 
   // if there is a search term, highlight that as well
   if (G.search_term.length > 0) {
@@ -5061,6 +5192,15 @@ void Pane::render_edit() {
     for (Pos pos : G.visual_start.cursors)
       canvas.fill_background({d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
 
+  // draw visual jump
+  if (G.current_visual_jump_pane == this) {
+    for (int i = 0; i < G.visual_jump_positions.size; ++i) {
+      Pos p = G.visual_jump_positions[i];
+      char placeholder = visual_jump_highlight_keys[i];
+      canvas.render_char(d.to_visual_pos(p), G.visual_jump_color.color, &G.visual_jump_background_color.color, placeholder);
+    }
+  }
+
   // draw marker
   for (Cursor c : b.cursors) {
     if (G.selected_pane == this)
@@ -5070,9 +5210,8 @@ void Pane::render_edit() {
       canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.marker_inactive_color);
   }
 
-  canvas.render(this->bounds.p + Pos{_gutter_width*G.font_width, 0});
+  canvas.render(bounds.p + Pos{_gutter_width*G.font_width, 0});
 
-  // render filename
   // render filename
   const Slice filename = d.name();
   const int header_text_size = header_height - 6;

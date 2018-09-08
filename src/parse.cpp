@@ -274,22 +274,16 @@ enum Language {
 };
 
 StaticArray<Keyword> keywords[] = {
-  // LANGUAGE_NULL
   {},
-  // LANGUAGE_C
   {cpp_keywords, ARRAY_LEN(cpp_keywords)},
-  // LANGUAGE_PYTHON
   {python_keywords, ARRAY_LEN(python_keywords)},
 };
 STATIC_ASSERT(ARRAY_LEN(keywords) == NUM_LANGUAGES, all_keywords_defined);
 
 Slice line_comments[] = {
-  // LANGUAGE_NULL
-  {},
-  // LANGUAGE_C
-  Slice::create("//"),
-  // LANGUAGE_PYTHON
-  Slice::create("#")
+  {},                  // LANGUAGE_NULL
+  Slice::create("//"), // LANGUAGE_C
+  Slice::create("#")   // LANGUAGE_PYTHON
 };
 STATIC_ASSERT(ARRAY_LEN(line_comments) == NUM_LANGUAGES, all_line_comments_defined);
 
@@ -679,6 +673,7 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
         }
 
         // check for function definition
+        // TODO: only do this when not inside function scope
         {
           // is it a keyword, then ignore (things like else if (..) is not a definition)
           for (Keyword keyword : cpp_keywords)
