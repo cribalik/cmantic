@@ -1,8 +1,6 @@
 /*
  * TODO:
  * always distinguish block selection on inner and outer?
- * enter on search does not choose the current selection
- * delete token
  * Goto definition should show entire function parameter list
  * Definition parsing should support templates
  * Fix git blame parsing (git blame doesn't re-output author etc for hashes it's already output)
@@ -2692,6 +2690,13 @@ static void handle_input(Key key) {
     break;
 
   case MODE_SEARCH: {
+    if (key == KEY_RETURN) {
+      Slice *opt = G.menu_pane.menu_get_selection();
+      if (opt) {
+        util_free(G.search_term);
+        G.search_term = String::create(*opt);
+      }
+    }
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
       buffer.jumplist_push();
       G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
@@ -2711,11 +2716,7 @@ static void handle_input(Key key) {
 
       if (G.flags.cursor_dirty) {
         util_free(G.search_term);
-        Slice *s = G.menu_pane.menu_get_selection();
-        if (s)
-          G.search_term = String::create(*s);
-        else
-          G.search_term = String::create(G.menu_buffer.lines[0].slice);
+        G.search_term = String::create(G.menu_buffer.lines[0].slice);
       }
     }
     break;}
@@ -5489,10 +5490,8 @@ static void test_update() {
   #endif
 }
 
-#if 1
 #include <type_traits>
 STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
-#endif
 
 static void handle_pending_removes() {
   // remove panes
