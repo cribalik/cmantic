@@ -3086,7 +3086,6 @@ static void handle_input(Key key) {
       mode_menu();
       break;
 
-    #if 1
     case 'v':
       G.visual_entire_line = false;
       util_free(G.visual_start.cursors);
@@ -3094,7 +3093,6 @@ static void handle_input(Key key) {
         G.visual_start.cursors += c.pos;
       G.visual_start.buffer = G.editing_pane->buffer.data;
       break;
-    #endif
 
     case 'd':
       // visual delete?
@@ -5121,7 +5119,6 @@ void Pane::render_edit() {
   }
 
   buffer_viewport = {buf_offset.x, buf_offset.y, numchars_x()-_gutter_width, buf_y1 - buf_offset.y-1};
-  log_info("(%i, %i, %i, %i)\n", buffer_viewport.x, buffer_viewport.y, buffer_viewport.w, buffer_viewport.h);
 
   Canvas canvas;
   canvas.init(buffer_viewport.w, numchars_y());
