@@ -2270,7 +2270,7 @@ static void begin_build() {
   COROUTINE_END;
 }
 
-static char visual_jump_highlight_keys[] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'x', 'y', 'z', '.', '/', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '{', '}', '[', ']', '\\', '\'', '-', '=', '?', ':', ';', '"', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'X', 'Y', 'Z'};
+static char visual_jump_highlight_keys[] = {'a', 's', 'd', 'f', ' ', 'h', 'j', 'k', 'l', 'q', 'w', 'e', 'r', 'u', 'i', 'o', 'p', ',', '.', 'z', 'x', 'c', 'v', 'm', 'n', 't', 'y', 'b', '/', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '{', '}', '[', ']', '\\', '\'', '-', '=', '?', ':', ';', '"', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'X', 'Y', 'Z'};
 Pos _pos_to_distance_compare;
 static int pos_distance_compare(const void *a, const void *b) {
   return abs(((Pos*)a)->y - _pos_to_distance_compare.y) - abs(((Pos*)b)->y - _pos_to_distance_compare.y);
@@ -2939,7 +2939,7 @@ static void handle_input(Key key) {
       mode_goto_definition();
       break;
 
-    case 's':
+    case 'f':
       do_visual_jump();
       break;
 
@@ -5320,15 +5320,6 @@ void Pane::render_edit() {
     for (Pos pos : G.visual_start.cursors)
       canvas.fill_background({d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
 
-  // draw visual jump
-  if (G.current_visual_jump_pane == this) {
-    for (int i = 0; i < G.visual_jump_positions.size; ++i) {
-      Pos p = G.visual_jump_positions[i];
-      char placeholder = visual_jump_highlight_keys[i];
-      canvas.render_char(d.to_visual_pos(p), G.visual_jump_color.color, &G.visual_jump_background_color.color, placeholder);
-    }
-  }
-
   // draw marker
   for (Cursor c : b.cursors) {
     if (G.selected_pane == this)
@@ -5336,6 +5327,15 @@ void Pane::render_edit() {
       canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
     else if (G.bottom_pane != this)
       canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.marker_inactive_color);
+  }
+
+  // draw visual jump
+  if (G.current_visual_jump_pane == this) {
+    for (int i = 0; i < G.visual_jump_positions.size; ++i) {
+      Pos p = G.visual_jump_positions[i];
+      char placeholder = visual_jump_highlight_keys[i];
+      canvas.render_char(d.to_visual_pos(p), G.visual_jump_color.color, &G.visual_jump_background_color.color, placeholder);
+    }
   }
 
   canvas.render(bounds.p + Pos{_gutter_width*G.font_width, 0});
