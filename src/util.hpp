@@ -895,9 +895,12 @@ struct Slice {
     if (i >= length)
       return {};
 
+    while (i < length && chars[i] == c)
+      ++i;
+    int start = i;
     while (i < length && chars[i] != c)
       ++i;
-    Slice s = {chars + *offset, i - *offset};
+    Slice s = {chars + start, i - start};
     while (i < length && chars[i] == c)
       ++i;
     *offset = i;
@@ -915,9 +918,12 @@ struct Slice {
     if (i >= length)
       return {};
 
+    while (i < length && contains(c, chars[i]))
+      ++i;
+    int start = i;
     while (i < length && !contains(c, chars[i]))
       ++i;
-    Slice s = {chars + *offset, i - *offset};
+    Slice s = {chars + start, i - start};
     while (i < length && contains(c, chars[i]))
       ++i;
     *offset = i;

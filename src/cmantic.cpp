@@ -609,6 +609,7 @@ struct BufferView {
   void goto_beginline();
   void delete_line() {data->delete_line(cursors);}
   void remove_range(Pos a, Pos b, int cursor_idx) {data->remove_range(cursors, a, b, cursor_idx);}
+  void remove_range(int y0, int y1, int cursor_idx) {data->remove_range(cursors, Pos{0, min(y0,y1)}, Pos{0, max(y1,y0)+1}, cursor_idx);}
   void remove_range(Range r, int cursor_idx) {remove_range(r.a, r.b, cursor_idx);}
   void remove_trailing_whitespace();
   void remove_trailing_whitespace(int cursor_idx) {data->remove_trailing_whitespace(cursors, cursor_idx);}
@@ -2574,6 +2575,24 @@ static bool do_delete_movement(Key key) {
   return false;
 }
 
+static void do_delete_visual() {
+  BufferView &buffer = G.editing_pane->buffer;
+  buffer.action_begin();
+
+  for (int i = 0; i < G.visual_start.cursors.size; ++i) {
+    Pos pa = G.visual_start.cursors[i];
+    Pos pb = buffer.cursors[i].pos;
+    if (G.visual_entire_line)
+      buffer.remove_range(pa.y, pb.y, i);
+    else
+      buffer.remove_range(pa, pb, i);
+  }
+
+  util_free(G.visual_start);
+
+  buffer.action_end();
+}
+
 static void handle_input(Key key) { 
   BufferView &buffer = G.editing_pane->buffer;
 
@@ -3020,7 +3039,6 @@ static void handle_input(Key key) {
           for (int y = y0; y <= y1; ++y)
             buffer.autoindent(y);
         }
-        util_free(G.visual_start);
       }
       else
         buffer.autoindent();
@@ -3037,15 +3055,33 @@ static void handle_input(Key key) {
 
     case '>':
       buffer.action_begin();
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.add_indent(buffer.cursors[i].y, 1);
+      if (check_visual_start(buffer)) {
+        for (int i = 0; i < buffer.cursors.size; ++i) {
+          int y0 = min(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          int y1 = max(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          for (int y = y0; y <= y1; ++y)
+            buffer.add_indent(y, 1);
+        }
+      }
+      else
+        for (int i = 0; i < buffer.cursors.size; ++i)
+          buffer.add_indent(buffer.cursors[i].y, 1);
       buffer.action_end();
       break;
 
     case '<':
       buffer.action_begin();
-      for (int i = 0; i < buffer.cursors.size; ++i)
-        buffer.add_indent(buffer.cursors[i].y, -1);
+      if (check_visual_start(buffer)) {
+        for (int i = 0; i < buffer.cursors.size; ++i) {
+          int y0 = min(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          int y1 = max(G.visual_start.cursors[i].y, buffer.cursors[i].y);
+          for (int y = y0; y <= y1; ++y)
+            buffer.add_indent(y, -1);
+        }
+      }
+      else
+        for (int i = 0; i < buffer.cursors.size; ++i)
+          buffer.add_indent(buffer.cursors[i].y, -1);
       buffer.action_end();
       break;
 
@@ -3057,7 +3093,6 @@ static void handle_input(Key key) {
           int y1 = max(G.visual_start.cursors[i].y, buffer.cursors[i].y);
           toggle_comment(buffer, y0, y1, i);
         }
-        util_free(G.visual_start);
       }
       else
         for (int i = 0; i < buffer.cursors.size; ++i)
@@ -3104,7 +3139,11 @@ static void handle_input(Key key) {
       break;
 
     case 'p':
+      buffer.action_begin();
+      if (check_visual_start(buffer))
+        do_delete_visual();
       do_paste();
+      buffer.action_end();
       break;
 
     case 'm': {
@@ -3269,24 +3308,7 @@ static void handle_input(Key key) {
     case 'd':
       // visual delete?
       if (check_visual_start(buffer)) {
-        buffer.action_begin();
-
-        for (int i = 0; i < G.visual_start.cursors.size; ++i) {
-          Pos pa = G.visual_start.cursors[i];
-          Pos pb = buffer.cursors[i].pos;
-          if (pb < pa)
-            swap_range(*buffer.data, pa, pb);
-          if (G.visual_entire_line) {
-            pa.x = 0;
-            pb.x = 0;
-            ++pb.y;
-          }
-          buffer.remove_range(pa, pb, i);
-        }
-
-        util_free(G.visual_start);
-
-        buffer.action_end();
+        do_delete_visual();
         break;
       }
 
@@ -3295,9 +3317,9 @@ static void handle_input(Key key) {
 
     case 'V':
       G.visual_entire_line = true;
+      buffer.collapse_cursors();
       util_free(G.visual_start);
-      for (Cursor c : G.editing_pane->buffer.cursors)
-        G.visual_start.cursors += c.pos;
+      G.visual_start.cursors += buffer.cursors[0].pos;
       G.visual_start.buffer = G.editing_pane->buffer.data;
       break;
 
@@ -3513,8 +3535,16 @@ String BufferData::get_merged_range(Range r) const {
 
   StringBuffer sb = {};
   sb += lines[r.a.y](r.a.x, -1);
-  for (int y = r.a.y+1; y < r.b.y; ++y)
-    sb += lines[y](0, -1);
+  sb += ' ';
+  for (int y = r.a.y+1; y < r.b.y; ++y) {
+    // skip whitespace
+    int x = 0;
+    Slice s = lines[y].token(&x, ' ');
+    if (!s.length)
+      continue;
+    sb += lines[y](s.chars - lines[y].chars, -1);
+    sb += ' ';
+  }
   sb += lines[r.b.y](0, r.b.x);
   return sb.string;
 }
@@ -4203,8 +4233,10 @@ UPDATE_CURSORS(move_cursors_on_insert, move_on_insert)
 UPDATE_CURSORS(move_cursors_on_delete, move_on_delete)
 
 void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx) {
+  log_info("before: (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
   if (b <= a)
-    return;
+    swap_range(*this, a, b);
+  log_info("after:  (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
 
   action_begin(cursors);
   G.flags.cursor_dirty = true;
