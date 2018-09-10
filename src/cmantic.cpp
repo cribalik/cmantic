@@ -380,6 +380,7 @@ struct BufferData {
   Range* getdefinition(Slice s);
   Slice getslice(Pos a, Pos b) {return lines[a.y](a.x, b.x);} // range is inclusive
   Slice getslice(Range r) const {return lines[r.a.y](r.a.x, r.b.x);} // range is inclusive
+  String get_merged_range(Range r) const;
   BufferRectIter getrect(Rect r) {return BufferRectIter{r.p, lines, {r.x, r.y, r.w, at_most(r.y+r.h, lines.size-1) - r.y}};}
   bool modified() {return is_bound_to_file() && _next_undo_action != _last_save_undo_action;}
   void raw_begin() {++_raw_mode_depth;}
@@ -1443,11 +1444,31 @@ static Array<String> get_goto_definition_suggestions() {
 
   Array<int> matches;
   easy_fuzzy_match(G.menu_buffer.lines[0].slice, view(defs), false, &matches);
+  util_free(defs);
 
   Array<String> result = {};
-  for (int i : matches)
-    result += String::create(defs[i]);
-  util_free(defs);
+  for (int i : matches) {
+    // find entire function definition
+    Range start = b.parser.definitions[i];
+    TokenInfo *t = b.gettoken(start.b);
+    if (t->token != '(') {
+      result += b.get_merged_range(start);
+      continue;
+    }
+
+    int depth = 0;
+    for (; t != b.parser.tokens.end(); ++t) {
+      if (t->token == '(') ++depth;
+      if (t->token == ')') --depth;
+      if (depth == 0)
+        break;
+    }
+    if (t == b.parser.tokens.end()) {
+      result += b.get_merged_range(start);
+      continue;
+    }
+    result += b.get_merged_range({start.a, t->b});
+  }
 
   G.definition_positions.size = 0;
   for (int i : matches)
@@ -2267,7 +2288,7 @@ static void begin_build() {
 
   // build arg list
   if (!G.build_command.length) {
-    status_message_set("No build command set. Please set with :set-build-command");
+    status_message_set("No build command set. Please set with :set build command");
     yield_break;
   }
 
@@ -2764,23 +2785,16 @@ static void handle_input(Key key) {
     }
 
     if (key == KEY_RETURN) {
-      Slice* opt = G.menu_pane.menu_get_selection();
-      if (!opt) {
+      int opt = G.menu_pane.menu_get_selection_idx();
+      if (opt == -1) {
         status_message_set("\"{}\": No such file", (Slice)G.menu_buffer[0].slice);
         mode_normal(false);
         break;
       }
 
-      // TODO: do something better here
-      Range *def = buffer.data->getdefinition(*opt);
-      if (!def) {
-        mode_normal(true);
-        break;
-      }
-
       // G.editing_pane->add_subpane(buffer.data, def->a);
       buffer.jumplist_push();
-      buffer.move_to(def->a);
+      buffer.move_to(G.definition_positions[opt]);
       buffer.jumplist_push();
       mode_normal(true);
       break;
@@ -2788,6 +2802,7 @@ static void handle_input(Key key) {
 
     handle_menu_insert(key);
 
+    // update selection
     int i = G.menu_pane.menu_get_selection_idx();
     if (i != -1)
       G.editing_pane->buffer.move_to(G.definition_positions[i]);
@@ -3490,6 +3505,18 @@ void util_free(BufferData &b) {
   util_free(b.parser);
   util_free(b._undo_actions);
   b.paste_highlights.free_shallow();
+}
+
+String BufferData::get_merged_range(Range r) const {
+  if (r.a.y == r.b.y)
+    return String::create(getslice(r));
+
+  StringBuffer sb = {};
+  sb += lines[r.a.y](r.a.x, -1);
+  for (int y = r.a.y+1; y < r.b.y; ++y)
+    sb += lines[y](0, -1);
+  sb += lines[r.b.y](0, r.b.x);
+  return sb.string;
 }
 
 bool BufferData::reload(BufferData *b) {
