@@ -2295,7 +2295,7 @@ static void begin_build() {
   COROUTINE_END;
 }
 
-static char visual_jump_highlight_keys[] = {'a', 's', 'd', 'f', ' ', 'h', 'j', 'k', 'l', 'q', 'w', 'e', 'r', 'u', 'i', 'o', 'p', ',', '.', 'z', 'x', 'c', 'v', 'm', 'n', 't', 'y', 'b', '/', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '{', '}', '[', ']', '\\', '\'', '-', '=', '?', ':', ';', '"', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'X', 'Y', 'Z'};
+static char visual_jump_highlight_keys[] = {'a', 's', 'd', 'f', 'h', 'j', 'k', 'l', 'q', 'w', 'e', 'r', 'u', 'i', 'o', 'p', ',', '.', 'z', 'x', 'c', 'v', 'm', 'n', 't', 'y', 'b', '/', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '{', '}', '[', ']', '\\', '\'', '-', '=', '?', ':', ';', '"', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'X', 'Y', 'Z'};
 Pos _pos_to_distance_compare;
 static int pos_distance_compare(const void *a, const void *b) {
   return abs(((Pos*)a)->y - _pos_to_distance_compare.y) - abs(((Pos*)b)->y - _pos_to_distance_compare.y);
