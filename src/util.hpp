@@ -90,8 +90,8 @@ template<class T> union Array;
 template<class T> struct View;
 template<class T> union StrideView;
 template<class T> void util_free(Array<T> &);
-#define ALIGN(ptr, n) (void*)(((long)(ptr)+((n)-1)) & ~((n)-1))
-#define ALIGNI(ptr, n) (((long)(ptr)+((n)-1)) & ~((n)-1))
+#define ALIGN(ptr, n) (void*)(((uintptr_t)(ptr)+((n)-1)) & ~((n)-1))
+#define ALIGNI(ptr, n) (((uintptr_t)(ptr)+((n)-1)) & ~((n)-1))
 #define CONTAINEROF(ptr, type, member) ((type*)((char*)ptr - offsetof(type, member)))
 #define CAST(type, val) (*(type*)(&(val)))
 #define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
