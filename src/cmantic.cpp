@@ -1688,61 +1688,73 @@ static bool insert_default(Pane &p, Key key) {
   return false;
 }
 
+static void move_to_left_brace(const BufferView &buffer, char leftbrace, char rightbrace, Pos *pos) {
+  Pos p = *pos;
+  int depth = 0;
+  TokenInfo *t = buffer.data->gettoken(p);
+  if (!t || t->token == TOKEN_EOF)
+    return;
+  
+  bool allow_inner_blocks = t->token != rightbrace;
+  if (t->token == leftbrace && t->a < p) {
+    *pos = t->a;
+    return;
+  }
+  if (t->token == leftbrace || t->token == rightbrace)
+    --t;
+  for (; t >= buffer.data->parser.tokens.begin(); --t) {
+    if (t->token == rightbrace)
+      ++depth;
+    if (t->token == leftbrace) {
+      --depth;
+      if (depth < 0 || (allow_inner_blocks && depth == 0)) {
+        *pos = t->a;
+        return;
+      }
+    }
+  }
+}
+
+static void move_to_right_brace(const BufferView &buffer, char leftbrace, char rightbrace, Pos *pos) {
+  Pos p = *pos;
+  int depth = 0;
+  TokenInfo *t = buffer.data->gettoken(p);
+  if (!t || t->token == TOKEN_EOF)
+    return;
+  
+  bool allow_inner_blocks = t->token != rightbrace;
+  if (t && t->token == rightbrace && p < t->a) {
+    *pos = t->a;
+    return;
+  }
+  if (t && (t->token == leftbrace || t->token == rightbrace))
+    ++t;
+  for (; t < buffer.data->parser.tokens.end(); ++t) {
+    if (t->token == leftbrace) 
+      ++depth;
+    if (t->token == rightbrace) {
+      --depth;
+      if (depth < 0 || (allow_inner_blocks && depth == 0)) {
+        *pos = t->a;
+        return;
+      }
+    }
+  }
+}
+
 static void move_to_left_brace(BufferView &buffer, char leftbrace, char rightbrace) {
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
-    int depth = 0;
-    TokenInfo *t = buffer.data->gettoken(p);
-    if (!t || t->token == TOKEN_EOF)
-      continue;
-
-    bool allow_inner_blocks = t->token != rightbrace;
-    if (t->token == leftbrace && t->a < p) {
-      buffer.move_to(i, t->a);
-      continue;
-    }
-    if (t->token == leftbrace || t->token == rightbrace)
-      --t;
-    for (; t >= buffer.data->parser.tokens.begin(); --t) {
-      if (t->token == rightbrace)
-        ++depth;
-      if (t->token == leftbrace) {
-        --depth;
-        if (depth < 0 || (allow_inner_blocks && depth == 0)) {
-          buffer.move_to(i, t->a);
-          break;
-        }
-      }
-    }
+    move_to_left_brace(buffer, leftbrace, rightbrace, &p);
+    buffer.move_to(i, p);
   }
 }
 
 static void move_to_right_brace(BufferView &buffer, char leftbrace, char rightbrace) {
   for (int i = 0; i < buffer.cursors.size; ++i) {
     Pos p = buffer.cursors[i].pos;
-    int depth = 0;
-    TokenInfo *t = buffer.data->gettoken(p);
-    if (!t || t->token == TOKEN_EOF)
-      continue;
-
-    bool allow_inner_blocks = t->token != rightbrace;
-    if (t && t->token == rightbrace && p < t->a) {
-      buffer.move_to(i, t->a);
-      continue;
-    }
-    if (t && (t->token == leftbrace || t->token == rightbrace))
-      ++t;
-    for (; t < buffer.data->parser.tokens.end(); ++t) {
-      if (t->token == leftbrace) 
-        ++depth;
-      if (t->token == rightbrace) {
-        --depth;
-        if (depth < 0 || (allow_inner_blocks && depth == 0)) {
-          buffer.move_to(i, t->a);
-          break;
-        }
-      }
-    }
+    move_to_right_brace(buffer, leftbrace, rightbrace, &p);
+    buffer.move_to(i, p);
   }
 }
 
@@ -2024,19 +2036,19 @@ static void state_init() {
   G.bottom_pane_highlight.min = 0.05f;
   G.bottom_pane_highlight.max = 0.15f;
 
-  G.visual_jump_color.base_color = COLOR_WHITE;
-  G.visual_jump_color.popped_color = COLOR_WHITE;
+  G.visual_jump_color.base_color = COLOR_BLACK;
+  G.visual_jump_color.popped_color = COLOR_BLACK;
   G.visual_jump_color.speed = 1.3f;
   G.visual_jump_color.cooldown = 0.4f;
   G.visual_jump_color.min = 0.0f;
   G.visual_jump_color.max = 0.0f;
 
   G.visual_jump_background_color.base_color = G.default_background_color;
-  G.visual_jump_background_color.popped_color = COLOR_LIGHT_BLUE;
+  G.visual_jump_background_color.popped_color = COLOR_PINK;
   G.visual_jump_background_color.speed = 1.3f;
   G.visual_jump_background_color.cooldown = 0.4f;
-  G.visual_jump_background_color.min = 0.4f;
-  G.visual_jump_background_color.max = 0.7f;
+  G.visual_jump_background_color.min = 1.0f;
+  G.visual_jump_background_color.max = 1.0f;
 
   G.default_marker_background_color.speed = 0.2f;
   G.default_marker_background_color.saturation = 0.8f;
@@ -2365,31 +2377,10 @@ static bool do_paste() {
   return true;
 }
 
-static bool do_delete_movement(Key key) {
-  BufferView &buffer = G.editing_pane->buffer;
+static bool get_action_selection(BufferView &buffer, Key key, Array<Range> *result) {
+  Array<Range> selections = {};
 
-  // TODO: is it more performant to check if it is a movement command first?
-  buffer.action_begin();
-  Array<Cursor> cursors = buffer.cursors.copy_shallow();
   switch (key) {
-    // delete line
-    case 'd':
-      buffer.delete_line();
-      break;
-
-    #if 0
-    // delete block
-    case 'b': {
-      move_to_right_brace(buffer, '{', '}', true);
-      buffer.advance();
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        if (buffer.getchar(i) == ';')
-          buffer.advance(i);
-        buffer.remove_range(cursors[i].pos, buffer.cursors[i].pos, i);
-      }
-      break;}
-    #endif
-
     case 'p': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         int depth = 0;
@@ -2447,24 +2438,76 @@ static bool do_delete_movement(Key key) {
           }
         }
 
-        buffer.remove_range(a, b, i);
+        selections += {a, b};
+      }
+      break;}
+
+    case '}': {
+      for (Cursor c : buffer.cursors) {
+        Range r = {c.pos, c.pos};
+        move_to_right_brace(buffer, '{', '}', &r.b);
+        buffer.advance(r.b);
+        selections += r;
+      }
+      break;}
+
+    case ')': {
+      for (Cursor c : buffer.cursors) {
+        Range r = {c.pos, c.pos};
+        move_to_right_brace(buffer, '(', ')', &r.b);
+        buffer.advance(r.b);
+        selections += r;
+      }
+      break;}
+
+    case ']': {
+      for (Cursor c : buffer.cursors) {
+        Range r = {c.pos, c.pos};
+        move_to_right_brace(buffer, '[', ']', &r.b);
+        buffer.advance(r.b);
+        selections += r;
       }
       break;}
 
     default:
-      if (!movement_default(buffer, key))
-        goto fail;
-      if (cursors.size != buffer.cursors.size)
-        goto fail;
-      // delete movement range
-      for (int i = 0; i < cursors.size; ++i) {
-        Pos a = cursors[i].pos;
-        Pos b = buffer.cursors[i].pos;
-        if (b < a)
-          swap_range(*buffer.data,a,b);
-        buffer.remove_range(a, b, i);
-      }
-      break;
+      goto fail;
+  }
+  *result = selections;
+  return true;
+
+  fail:
+  util_free(selections);
+  return false;
+}
+
+static bool do_delete_movement(Key key) {
+  BufferView &buffer = G.editing_pane->buffer;
+
+  // TODO: is it more performant to check if it is a movement command first?
+  buffer.action_begin();
+  Array<Cursor> cursors = buffer.cursors.copy_shallow();
+
+  // first try selection (p for parameter, d for line etc)
+  Array<Range> selections = {};
+  if (get_action_selection(buffer, key, &selections)) {
+    for (int i = 0; i < selections.size; ++i)
+      buffer.remove_range(selections[i].a, selections[i].b, i);
+    util_free(selections);
+  }
+  else if (movement_default(buffer, key)) {
+    if (cursors.size != buffer.cursors.size)
+      goto fail;
+    // delete movement range
+    for (int i = 0; i < cursors.size; ++i) {
+      Pos a = cursors[i].pos;
+      Pos b = buffer.cursors[i].pos;
+      if (b < a)
+        swap_range(*buffer.data,a,b);
+      buffer.remove_range(a, b, i);
+    }
+  }
+  else {
+    goto fail;
   }
 
   buffer.action_end();
