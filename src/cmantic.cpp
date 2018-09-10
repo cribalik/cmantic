@@ -1,5 +1,10 @@
 /*
  * TODO:
+ * We don't need to rewrite the whole tokenization on edit, just the y-range that changed.
+ *     Also we should do it on every insert/delete, so that bugs like
+ *     'o' autoindenting on the old line, get fixed
+ *
+ * Code folding
  * always distinguish block selection on inner and outer?
  * Goto definition should show entire function parameter list
  * Definition parsing should support templates
@@ -8,11 +13,9 @@
  * Have a global unified list of Locations/cursors
  * listen on file changes and automatically reload (or show a warning?)
  * Search on word only
- * We don't need to rewrite the whole tokenization on edit, just the y-range that changed
  * Create an easy-to-use token iterator
  * make 'dp' use tokens instead of chars
  * dropdown_autocomplete should not delete characters (it ruins paste)
- * Folding
  * Buffer::advance should return success instead of err
  * project-wide grep
  * project-wide goto definition
@@ -63,6 +66,12 @@ struct Pos {
       return x <= p.x;
     return y <= p.y;
   }
+  bool operator>(Pos p) {
+    return p < *this;
+  }
+  bool operator>=(Pos p) {
+    return p <= *this;
+  }
 };
 
 void util_free(Pos) {}
@@ -70,6 +79,10 @@ void util_free(Pos) {}
 struct Range {
   Pos a;
   Pos b;
+
+  bool contains(Pos p) {
+    return p >= a && p < b;
+  }
 };
 
 #include "parse.cpp"
@@ -381,7 +394,7 @@ struct BufferData {
   bool find_r(char c, int stay, Pos *pos);
   bool find(Slice s, bool stay, Pos *pos);
   bool find(char c, bool stay, Pos *pos);
-  bool find_start_of_identifier(Pos p, Pos *pout);
+  TokenInfo* find_start_of_identifier(Pos p);
   void insert(Array<Cursor> &cursors, Slice s);
   void insert(Array<Cursor> &cursors, Pos p, Slice s, int cursor_idx = -1);
   void insert(Array<Cursor> &cursors, Slice s, int cursor_idx);
@@ -595,6 +608,7 @@ struct BufferView {
   void goto_beginline();
   void delete_line() {data->delete_line(cursors);}
   void remove_range(Pos a, Pos b, int cursor_idx) {data->remove_range(cursors, a, b, cursor_idx);}
+  void remove_range(Range r, int cursor_idx) {remove_range(r.a, r.b, cursor_idx);}
   void remove_trailing_whitespace();
   void remove_trailing_whitespace(int cursor_idx) {data->remove_trailing_whitespace(cursors, cursor_idx);}
   void autoindent(const int y) {data->autoindent(cursors, y);}
@@ -1173,6 +1187,24 @@ static void menu_option_set_build_command() {
   COROUTINE_END;
 }
 
+static void menu_option_set_indent() {
+  COROUTINE_BEGIN;
+
+  mode_prompt(Slice::create("Set indent"), menu_option_set_indent, PROMPT_INT);
+  yield(check_prompt_result);
+  if (!G.prompt_success)
+    yield_break;
+  
+  if (G.prompt_result.integer < 0) {
+    status_message_set("Tab size must be >= 0");
+    yield_break;
+  }
+  
+  G.default_tab_type = G.prompt_result.integer;
+  G.editing_pane->buffer.data->tab_type = G.prompt_result.integer;
+  COROUTINE_END;
+}
+
 static void menu_option_blame() {
   COROUTINE_BEGIN;
 
@@ -1276,6 +1308,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("set build command"),
     Slice::create("set build command"),
     menu_option_set_build_command
+  },
+  {
+    Slice::create("set indent"),
+    Slice::create("set indentation. > 0 for spaces, 0 for tabs"),
+    menu_option_set_indent
   }
 };
 
@@ -1389,13 +1426,12 @@ static void mode_cwd() {
 static void mode_prompt(Slice msg, void (*callback)(void), PromptType type) {
   mode_cleanup();
   G.mode = MODE_PROMPT;
-  G.menu_pane.menu.prefix = msg;
   G.prompt_type = type;
   G.prompt_callback = callback;
 
   G.selected_pane = &G.menu_pane;
   G.bottom_pane = &G.menu_pane;
-  G.menu_pane.menu_init(Slice{});
+  G.menu_pane.menu_init(msg);
 }
 
 static Array<String> get_goto_definition_suggestions() {
@@ -1555,35 +1591,23 @@ static int pixel2chary(int y) {
   return y/G.line_height;
 }
 
-bool BufferData::find_start_of_identifier(Pos pos, Pos *pout) {
-  *pout = pos;
-  advance_r(*pout);
-  Utf8char c = getchar(*pout);
-
-  if (!is_identifier_tail(c) && !is_identifier_head(c))
-    return false;
-
-  while (is_identifier_tail(getchar(*pout)))
-    if (advance_r(*pout))
-      return true;
-  if (!is_identifier_head(getchar(*pout)))
-    advance(*pout);
-  if (pout->y != pos.y)
-    pout->y = pos.y,
-    pout->x = 0;
-  return true;
+TokenInfo* BufferData::find_start_of_identifier(Pos pos) {
+  advance_r(pos);
+  TokenInfo *t = gettoken(pos);
+  if (t == parser.tokens.end() || t->token != TOKEN_IDENTIFIER || !t->r.contains(pos))
+    return 0;
+  return t;
 }
 
 static bool dropdown_autocomplete(BufferView &b) {
   if (G.dropdown_buffer.isempty())
     return false;
 
-  Pos start;
-  if (!b.data->find_start_of_identifier(b.cursors[0].pos, &start))
+  TokenInfo *t = b.data->find_start_of_identifier(b.cursors[0].pos);
+  if (!t)
     return false;
   b.action_begin();
-  for (int i = b.cursors[0].x - start.x; i; --i)
-    b.data->delete_char(b.cursors);
+  b.remove_range(t->r, 0);
   b.insert(G.dropdown_buffer[G.dropdown_pane.buffer.cursors[0].y].slice);
   b.action_end();
   return true;
@@ -1598,12 +1622,14 @@ static void render_dropdown(Pane *pane) {
 
   // we have to be on an identifier
   Pos identifier_start;
-  if (!b.data->find_start_of_identifier(b.cursors[0].pos, &identifier_start))
+  TokenInfo *t = b.data->find_start_of_identifier(b.cursors[0].pos);
+  if (!t)
     return;
+  identifier_start = t->a;
 
   // since fuzzy matching is expensive, we only update we moved since last time
   if (G.flags.cursor_dirty) {
-    Slice identifier = b.data->gettoken(identifier_start)->str;
+    Slice identifier = t->str;
     StackArray<FuzzyMatch, 10> best_matches;
     View<Slice> input = VIEW(b.data->parser.identifiers, slice);
     best_matches.size = fuzzy_match(identifier, input, view(best_matches), true);
@@ -1620,8 +1646,7 @@ static void render_dropdown(Pane *pane) {
   // resize dropdown pane
   int max_width = ARRAY_MAXVAL_BY(G.dropdown_buffer.lines, length);
 
-  G.dropdown_pane.bounds.size =
-    char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
+  G.dropdown_pane.bounds.size = char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
   G.dropdown_pane.bounds.h = at_most(G.dropdown_pane.bounds.h, G.win_height - 10*G.line_height);
 
   // position pane
@@ -2469,6 +2494,14 @@ static bool get_action_selection(BufferView &buffer, Key key, Array<Range> *resu
       }
       break;}
 
+    case '"':
+      for (Cursor c : buffer.cursors) {
+        TokenInfo *t = buffer.data->gettoken(c.pos);
+        if (t != buffer.data->parser.tokens.end() && t->token == TOKEN_STRING && t->r.contains(c.pos))
+          selections += t->r;
+      }
+      break;
+
     default:
       goto fail;
   }
@@ -2974,8 +3007,9 @@ static void handle_input(Key key) {
         }
         util_free(G.visual_start);
       }
+      else
+        buffer.autoindent();
       buffer.action_end();
-      buffer.autoindent();
       break;
 
     case CONTROL('o'):
@@ -3569,27 +3603,28 @@ Range* BufferData::getdefinition(Slice s) {
   return 0;
 }
 
+#if 0
+// if no token at pos, gets the next token
 TokenInfo* BufferData::gettoken(Pos p) {
   for (int i = 0; i < parser.tokens.size; ++i)
     if (p < parser.tokens[i].b)
       return &parser.tokens[i];
   return parser.tokens.end();
 }
-
-#if 0
+#else
 TokenInfo* BufferData::gettoken(Pos p) {
   int a = 0, b = parser.tokens.size-1;
 
   while (a <= b) {
     int mid = (a+b)/2;
-    if (parser.tokens[mid].a <= p && p < parser.tokens[mid].b)
+    if ((mid == 0 || parser.tokens[mid-1].b <= p) && p < parser.tokens[mid].b)
       return &parser.tokens[mid];
     if (parser.tokens[mid].a < p)
       a = mid+1;
     else
       b = mid-1;
   }
-  return 0;
+  return parser.tokens.end();
 }
 #endif
 
@@ -5038,7 +5073,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
   TokenInfo *t = b.data->gettoken(pos);
 
   if (t) {
-    for (; t < b.data->parser.tokens.end() && t->a.y <= y1; ++t) {
+    for (; t < b.data->parser.tokens.end() && t->a.y < y1; ++t) {
       if (t->token == TOKEN_NULL)
         break;
       switch (t->token) {
@@ -5088,7 +5123,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
 
   // syntax highlight definitions
   for (Range r : buffer.data->parser.definitions) {
-    if (r.a.y > y1)
+    if (r.a.y >= y1)
       break;
     if (r.b.y < y0)
       continue;

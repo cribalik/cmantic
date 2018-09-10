@@ -2095,24 +2095,18 @@ static bool call_async(const char *command[], Stream *output) {
   return true;
 
   err_5:
-  log_info("err_5:");
   CloseHandle(process_info.hProcess);
   CloseHandle(process_info.hThread);
   err_4:
-  log_info("err_4:");
   CloseHandle(our_pipe);
   err_3:
-  log_info("err_3:");
   CloseHandle(info.hStdError);
   err_2:
-  log_info("err_2:");
   CloseHandle(info.hStdOutput);
   err_1:
-  log_info("err_1:");
   if (shared_pipe != INVALID_HANDLE_VALUE)
     CloseHandle(shared_pipe);
   err:
-  log_info("err:");
   util_free(cmd);
   return false;
 }
