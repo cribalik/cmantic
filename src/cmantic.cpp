@@ -259,6 +259,14 @@ union Cursor {
   bool operator==(Cursor c) {
     return c.pos == pos && c.ghost_x == ghost_x;
   }
+
+  static Cursor create(int x, int y) {
+    Cursor c;
+    c.x = x;
+    c.y = y;
+    c.ghost_x = x;
+    return c;
+  }
 };
 
 void util_free(Cursor) {}
@@ -1315,7 +1323,7 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("set indent"),
     Slice::create("set indentation. > 0 for spaces, 0 for tabs"),
     menu_option_set_indent
-  }
+  },
 };
 
 static void mode_cleanup() {
@@ -3147,9 +3155,20 @@ static void handle_input(Key key) {
       break;
 
     case 'm': {
-      int i = buffer.cursors.size;
-      buffer.cursors.push(buffer.cursors[i-1]);
-      buffer.move_y(i, 1);
+      if (check_visual_start(buffer)) {
+        buffer.collapse_cursors();
+        int y0 = min(buffer.cursors[0].y, G.visual_start.cursors[0].y);
+        int y1 = max(buffer.cursors[0].y, G.visual_start.cursors[0].y);
+        buffer.cursors[0] = Cursor::create(0, y0);
+        for (int y = y0+1; y <= y1; ++y)
+          buffer.cursors.push(Cursor::create(0, y));
+        util_free(G.visual_start);
+      }
+      else {
+        int i = buffer.cursors.size;
+        buffer.cursors.push(buffer.cursors[i-1]);
+        buffer.move_y(i, 1);
+      }
       break;}
 
     case CONTROL('w'): {
@@ -4233,10 +4252,10 @@ UPDATE_CURSORS(move_cursors_on_insert, move_on_insert)
 UPDATE_CURSORS(move_cursors_on_delete, move_on_delete)
 
 void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx) {
-  log_info("before: (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
+  // log_info("before: (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
   if (b <= a)
     swap_range(*this, a, b);
-  log_info("after:  (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
+  // log_info("after:  (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
 
   action_begin(cursors);
   G.flags.cursor_dirty = true;
