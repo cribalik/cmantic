@@ -8,8 +8,6 @@ enum Token {
   TOKEN_STRING              = -4,
   TOKEN_STRING_BEGIN        = -6,
   TOKEN_BLOCK_COMMENT       = -7,
-  TOKEN_BLOCK_COMMENT_BEGIN = -8,
-  TOKEN_BLOCK_COMMENT_END   = -9,
   TOKEN_LINE_COMMENT        = -10,
   TOKEN_OPERATOR            = -11,
   TOKEN_EOF                 = -12,
@@ -355,7 +353,7 @@ StaticArray<Keyword> keywords[] = {
 STATIC_ASSERT(ARRAY_LEN(keywords) == NUM_LANGUAGES, all_keywords_defined);
 
 Slice line_comments[] = {
-  {},                  // LANGUAGE_NULL
+  {"#"},               // LANGUAGE_NULL
   Slice::create("//"), // LANGUAGE_C
   Slice::create("#"),  // LANGUAGE_PYTHON
   Slice::create("#")   // LANGUAGE_JULIA

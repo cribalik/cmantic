@@ -56,6 +56,7 @@ struct Quad {
   u16 x,y;
   Color color;
 };
+static Quad quad(int x, int y, Color c) {return {(u16)x, (u16)y, c};}
 static int graphics_quad_init();
 static void push_quad(Quad a, Quad b, Quad c, Quad d);
 static void render_quads();
@@ -827,6 +828,48 @@ static void render_quads() {
   // clear
   graphics_quad_state.num_vertices = 0;
   gl_ok_or_die;
+}
+
+static Color shadow_color = {25, 25, 25, 140};
+static Color shadow_color2 = {25, 25, 25, 0};
+
+static void render_shadow_bottom_right(int x, int y, int w, int h, int shadow_size = 3, int shadow_alpha = 140) {
+  shadow_color.a = shadow_alpha;
+  // right side
+  push_quad(
+    quad(x + w, y + shadow_size, shadow_color),
+    quad(x + w, y + h, shadow_color),
+    quad(x + w + shadow_size, y + h + shadow_size, shadow_color2),
+    quad(x + w + shadow_size, y + shadow_size, shadow_color2)
+  );
+  
+  // bottom side
+  push_quad(
+    quad(x + shadow_size, y + h, shadow_color),
+    quad(x + shadow_size, y + h + shadow_size, shadow_color2),
+    quad(x + w + shadow_size, y + h + shadow_size, shadow_color2),
+    quad(x + w, y + h, shadow_color)
+  );
+}
+
+static void render_shadow_top(int x, int y, int w, int shadow_size = 3, int shadow_alpha = 140) {
+  shadow_color.a = shadow_alpha;
+  push_quad(
+    quad(x + w, y,               shadow_color),
+    quad(x + w, y - shadow_size, shadow_color2),
+    quad(x,     y - shadow_size, shadow_color2),
+    quad(x,     y,               shadow_color)
+  );
+}
+
+static void render_shadow_left(int x, int y, int h, int shadow_size = 3, int shadow_alpha = 140) {
+  shadow_color.a = shadow_alpha;
+  push_quad(
+    quad(x,               y,     shadow_color),
+    quad(x - shadow_size, y,     shadow_color2),
+    quad(x - shadow_size, y + h, shadow_color2),
+    quad(x,               y + h, shadow_color)
+  );
 }
 
 // alpha in range [0,1]

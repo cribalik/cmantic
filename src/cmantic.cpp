@@ -261,6 +261,10 @@ union Cursor {
     return c.pos == pos && c.ghost_x == ghost_x;
   }
 
+  static Cursor create(Pos p) {
+    return create(p.x, p.y);
+  }
+
   static Cursor create(int x, int y) {
     Cursor c;
     c.x = x;
@@ -1755,7 +1759,7 @@ static void move_to_left_brace(const BufferView &buffer, char leftbrace, char ri
   if (!t || t->token == TOKEN_EOF)
     return;
   
-  bool allow_inner_blocks = t->token != rightbrace;
+  bool allow_inner_blocks = t->token != leftbrace;
   if (t->token == leftbrace && t->a < p) {
     *pos = t->a;
     return;
@@ -2330,6 +2334,10 @@ static void begin_build() {
   ARRAY_FIND(G.editing_panes, &p, (*p)->buffer.data == &G.build_result_buffer);
   if (!p)
     G.editing_pane->add_subpane(&G.build_result_buffer, {});
+  else {
+    (*p)->buffer.collapse_cursors();
+    (*p)->buffer.cursors[0] = Cursor::create(Pos{});
+  }
 
   COROUTINE_END;
 }
@@ -2944,10 +2952,8 @@ static void handle_input(Key key) {
     // action selection
     Array<Range> selections = {};
     if (get_action_selection(buffer, key, &selections)) {
-      for (int i = 0; i < selections.size; ++i)
-      buffer.remove_range(selections[i].a, selections[i].b, i);
-      util_free(selections);
       range_to_clipboard(*buffer.data, VIEW(selections, a), VIEW(selections, b));
+      util_free(selections);
       goto yank_done;
     }
 
@@ -3046,6 +3052,12 @@ static void handle_input(Key key) {
       break;
 
     case 'r':
+      if (check_visual_start(buffer)) {
+        for (int i = 0; i < buffer.cursors.size; ++i)
+          buffer.remove_range(G.visual_start.cursors[i], buffer.cursors[i].pos, i);
+        do_paste();
+        util_free(G.visual_start);
+      }
       mode_replace();
       break;
 
@@ -3428,12 +3440,12 @@ static void do_update(float dt) {
   if (G.build_result_output) {
     BufferData &b = G.build_result_buffer;
 
-    G.build_result_buffer.description = Slice::create("[Building..]");
+    b.description = Slice::create("[Building..]");
     while (1) {
       static char buf[256];
       int n = G.build_result_output.read(buf, 256);
       if (n == -1) {
-        G.build_result_buffer.description = Slice::create("[Build Done]");
+        b.description = Slice::create("[Build Done]");
         util_free(G.build_result_output);
         break;
       }
@@ -3442,15 +3454,11 @@ static void do_update(float dt) {
 
       Pane **p;
       ARRAY_FIND(G.editing_panes, &p, (*p)->buffer.data == &b);
-      if (p) {
-        (*p)->buffer.move_to(b.lines.last().length, b.lines.size-1);
-        (*p)->buffer.cursors[0].pos = {};
-        (*p)->buffer.insert(Slice::create(buf, n));
-      }
-      else {
-        Array<Cursor> cursors = {};
-        b.insert(cursors, {b.lines.last().length, b.lines.size-1}, Slice::create(buf, n), -1);
-      }
+      Pos prevpos = p ? (*p)->buffer.cursors[0].pos : Pos{};
+      Array<Cursor> cursors = {};
+      b.insert(cursors, {b.lines.last().length, b.lines.size-1}, Slice::create(buf, n), -1);
+      if (p)
+        (*p)->buffer.cursors[0] = Cursor::create(prevpos);
     }
   }
 }
@@ -5094,27 +5102,8 @@ void TextCanvas::render(Pos pos) {
   Pos size = char2pixel(w,h) + Pos{2*margin, 2*margin};
 
   // render shadow
-  if (draw_shadow) {
-    int shadow_offset = 3;
-    Color shadow_color = COLOR_BLACK;
-    shadow_color.a = 170;
-    Color shadow_color2 = COLOR_BLACK;
-    shadow_color2.a = 0;
-
-    // right side
-    push_quad(
-      {(u16)(pos.x + size.x),                 (u16)(pos.y + shadow_offset),          shadow_color},
-      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color},
-      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + shadow_offset),          shadow_color2});
-
-    // bottom side
-    push_quad(
-      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y),                 shadow_color},
-      {(u16)(pos.x + shadow_offset),          (u16)(pos.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(pos.x + size.x + shadow_offset), (u16)(pos.y + size.y + shadow_offset), shadow_color2},
-      {(u16)(pos.x + size.x),                 (u16)(pos.y + size.y),                 shadow_color});
-  }
+  if (draw_shadow)
+    render_shadow_bottom_right(pos.x, pos.y, size.x, size.y);
 
   // render base background
   push_square_quad((u16)pos.x, (u16)(pos.x+size.x), (u16)(pos.y), (u16)(pos.y+size.y), background);
@@ -5198,12 +5187,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
           render_highlight(G.number_color);
           break;
 
-        case TOKEN_BLOCK_COMMENT_BEGIN:
-          render_highlight(G.comment_color);
-          break;
-
         case TOKEN_BLOCK_COMMENT:
-        case TOKEN_BLOCK_COMMENT_END:
         case TOKEN_LINE_COMMENT:
           render_highlight(G.comment_color);
           break;
@@ -5495,6 +5479,13 @@ void Pane::render_edit() {
   const Slice filename = d.name();
   const int header_text_size = header_height - 6;
   push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
+  push_square_quad(bounds.x, bounds.x + bounds.w, bounds.y - header_height, bounds.y, COLOR_LIGHT_GREY);
+
+  // shadow
+  if (bounds.x >= 7)
+    render_shadow_left(bounds.x, bounds.y - header_height, bounds.h + header_height, 7, 140);
+  if (bounds.y - header_height >= 7)
+    render_shadow_top(bounds.x, bounds.y - header_height, bounds.w, 4, 90);
 
   util_free(canvas);
   render_quads();
