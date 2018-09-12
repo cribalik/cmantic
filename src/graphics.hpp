@@ -35,6 +35,10 @@ struct Color {
   static Color blend(Color back, Color front, float alpha);
   static Color blend_additive(Color back, Color front);
   static Color blend_additive(Color back, Color front, float alpha);
+  static Color to_linear(Color c);
+  static float to_linear(float val);
+  static Color to_srgb(Color c);
+  static float to_srgb(float val);
 };
 
 /**************
@@ -530,7 +534,9 @@ static int graphics_text_init(const char *ttf_file, int default_font_size) {
   "in vec3 fcolor;\n" \
   "out vec4 color;\n" \
   "uniform sampler2D tex;\n" \
-  "void main () { color = vec4(fcolor, texture(tex, ftpos).x); }\n";
+  "float to_srgbf(float val) {if(val < 0.0031308f) {val = val * 12.92f;} else {val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;}return val;}\n" \
+  "vec3 to_srgb(vec3 v) {return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));}\n" \
+  "void main () { color = vec4(to_srgb(fcolor), texture(tex, ftpos).x); }\n";
 
   glEnable(GL_BLEND);
   graphics_text_state.shader = graphics_compile_shader(vertex_src, fragment_src);
@@ -755,7 +761,9 @@ static int graphics_quad_init() {
   "#version 330 core\n" \
   "in vec4 fcolor;\n" \
   "out vec4 color;\n" \
-  "void main () { color = fcolor; }\n";
+  "float to_srgbf(float val) {if(val < 0.0031308f) {val = val * 12.92f;} else {val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;}return val;}\n" \
+  "vec3 to_srgb(vec3 v) {return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));}\n" \
+  "void main () { color = vec4(to_srgb(fcolor.xyz), fcolor.a); }\n";
 
   graphics_quad_state.shader = graphics_compile_shader(vertex_src, fragment_src);
   if (!graphics_quad_state.shader)
@@ -830,11 +838,10 @@ static void render_quads() {
   gl_ok_or_die;
 }
 
-static Color shadow_color = {25, 25, 25, 140};
-static Color shadow_color2 = {25, 25, 25, 0};
+static Color shadow_color = {0, 0, 0, 80};
+static Color shadow_color2 = {0, 0, 0, 0};
 
-static void render_shadow_bottom_right(int x, int y, int w, int h, int shadow_size = 3, int shadow_alpha = 140) {
-  shadow_color.a = shadow_alpha;
+static void render_shadow_bottom_right(int x, int y, int w, int h, int shadow_size = 3) {
   // right side
   push_quad(
     quad(x + w, y + shadow_size, shadow_color),
@@ -852,8 +859,7 @@ static void render_shadow_bottom_right(int x, int y, int w, int h, int shadow_si
   );
 }
 
-static void render_shadow_top(int x, int y, int w, int shadow_size = 3, int shadow_alpha = 140) {
-  shadow_color.a = shadow_alpha;
+static void render_shadow_top(int x, int y, int w, int shadow_size = 3) {
   push_quad(
     quad(x + w, y,               shadow_color),
     quad(x + w, y - shadow_size, shadow_color2),
@@ -862,8 +868,7 @@ static void render_shadow_top(int x, int y, int w, int shadow_size = 3, int shad
   );
 }
 
-static void render_shadow_left(int x, int y, int h, int shadow_size = 3, int shadow_alpha = 140) {
-  shadow_color.a = shadow_alpha;
+static void render_shadow_left(int x, int y, int h, int shadow_size = 3) {
   push_quad(
     quad(x,               y,     shadow_color),
     quad(x - shadow_size, y,     shadow_color2),
@@ -949,6 +954,44 @@ Color Color::from_hsl(float h, float s, float l) {
     (u8)(g*255),
     (u8)(b*255),
     255
+  };
+}
+
+float Color::to_linear(float val) {
+  if (val < 0.04045f)
+    return val/12.92f;
+  else
+    return pow((val + 0.055f)/1.055f, 2.4f);
+}
+
+Color Color::to_linear(Color c) {
+  float r = to_linear(c.r/255.0f);
+  float g = to_linear(c.g/255.0f);
+  float b = to_linear(c.b/255.0f);
+  return {
+    (u8)(r*255),
+    (u8)(g*255),
+    (u8)(b*255),
+    c.a
+  };
+}
+
+float Color::to_srgb(float val) {
+  if (val < 0.0031308f)
+    return val * 12.92f;
+  else
+    return 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+}
+
+Color Color::to_srgb(Color c) {
+  float r = to_srgb(c.r/255.0f);
+  float g = to_srgb(c.g/255.0f);
+  float b = to_srgb(c.b/255.0f);
+  return {
+    (u8)(r*255),
+    (u8)(g*255),
+    (u8)(b*255),
+    c.a
   };
 }
 

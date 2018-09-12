@@ -11,6 +11,7 @@
   #include <sys/ioctl.h>
   #include <sys/select.h>
   #include <sys/types.h>
+  #include <sys/stat.h>
   #include <dirent.h>
   #include <fcntl.h>
   #include <signal.h>
@@ -261,6 +262,10 @@ struct View {
 
   const T& get(int i) const {return (*this)[i];}
   T& get(int i) {return (*this)[i];}
+
+  T* begin() {return items;}
+
+  T* end() {return &get(size);}
 
   int min() {
     assert(size);
@@ -1470,6 +1475,63 @@ STRING_METHODS_IMPL(StringBuffer)
 
 
 
+/***************************************************************
+***************************************************************
+*                                                            **
+*                                                            **
+*                           LOGGING                          **
+*                                                            **
+*                                                            **
+***************************************************************
+***************************************************************/
+
+#ifndef UTIL_LOGGING
+#define UTIL_LOGGING
+
+#ifdef OS_WINDOWS
+#include <io.h>
+#endif
+
+// Terminal textstyles
+static const char* TERM_RED = "";
+static const char* TERM_GREEN = "";
+static const char* TERM_YELLOW = "";
+static const char* TERM_BLUE = "";
+static const char* TERM_BOLD = "";
+static const char* TERM_UNBOLD = "";
+static const char* TERM_RESET_FORMAT = "";
+static const char* TERM_RESET_COLOR = "";
+static const char* TERM_RESET = "";
+
+static StringBuffer logging_buffer;
+#define LOGGING_LEVEL_IMPLEMENTATION(level, color) \
+void log_##level(Slice s) {fprintf(stderr, "%s%.*s%s", color, s.length, s.chars, TERM_RESET_COLOR);} \
+void log_##level(String s) {log_##level(s.slice);} \
+void log_##level##v(va_list args, const char *fmt) { \
+  logging_buffer.length = 0; \
+  logging_buffer.appendv(fmt, args); \
+  log_##level(logging_buffer.slice); \
+} \
+\
+void log_##level(const char *fmt, ...) { \
+  va_list args; \
+  va_start(args, fmt); \
+  log_##level##v(args, fmt); \
+  va_end(args); \
+}
+
+LOGGING_LEVEL_IMPLEMENTATION(debug, TERM_RESET_COLOR)
+LOGGING_LEVEL_IMPLEMENTATION(info, TERM_GREEN)
+LOGGING_LEVEL_IMPLEMENTATION(warn, TERM_YELLOW)
+LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
+
+#endif /* UTIL_LOGGING */
+
+
+
+
+
+
 
 /***************************************************************
 ***************************************************************
@@ -1586,6 +1648,17 @@ namespace File {
 
   bool change_dir(Path p) {
     return !chdir(p.string.chars);
+  }
+
+  bool was_modified(const char *path, u64 *time) {
+    struct stat attr;
+    if (stat(path, &attr)) {
+      log_warn("Failed to stat %s: %s\n", path, strerror(errno));
+      return false;
+    }
+    bool result = *time != attr.st_mtime;
+    *time = attr.st_mtime;
+    return result;
   }
 
   bool cwd(Path *p) {
@@ -1758,58 +1831,6 @@ namespace File {
 #endif /* UTIL_FILE */
 
 
-/***************************************************************
-***************************************************************
-*                                                            **
-*                                                            **
-*                           LOGGING                          **
-*                                                            **
-*                                                            **
-***************************************************************
-***************************************************************/
-
-#ifndef UTIL_LOGGING
-#define UTIL_LOGGING
-
-#ifdef OS_WINDOWS
-#include <io.h>
-#endif
-
-// Terminal textstyles
-static const char* TERM_RED = "";
-static const char* TERM_GREEN = "";
-static const char* TERM_YELLOW = "";
-static const char* TERM_BLUE = "";
-static const char* TERM_BOLD = "";
-static const char* TERM_UNBOLD = "";
-static const char* TERM_RESET_FORMAT = "";
-static const char* TERM_RESET_COLOR = "";
-static const char* TERM_RESET = "";
-
-static StringBuffer logging_buffer;
-#define LOGGING_LEVEL_IMPLEMENTATION(level, color) \
-void log_##level(Slice s) {fprintf(stderr, "%s%.*s%s", color, s.length, s.chars, TERM_RESET_COLOR);} \
-void log_##level(String s) {log_##level(s.slice);} \
-void log_##level##v(va_list args, const char *fmt) { \
-  logging_buffer.length = 0; \
-  logging_buffer.appendv(fmt, args); \
-  log_##level(logging_buffer.slice); \
-} \
-\
-void log_##level(const char *fmt, ...) { \
-  va_list args; \
-  va_start(args, fmt); \
-  log_##level##v(args, fmt); \
-  va_end(args); \
-}
-
-LOGGING_LEVEL_IMPLEMENTATION(debug, TERM_RESET_COLOR)
-LOGGING_LEVEL_IMPLEMENTATION(info, TERM_GREEN)
-LOGGING_LEVEL_IMPLEMENTATION(warn, TERM_YELLOW)
-LOGGING_LEVEL_IMPLEMENTATION(err, TERM_RED)
-
-#endif /* UTIL_LOGGING */
-
 
 
 /***************************************************************
@@ -1939,7 +1960,7 @@ int Stream::read(void *buffer, int n) {
 
 // command list must be null terminated
 static bool call(const char* command[], int *errcode, String *output);
-static bool call_async(const char *command[], Stream *output);
+static bool call_async(View<Slice> command, Stream *output);
 
 #ifdef OS_WINDOWS
 
@@ -2044,7 +2065,7 @@ static bool call(const char *command[], int *errcode, String *output) {
   return false;
 }
 
-static bool call_async(const char *command[], Stream *output) {
+static bool call_async(View<Slice> command, Stream *output) {
   // For a reference see https://docs.microsoft.com/en-us/windows/desktop/ProcThread/creating-a-child-process-with-redirected-input-and-output
   // and for an actual complete example see https://www.daniweb.com/programming/software-development/threads/295780/using-named-pipes-with-asynchronous-i-o-redirection-to-winapi
   StringBuffer cmd = {};
@@ -2084,21 +2105,21 @@ static bool call_async(const char *command[], Stream *output) {
   // finally we need to create our own non-shareable pipe, and close the shared one (in practice, this shouldn't be much of a problem, since the shared pipe will be freed by the child process when it exits)
   HANDLE our_pipe;
   if (!DuplicateHandle(GetCurrentProcess(), shared_pipe, GetCurrentProcess(), &our_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-    log_err("%s: Failed to duplicate pipe (%i)\n", command[0], (int)GetLastError());
+    log_err("%s: Failed to duplicate pipe (%i)\n", (int)GetLastError());
     goto err_3;
   }
 
   if (!CloseHandle(shared_pipe)) {
-    log_err("%s: Failed to close shared pipe (%i)\n", command[0], (int)GetLastError());
+    log_err("%s: Failed to close shared pipe (%i)\n", (int)GetLastError());
     goto err_4;
   }
   shared_pipe = INVALID_HANDLE_VALUE;
 
   // create process
-  for (const char **s = command; *s; ++s)
-    cmd.appendf("\"%s\" ", *s);
+  for (Slice s : command)
+    cmd += s;
   if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_err("%s: Failed to create process (%i)\n", command[0], (int)GetLastError());
+    log_err("%s: Failed to create process (%i)\n", (int)GetLastError());
     goto err_4;
   }
 
@@ -2180,7 +2201,7 @@ static bool call(const char *command[], int *errcode, String *output) {
   return true;
 }
 
-static bool call_async(const char *command[], Stream *output) {
+static bool call_async(View<Slice> command, Stream *output) {
   int process_pipe[2] = {};
   if (pipe(process_pipe)) {
     log_err("Failed to create pipe\n");
@@ -2199,8 +2220,12 @@ static bool call_async(const char *command[], Stream *output) {
     close(STDIN_FILENO);
     close(process_pipe[0]);
     close(process_pipe[1]);
-    execvp(command[0], (char*const*)command);
-    fprintf(stderr, "Failed to run %s: %s", command[0], strerror(errno));
+    const char **cmd = new const char*[command.size+1];
+    for (int i = 0; i < command.size; ++i)
+      cmd[i] = command[i].copy().chars;
+    cmd[command.size] = 0;
+    execvp(cmd[0], (char*const*)cmd);
+    fprintf(stderr, "Failed to run %s: %s", cmd[0], strerror(errno));
     exit(1);
   }
 
