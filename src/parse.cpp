@@ -636,8 +636,6 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
   Array<String> identifiers = {};
   Array<Range> definitions = {};
 
-  Slice additional_identifier_heads = Slice::create("@");
-
   int x = 0;
   int y = 0;
 

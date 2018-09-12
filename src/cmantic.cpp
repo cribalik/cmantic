@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * goto declaration list, remove all whitespace
  * We don't need to rewrite the whole tokenization on edit, just the y-range that changed.
  *     Also we should do it on every insert/delete, so that bugs like
  *     'o' autoindenting on the old line, get fixed
@@ -454,7 +455,9 @@ struct BufferData {
   // buffer.action_end(cursors);
   //
   // TODO: Use a fixed buffer (circular queue) of undo actions
-  bool undo_disabled;
+  int undo_disabled;
+  void disable_undo() {++undo_disabled;}
+  void enable_undo() {--undo_disabled;}
   Array<UndoAction> _undo_actions;
   int _next_undo_action;
   int _last_save_undo_action;
@@ -2135,6 +2138,7 @@ static void state_init() {
   Pane::init_edit(*main_pane, &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
 
   G.build_result_buffer.init(false, Slice::create("[Build Result]"));
+  G.build_result_buffer.disable_undo();
   G.buffers += &G.build_result_buffer;
 
   // search pane
@@ -2319,10 +2323,13 @@ static void begin_build() {
   }
 
   // reset buffer and pane
-  if (!G.editing_panes.find(&G.build_result_pane))
-    G.editing_panes += &G.build_result_pane;
   G.build_result_buffer.init(false, Slice::create("[Build Result]"));
+  G.build_result_buffer.disable_undo();
   Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, false);
+  Pane **p;
+  ARRAY_FIND(G.editing_panes, &p, (*p)->buffer.data == &G.build_result_buffer);
+  if (!p)
+    G.editing_pane->add_subpane(&G.build_result_buffer, {});
 
   COROUTINE_END;
 }
@@ -2699,6 +2706,9 @@ static void handle_input(Key key) {
           }
           goto prompt_done;
 
+        case PROMPT_KEY:
+          G.prompt_success = false;
+          goto prompt_done;
       }
     }
     else if (key == KEY_ESCAPE) {
@@ -2931,23 +2941,38 @@ static void handle_input(Key key) {
   case MODE_YANK: {
     // TODO: is it more performant to check if it is a movement command first?
 
-    Array<Cursor> prev = buffer.cursors.copy_shallow();
-    if (!movement_default(buffer, key))
+    // action selection
+    Array<Range> selections = {};
+    if (get_action_selection(buffer, key, &selections)) {
+      for (int i = 0; i < selections.size; ++i)
+      buffer.remove_range(selections[i].a, selections[i].b, i);
+      util_free(selections);
+      range_to_clipboard(*buffer.data, VIEW(selections, a), VIEW(selections, b));
       goto yank_done;
-    if (prev.size != buffer.cursors.size)
-      goto yank_done;
+    }
 
-    // some movements we want to include the end position
-    // for (Cursor &c : cursors)
-      // buffer.data->advance(c.pos);
-    range_to_clipboard(*buffer.data, VIEW(prev, pos), VIEW(buffer.cursors, pos));
-
-    // go back to where we started
-    for (int i = 0; i < prev.size; ++i)
-      buffer.cursors[i].pos = prev[i].pos;
-
+    // movement
+    {
+      Array<Cursor> prev = buffer.cursors.copy_shallow();
+      if (!movement_default(buffer, key))
+        goto yank_done;
+      if (prev.size != buffer.cursors.size) {
+        util_free(prev);
+        goto yank_done;
+      }
+  
+      // some movements we want to include the end position
+      // for (Cursor &c : cursors)
+        // buffer.data->advance(c.pos);
+      range_to_clipboard(*buffer.data, VIEW(prev, pos), VIEW(buffer.cursors, pos));
+  
+      // go back to where we started
+      for (int i = 0; i < prev.size; ++i)
+        buffer.cursors[i].pos = prev[i].pos;
+      util_free(prev);
+    }
+  
     yank_done:;
-    util_free(prev);
     mode_normal(true);
     break;}
 
@@ -3402,7 +3427,7 @@ static void do_update(float dt) {
   // get some build data
   if (G.build_result_output) {
     BufferData &b = G.build_result_buffer;
-    Pane &p = G.build_result_pane;
+
     G.build_result_buffer.description = Slice::create("[Building..]");
     while (1) {
       static char buf[256];
@@ -3414,9 +3439,18 @@ static void do_update(float dt) {
       }
       if (n == 0)
         break;
-      p.buffer.move_to(b.lines.last().length, b.lines.size-1);
-      p.buffer.insert(Slice::create(buf, n));
-      p.buffer.cursors[0].pos = {};
+
+      Pane **p;
+      ARRAY_FIND(G.editing_panes, &p, (*p)->buffer.data == &b);
+      if (p) {
+        (*p)->buffer.move_to(b.lines.last().length, b.lines.size-1);
+        (*p)->buffer.cursors[0].pos = {};
+        (*p)->buffer.insert(Slice::create(buf, n));
+      }
+      else {
+        Array<Cursor> cursors = {};
+        b.insert(cursors, {b.lines.last().length, b.lines.size-1}, Slice::create(buf, n), -1);
+      }
     }
   }
 }
@@ -3845,7 +3879,7 @@ void BufferData::undo(Array<Cursor> &cursors) {
   if (!_next_undo_action)
     return;
 
-  undo_disabled = true;
+  ++undo_disabled;
   raw_begin();
   --_next_undo_action;
   assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_END);
@@ -3872,7 +3906,7 @@ void BufferData::undo(Array<Cursor> &cursors) {
     }
   }
   // printf("cursors: %i\n", cursors.size);
-  undo_disabled = false;
+  --undo_disabled;
 
   // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
   this->parse();
@@ -3888,7 +3922,7 @@ void BufferData::redo(Array<Cursor> &cursors) {
   if (_next_undo_action == _undo_actions.size)
     return;
 
-  undo_disabled = true;
+  ++undo_disabled;
   raw_begin();
   assert(_undo_actions[_next_undo_action].type == ACTIONTYPE_GROUP_BEGIN);
   ++_next_undo_action;
@@ -3914,7 +3948,7 @@ void BufferData::redo(Array<Cursor> &cursors) {
     }
   }
   ++_next_undo_action;
-  undo_disabled = false;
+  --undo_disabled;
   // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
   this->parse();
   raw_end();

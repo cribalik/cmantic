@@ -281,6 +281,14 @@ struct View {
   }
 
   template<class U>
+  T* find(const U& u) {
+    for (int i = 0; i < size; ++i)
+      if (get(i) == u)
+        return &get(i);
+    return 0;
+  }
+
+  template<class U>
   void free(int offset) {
     Array<U> a = {(U*)((char*)items - offset), size, size};
     util_free(a);
@@ -294,7 +302,7 @@ View<T> view(T *items, int size, int stride = sizeof(T)) {
 
 
 #define VIEW_FREE(view, original_type, field) view.free<original_type>(offsetof(original_type, field))
-#define VIEW(array, field) view(&array.items[0].field, array.size, sizeof(*array.items))
+#define VIEW(array, field) view(&(array.items->field), array.size, sizeof(*array.items))
 #define VIEW_FROM_ARRAY(array, field) view(&array[0].field, ARRAY_LEN(array), sizeof(*array))
 
 template<class T, int N>
