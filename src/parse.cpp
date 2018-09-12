@@ -266,10 +266,83 @@ static Keyword python_keywords[] = {
   {"except", KEYWORD_CONTROL},
 };
 
+static Keyword julia_keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+
+  // types
+
+  {"Int", KEYWORD_TYPE},
+  {"Int32", KEYWORD_TYPE},
+  {"Int64", KEYWORD_TYPE},
+  {"Float", KEYWORD_TYPE},
+  {"Float64", KEYWORD_TYPE},
+  {"Float32", KEYWORD_TYPE},
+  {"Double", KEYWORD_TYPE},
+  {"unsigned", KEYWORD_TYPE},
+  {"Vector", KEYWORD_TYPE},
+  {"Array", KEYWORD_TYPE},
+
+  // specifiers
+
+  {"def", KEYWORD_SPECIFIER},
+  {"const", KEYWORD_SPECIFIER},
+  {"extern", KEYWORD_SPECIFIER},
+  {"nothrow", KEYWORD_SPECIFIER},
+  {"noexcept", KEYWORD_SPECIFIER},
+  {"public", KEYWORD_SPECIFIER},
+  {"private", KEYWORD_SPECIFIER},
+  {"delegate", KEYWORD_SPECIFIER},
+  {"protected", KEYWORD_SPECIFIER},
+  {"override", KEYWORD_SPECIFIER},
+  {"virtual", KEYWORD_SPECIFIER},
+  {"abstract", KEYWORD_SPECIFIER},
+  {"global", KEYWORD_SPECIFIER},
+  {"mutable", KEYWORD_SPECIFIER},
+
+  // declarations
+
+  {"function", KEYWORD_DEFINITION},
+  {"struct", KEYWORD_DEFINITION},
+  {"using", KEYWORD_DEFINITION},
+  {"export", KEYWORD_DEFINITION},
+  {"as", KEYWORD_DEFINITION},
+  {"module", KEYWORD_DEFINITION},
+
+  // macro
+
+  // flow control
+
+  {"in", KEYWORD_SPECIFIER},
+  {"switch", KEYWORD_CONTROL},
+  {"case", KEYWORD_CONTROL},
+  {"if", KEYWORD_CONTROL},
+  {"else", KEYWORD_CONTROL},
+  {"elif", KEYWORD_CONTROL},
+  {"for", KEYWORD_CONTROL},
+  {"while", KEYWORD_CONTROL},
+  {"return", KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break", KEYWORD_CONTROL},
+  {"goto", KEYWORD_CONTROL},
+  {"yield", KEYWORD_CONTROL},
+  {"default", KEYWORD_CONTROL},
+  {"and", KEYWORD_CONTROL},
+  {"or", KEYWORD_CONTROL},
+  {"with", KEYWORD_CONTROL},
+  {"try", KEYWORD_CONTROL},
+  {"except", KEYWORD_CONTROL},
+  {"end", KEYWORD_CONTROL},
+};
+
 enum Language {
   LANGUAGE_NULL,
   LANGUAGE_C,
   LANGUAGE_PYTHON,
+  LANGUAGE_JULIA,
   NUM_LANGUAGES
 };
 
@@ -277,13 +350,15 @@ StaticArray<Keyword> keywords[] = {
   {},
   {cpp_keywords, ARRAY_LEN(cpp_keywords)},
   {python_keywords, ARRAY_LEN(python_keywords)},
+  {julia_keywords, ARRAY_LEN(julia_keywords)},
 };
 STATIC_ASSERT(ARRAY_LEN(keywords) == NUM_LANGUAGES, all_keywords_defined);
 
 Slice line_comments[] = {
   {},                  // LANGUAGE_NULL
   Slice::create("//"), // LANGUAGE_C
-  Slice::create("#")   // LANGUAGE_PYTHON
+  Slice::create("#"),  // LANGUAGE_PYTHON
+  Slice::create("#")   // LANGUAGE_JULIA
 };
 STATIC_ASSERT(ARRAY_LEN(line_comments) == NUM_LANGUAGES, all_line_comments_defined);
 
@@ -390,17 +465,38 @@ struct ParseResult {
 
 #define NEXT_CHAR(n) (x += n, c = line[x])
 
-static bool parse_identifier(Slice line, int &x) {
+static bool parse_whitespace(Slice line, int &x, TokenInfo &t) {
+  char c = line[x];
+  if (isspace(c)) {
+    NEXT_CHAR(1);
+    return true;
+  }
+  return false;
+}
+
+static bool parse_identifier(Slice line, int &x, TokenInfo &t, const char *additional_identifier_heads) {
+  char c = line[x];
+  if (!is_identifier_head(c) && !Slice::contains(additional_identifier_heads, c))
+    return false;
+  NEXT_CHAR(1);
+  while (is_identifier_tail(c))
+    NEXT_CHAR(1);
+  t.token = TOKEN_IDENTIFIER;
+  return true;
+}
+
+static bool parse_identifier(Slice line, int &x, TokenInfo &t) {
   char c = line[x];
   if (!is_identifier_head(c))
     return false;
   NEXT_CHAR(1);
   while (is_identifier_tail(c))
     NEXT_CHAR(1);
+  t.token = TOKEN_IDENTIFIER;
   return true;
 }
 
-static bool parse_number(Slice line, int &x) {
+static bool parse_number(Slice line, int &x, TokenInfo &t) {
   char c = line[x];
   if (!is_number_head(c))
     return false;
@@ -414,10 +510,11 @@ static bool parse_number(Slice line, int &x) {
   }
   while (is_number_modifier(c))
     NEXT_CHAR(1);
+  t.token = TOKEN_NUMBER;
   return true;
 }
 
-static bool parse_string(Slice line, int &x) {
+static bool parse_string(Slice line, int &x, TokenInfo &t) {
   char c = line[x];
   if (c != '"' && c != '\'')
     return false;
@@ -433,6 +530,7 @@ static bool parse_string(Slice line, int &x) {
   }
   if (x < line.length)
     NEXT_CHAR(1);
+  t.token = TOKEN_STRING;
   return true;
 }
 
@@ -473,22 +571,16 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
     }
 
     // identifier
-    if (parse_identifier(line, x)) {
-      t.token = TOKEN_IDENTIFIER;
+    if (parse_identifier(line, x, t))
       goto token_done;
-    }
 
     // number
-    if (parse_number(line, x)) {
-      t.token = TOKEN_NUMBER;
+    if (parse_number(line, x, t))
       goto token_done;
-    }
 
     // string
-    if (parse_string(line, x)) {
-      t.token = TOKEN_STRING;
+    if (parse_string(line, x, t))
       goto token_done;
-    }
 
     // operators
     for (int i = 0; i < (int)ARRAY_LEN(python_operators); ++i) {
@@ -517,7 +609,6 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
           identifiers += String::create(identifier);
       }
     }
-    #undef NEXT_CHAR
   }
 
   tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
@@ -528,6 +619,105 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
     switch (ti.token) {
       case TOKEN_IDENTIFIER:
         if (i+1 < tokens.size && (ti.str == "def" || ti.str == "class")) {
+          definitions += tokens[i+1].r;
+          break;
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+  return {tokens, definitions, identifiers};
+}
+
+static ParseResult julia_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  Slice additional_identifier_heads = Slice::create("@");
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      goto token_done;
+    }
+
+    // line comment
+    if (c == '#') {
+      t.token = TOKEN_LINE_COMMENT;
+      x = line.length;
+      goto token_done;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t, "@"))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // string
+    if (parse_string(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(python_operators); ++i) {
+      if (line.begins_with(x, python_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(python_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  // find definitions
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo ti = tokens[i];
+    switch (ti.token) {
+      case TOKEN_IDENTIFIER:
+        if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct")) {
           definitions += tokens[i+1].r;
           break;
         }
@@ -565,16 +755,12 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
     c = line[x];
 
     // whitespace
-    if (isspace(c)) {
-      NEXT_CHAR(1);
+    if (parse_whitespace(line, x, t))
       goto token_done;
-    }
 
     // identifier
-    if (parse_identifier(line, x)) {
-      t.token = TOKEN_IDENTIFIER;
+    if (parse_identifier(line, x, t))
       goto token_done;
-    }
 
     // block comment
     if (line.begins_with(x, "/*")) {
@@ -612,16 +798,12 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
     }
 
     // number
-    if (parse_number(line, x)) {
-      t.token = TOKEN_NUMBER;
+    if (parse_number(line, x, t))
       goto token_done;
-    }
 
     // string
-    if (parse_string(line, x)) {
-      t.token = TOKEN_STRING;
+    if (parse_string(line, x, t))
       goto token_done;
-    }
 
     // operators
     for (int i = 0; i < (int)ARRAY_LEN(cpp_operators); ++i) {
@@ -650,7 +832,6 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
           identifiers += String::create(identifier);
       }
     }
-    #undef NEXT_CHAR
   }
 
   tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
@@ -713,15 +894,25 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
   return {tokens, definitions, identifiers};
 }
 
+
+typedef ParseResult (*ParseFun)(const Array<StringBuffer> lines);
+ParseFun parse_funs[] = {
+  {},
+  cpp_parse,
+  python_parse,
+  julia_parse
+};
+STATIC_ASSERT(ARRAY_LEN(parse_funs) == NUM_LANGUAGES, all_parse_funs_listed);
+
 static ParseResult parse(const Array<StringBuffer> lines, Language language) {
-  switch (language) {
-    case LANGUAGE_NULL: return {};
-    case LANGUAGE_C: return cpp_parse(lines);
-    case LANGUAGE_PYTHON: return python_parse(lines);
-    default:
-      log_err("Unknown language %i\n", (int)language);
-      return {};
+  if (language == LANGUAGE_NULL)
+    return {};
+  if ((int)language < LANGUAGE_NULL || (int)language >= NUM_LANGUAGES) {
+    log_err("Unknown language %i\n", (int)language);
+    return {};
   }
+
+  return parse_funs[language](lines);
 }
 
 #endif /* PARSE_CPP */

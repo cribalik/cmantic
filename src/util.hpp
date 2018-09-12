@@ -739,6 +739,7 @@ struct Utf8Iter {
   bool begins_with(int offset, const char *str) const; \
   bool ends_with(const char *str) const; \
   bool empty() const {return length;}; \
+  bool contains(char c) const; \
   String copy() const;
 
 #define STRING_METHODS_IMPL(classname) \
@@ -771,6 +772,7 @@ struct Utf8Iter {
   bool classname::begins_with(int offset, const char *str, int n) const {return Slice::begins_with(chars, length, offset, str, n);} \
   bool classname::begins_with(int offset, const char *str) const {return Slice::begins_with(chars, length, offset, str);} \
   bool classname::ends_with(const char *str) const {return Slice::ends_with(chars, length, str);} \
+  bool classname::contains(char c) const {return Slice::contains(chars, length, c);} \
   String classname::copy() const {return Slice::copy(chars, length);};
 
 // A non-owning string
@@ -907,12 +909,20 @@ struct Slice {
     return s;
   }
 
+  static bool contains(const char *chars, int length, char c) {
+    for (int i = 0; i < length; ++i)
+      if (chars[i] == c)
+        return true;
+    return false;
+  }
+
   static bool contains(const char *s, char c) {
     for (; *s; ++s)
       if (*s == c)
         return true;
     return false;
   }
+
   static Slice token(const char *chars, int length, int *offset, const char *c) {
     int i = *offset;
     if (i >= length)
@@ -1019,7 +1029,7 @@ struct Slice {
     putchar('\n');
   }
 
-  STRING_METHODS_DECLARATION
+  STRING_METHODS_DECLARATION;
 };
 
 void util_free(Slice &) {}

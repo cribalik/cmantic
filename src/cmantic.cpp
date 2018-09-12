@@ -803,6 +803,7 @@ void Pane::init_edit(Pane &p,
                       Color *text_color,
                       Color *active_highlight_background_color,
                       Color *inactive_highlight_background_color, bool is_dynamic) {
+  Pane *old_parent = p.parent;
   util_free(p);
   p.type = PANETYPE_EDIT;
   p.buffer = {b, Array<Cursor>{}};
@@ -812,6 +813,7 @@ void Pane::init_edit(Pane &p,
   p.active_highlight_background_color = active_highlight_background_color;
   p.inactive_highlight_background_color = inactive_highlight_background_color;
   p.is_dynamic = is_dynamic;
+  p.parent = old_parent;
 }
 
 struct PoppedColor {
@@ -3589,6 +3591,8 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
     b.language = LANGUAGE_C;
   else if (filename.ends_with(".py"))
     b.language = LANGUAGE_PYTHON;
+  else if (filename.ends_with(".jl"))
+    b.language = LANGUAGE_JULIA;
 
   b.endline_string = ENDLINE_UNIX;
 
@@ -5803,12 +5807,9 @@ static void handle_pending_removes() {
       delete b;
 
     // reset any panes that were using this buffer
-    for (int k = 0; k < G.editing_panes.size; ++k) {
-      if (G.editing_panes[k]->buffer.data == b) {
-        util_free(*G.editing_panes[k]);
+    for (int k = 0; k < G.editing_panes.size; ++k)
+      if (G.editing_panes[k]->buffer.data == b)
         Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.default_background_color, &G.default_text_color, &G.active_highlight_background_color.color, &G.inactive_highlight_background_color, true);
-      }
-    }
   }
   G.buffers_to_remove.size = 0;
 }
