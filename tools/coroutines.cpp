@@ -84,6 +84,6 @@ int main(int argc, char const *argv[])
     if (!output)
       log_err("Failed to open output file\n"), exit(1);
   #endif
-	fprintf(output, "%s", out(0, 20).chars);
+	fwrite(out.chars, out.length, 1, output);
 	return 0;
 }
