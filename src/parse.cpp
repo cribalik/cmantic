@@ -660,7 +660,7 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
     }
 
     // identifier
-    if (parse_identifier(line, x, t))
+    if (parse_identifier(line, x, t, "@", ""))
       goto token_done;
 
     // number
@@ -903,7 +903,7 @@ static ParseResult bash_parse(const Array<StringBuffer> lines) {
       case TOKEN_IDENTIFIER:
         if      (i+1 < tokens.size && (ti->str == "function" || ti->str == "export"))
           definitions += ti[1].r, ++i;
-        else if (i+1 < tokens.size && ti[1].str == "=" && (i == 0 || ti[-1].a.y < ti[0].a.y))
+        else if (i+1 < tokens.size && (ti[1].str == "=" || ti[1].str == "(") && (i == 0 || ti[-1].a.y < ti[0].a.y))
           definitions += ti[0].r, ++i;
         break;
 
@@ -1095,8 +1095,6 @@ LanguageSettings language_settings[] = {
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 
 static ParseResult parse(const Array<StringBuffer> lines, Language language) {
-  if (language == LANGUAGE_NULL)
-    return {};
   if ((int)language < LANGUAGE_NULL || (int)language >= NUM_LANGUAGES) {
     log_err("Unknown language %i\n", (int)language);
     return {};

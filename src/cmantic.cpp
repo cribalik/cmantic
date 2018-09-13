@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * create new file
  * dp on empty ()
  * gd for multiple definitions with the same name
  * Need higher precision for colors when working in linear space
@@ -2724,12 +2725,15 @@ static void do_delete_visual() {
   buffer.action_begin();
 
   for (int i = 0; i < G.visual_start.cursors.size; ++i) {
-    Pos pa = G.visual_start.cursors[i];
-    Pos pb = buffer.cursors[i].pos;
+    Pos pa = min(G.visual_start.cursors[i].pos, buffer.cursors[i].pos);
+    Pos pb = max(G.visual_start.cursors[i].pos, buffer.cursors[i].pos);
+
     if (G.visual_entire_line)
       buffer.remove_range(pa.y, pb.y, i);
-    else
+    else {
+      buffer.advance(pb);
       buffer.remove_range(pa, pb, i);
+    }
   }
 
   util_free(G.visual_start);
@@ -3441,7 +3445,7 @@ static void handle_input(Key key) {
       buffer.action_end();
       break;
 
-    case 'y':
+    case 'c':
       // visual yank?
       if (check_visual_start(buffer)) {
         Array<Pos> destination;
@@ -3471,7 +3475,7 @@ static void handle_input(Key key) {
       mode_yank();
       break;
 
-    case 'Y': {
+    case 'C': {
       StringBuffer s = {};
       for (int i = 0; i < buffer.cursors.size; ++i) {
         s += StringBuffer::create(buffer.data->lines[buffer.cursors[i].y].slice);
@@ -3487,7 +3491,7 @@ static void handle_input(Key key) {
       mode_menu();
       break;
 
-    case 'v':
+    case 's':
       G.visual_entire_line = false;
       util_free(G.visual_start.cursors);
       for (Cursor c : G.editing_pane->buffer.cursors)
@@ -3505,7 +3509,7 @@ static void handle_input(Key key) {
       mode_delete();
       break;
 
-    case 'V':
+    case 'S':
       G.visual_entire_line = true;
       buffer.collapse_cursors();
       util_free(G.visual_start);

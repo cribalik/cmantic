@@ -8,6 +8,12 @@
             Welcome to cmantic!
 
 
+            First of all, press '+' and '-' to make the font bigger or smaller.
+            Happy you are here! Let's get started, shall we?
+
+
+
+
 
 
 
@@ -17,7 +23,7 @@
                                                         \______________________________________                                  
                                                                                                \                                  
                                                                                                |                                  
-                                                                           ____________________/       ____________ hooray
+                                                                           ____________________/       ____________ hooray, you get a potato
                                                                           /                            |                                  
                                                                           |                            |                                  
                                                                           \____________________________/                                  
@@ -137,7 +143,7 @@
                 try {
                     r.requestHandClap();
                     r.clap();
-                } catch (ClapsNotAllowedAtWorkException e) {
+                } catch (ClapsNotAllowedException e) {
                     CryRequest cr = TearCanal.BuildCryRequest();
                     cr.forceCry();
                 }
@@ -183,7 +189,7 @@
 
             "Oh geez, That's a lot of "hjkl":ses!", you might say. Do not fear, for "<F>ind character" is here!
 
-            Press f, and then the character you want to jump to (in this case '!'), and press the character that shows up in its place.
+            Press F, and then the character you want to jump to (in this case '!'), and press the character that shows up in its place.
 
             It's probably easier to understand if you just try it.
 
@@ -274,10 +280,119 @@
             ######################
 
             Using C and P, you can Copy and Paste.
-            C by itself doesn't know how much to copy
+            C by itself doesn't know how much to copy, so you can use Select to select an area, and then press C to Copy it.
+            Then press P to Paste it somewhere.
+            If you make a new Selection and then Paste, the Pasted text will replace the Selection.
+
+            How about you replace all occurances of <one direction> with <cmantic> on the next line using Copy, Paste, and Select?
 
 
 
+            Omg <one direction> is the best, how could I have missed that <one direction> was a thing for so long.
+            From now on, I am going to talk about nothing else but <one direction> with all my friends.
+
+
+
+
+
+
+
+
+
+
+
+
+
+            ################
+            ### Movement ###
+            ################
+
+
+            W:    move forward by Word
+            B:    move Back by word
+            {, }: move to next brace
+            [, ]: move to next bracket
+            (, ): move to next paren
+
+
+
+
+
+
+
+
+            ##############################
+            ### Movement + Action = <3 ###
+            ##############################
+
+            As we said above, Copy doesn't know by itself how much to copy. You can tell it with a Selection, but it's a bit clunky
+            Instead, we can combine Copy with a movement!
+            Try Copying the Word below. Go to the beginning of it and press C followed by W
+
+            CopyThisWord.
+
+            Nice!
+
+
+
+
+
+            #####################
+            ### Delete Action ###
+            #####################
+
+            Another action that works with movements is the Delete action. Press D, followed by a movement, and it will delete the area that would've been covered by the movement.
+            Try it on this function. Stand by the function name, and press 'D' followed by '}', and instead of moving to the matching '}', you delete that range instead.
+
+            def this_is_a_function() {
+                beep();
+                beep();
+                boop();
+            }
+
+
+
+
+
+
+
+
+            ######################
+            ### Replace Action ###
+            ######################
+
+            Yet another action is the Replace action. It performs both a Delete and a Paste.
+            Try Copying the following line using Shift+H and Shift+L, and replace the second line with a well-placed Replace Shift+L.
+
+            Copy this entire line by standing to the left and doing C Shift+L
+            And then replace this entire line by standing to the left and doing R Shift+L
+
+
+
+
+
+
+
+
+
+
+
+
+            ####################
+            ### Action Areas ###
+            ####################
+
+
+            A movement isn't the only way to apply an action.
+            You can for example apply an action to an entire string by following the action with a "
+
+            Try out the Delete action on strings on this "crafty" but "silly" "line"
+
+            The available areas are:
+
+            ": entire string
+            p: current comma-separated block of code (Parameter)
+            {, }, [, ], (, ): The same as the corresponding movement, but including the final character
 
 
 
