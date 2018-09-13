@@ -1,0 +1,290 @@
+
+
+
+
+
+
+
+            Welcome to cmantic!
+
+
+
+
+
+            You can use hjkl to move around.
+
+            Try to follow this line: ___________________                                                                      
+                                                        \______________________________________                                  
+                                                                                               \                                  
+                                                                                               |                                  
+                                                                           ____________________/       ____________ hooray
+                                                                          /                            |                                  
+                                                                          |                            |                                  
+                                                                          \____________________________/                                  
+                                                                                                                                        
+
+            It's a bit weird in the beginning, I know. But this way you never have to leave the home row,
+            and once you get used to it, you will wonder how you ever could have survived without it
+
+
+
+
+
+
+
+
+
+
+
+
+            ###################
+            ### Line delete ###
+            ###################
+
+            To <D>elete a line, press Shift+D
+
+            Try it out on these suckers!
+
+            :(
+                        :'(
+                                  :)
+                 D:
+                     O_O
+
+
+
+
+
+
+
+
+            #################
+            ### Undo/Redo ###
+            #################
+
+
+            But.. those poor smileys! How about we bring them back again?
+
+            Undo: Control+Z
+            Redo: Control+Shift+Z
+
+
+
+
+
+
+
+
+            ###################
+            ### Insert mode ###
+            ###################
+
+
+            To <I>nsert some text, press I
+
+            How about you insert some text in the blanks?
+
+            First enter Insert mode, and press backspace to delete the blank, and start typing!
+
+            When you're done, hit Escape, and you will go back to normal mode
+
+            wow, this tutorial is _! It's making me feel all kinds of stuff, like _ and _. I should _ the author and _ him.
+
+
+
+
+
+
+
+
+
+            ##########################
+            ### delete 1 character ###
+            ##########################
+
+
+            "Oh man. Oh geez. Mr. Author, hitting "I" and Backspace just to delete one character seems really inefficient"
+
+            An astute observation my dear reader! That is exactly why you can press "x" in normal mode instead.
+
+            How about ?you ^ use it to clean up+ this sentence?@
+
+
+
+
+
+
+
+
+
+
+
+            ##############################
+            ### Jump along indentation ###
+            ##############################
+
+            As you know, j and k move you up and down.
+
+            But sometimes you want to jump a bit further.
+
+            J and K will move you to the next block of text that has the same indentation.
+
+            Give it a try!
+
+
+            if (happy && youKnowIt) {
+                HandClapperRequest request = HandClapperManager.Instance.BuildHandClapperRequest();
+                try {
+                    r.requestHandClap();
+                    r.clap();
+                } catch (ClapsNotAllowedAtWorkException e) {
+                    CryRequest cr = TearCanal.BuildCryRequest();
+                    cr.forceCry();
+                }
+
+                AggressiveBowelMovementHandler.run();
+            }
+
+
+            Sweet, huh? I expect you to use it to jump between sections in the rest of this tutorial! Or I'll find you and cut you
+
+
+
+
+
+
+
+
+            #################################
+            ### Jump to begin/end of line ###
+            #################################
+
+            In the same vein, H and L will take you to the beginning and end of the current line.
+            Try it out!
+
+
+            <jump here!>                                                                                         <and here!>
+
+
+
+
+
+
+
+
+
+
+
+            ######################
+            ### Visual jumping ###
+            ######################
+
+            Let's say you have a jumble of text like below, and you want to jump to the '!' in the middle.
+
+            "Oh geez, That's a lot of "hjkl":ses!", you might say. Do not fear, for "<F>ind character" is here!
+
+            Press f, and then the character you want to jump to (in this case '!'), and press the character that shows up in its place.
+
+            It's probably easier to understand if you just try it.
+
+
+
+
+            ThisIsABunchOfText. ABunchOfTextThatYouAreNotSupposedToBeReading. WhyAreYouReadingThis. StopItAlready.
+            SeriouslyYouDon'tHaveAnythingBetterToDo? Well, IGuessSinceYouDecidedToGiveThisEditorATry, MyGuessIsThatYouDon't.
+            WellICongratulateYouForIt, IAmAlsoAPersonWithoutBetterThingsToDo. Besides, WhatBetterThingsAreThereThanWeirdThingsLikeThis?
+            OhWell, SinceYouDecidedToStickAround, IMightAsWellTellYouABitAboutMyself. ItWasTheYear1988. AYearOfStuffAndThingsThatHappened.
+            IWasBorn. AndNowIAmHere. That'sAThingThatHappened.              !                 IKnowYouCanSeeThatThisParagraphWillEndSoon, 
+            AndThatYouAreWaitingForSomeSortOfPunchline. SorryBuddy, ItWontCome. LikeSeriously, StopReadingAlready. Argh. Fine. YouWantAJoke?
+            KnockKnock. RaceCondition. Who'sThere? FunHuh. IThoughtOfThatMyself. NotReally, ItWasLikeTheFirstGoogleResult:
+            https://www.reddit.com/r/AskReddit/comments/1kvhmz/whats_the_best_programming_joke_that_you_know/. AnyWho, IHaveToGetThisTutorialDone
+            HopeYouHadSomeFun, OrThatIAtleastThisEditorWillBeAbleToMakeYouABitMoreProductive. CatchYouOnTheFlipSide. ArrivaDerpy. AlsoDontForgetTo
+            UseYourNewFoundJumpPowersToJumpDownToTheNextParagraph. TheresAnExclamationMarkJustWaitingForYouThere. ExpertlyPlaced.
+
+
+
+
+
+
+            !
+            I know, I'm a genious. You don't have to tell me. But I won't stop you if you really want to. Also send me money
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            ################
+            ### The menu ###
+            ################
+
+            Press ':' to enter THE MENU <a cascade of obnoxious airhorns>.
+            You can do everything from here. But probably the most important thing you should never touch which is quit. Because why would you want that
+            Try typing some stuff like save, close, "set indent" etc.
+            It has fuzzy autocomplete, so you should be decently able to find what you're looking for.
+            Extra points if you find the hidden cake.
+
+            Oh, and Enter to choose the current selection, and Escape to exit.
+
+
+
+
+
+
+
+
+
+
+
+
+            ###################
+            ### Select area ###
+            ###################
+
+            Press S to start Selection.
+            A marker will be placed there to indicate where you started the selection.
+            To Delete the selection, press D.
+            Well learn more things you can do with selection further on
+
+
+            ________________ohgodpleasedeleteme______________
+
+
+
+
+
+
+
+
+
+
+
+
+            ######################
+            ### Copy and paste ###
+            ######################
+
+            Using C and P, you can Copy and Paste.
+            C by itself doesn't know how much to copy
+
+
+
+
+
+
+
+
+
+
+
+
+
