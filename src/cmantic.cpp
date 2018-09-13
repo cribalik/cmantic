@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * Show current class/function/method/namespace
  * create new file
  * dp on empty ()
  * gd for multiple definitions with the same name
@@ -2725,8 +2726,8 @@ static void do_delete_visual() {
   buffer.action_begin();
 
   for (int i = 0; i < G.visual_start.cursors.size; ++i) {
-    Pos pa = min(G.visual_start.cursors[i].pos, buffer.cursors[i].pos);
-    Pos pb = max(G.visual_start.cursors[i].pos, buffer.cursors[i].pos);
+    Pos pa = min(G.visual_start.cursors[i], buffer.cursors[i].pos);
+    Pos pb = max(G.visual_start.cursors[i], buffer.cursors[i].pos);
 
     if (G.visual_entire_line)
       buffer.remove_range(pa.y, pb.y, i);
@@ -6110,7 +6111,7 @@ int main(int, const char *[])
     render_quads();
     render_text();
 
-    G.activation_meter = at_least(G.activation_meter - dt / 5000.0f, 0.0f);
+    G.activation_meter = at_least(G.activation_meter - dt / 500.0f, 0.0f);
 
     SDL_GL_SwapWindow(G.window);
 
