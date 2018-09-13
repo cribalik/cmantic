@@ -852,7 +852,7 @@ struct RotatingColor {
 
   void tick(float dt) {
     hue = fmodf(hue + dt*speed*0.1f, 360.0f);
-    color = Color::from_hsl(hue, saturation, light);
+    color = Color::to_linear(Color::from_hsl(hue, saturation, light));
   }
   void jump() {
     hue = fmodf(hue + 180.0f, 360.0f);
@@ -3348,14 +3348,21 @@ static void handle_input(Key key) {
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
           break;
-      i = (i+1)%G.editing_panes.size;
-      G.editing_pane = G.editing_panes[i];
-      G.selected_pane = G.editing_pane;
+      // find next root-level pane
+      for (++i; i < G.editing_panes.size; ++i)
+        if (!G.editing_panes[i]->parent)
+          break;
+      if (i != G.editing_panes.size) {
+        i = (i+1)%G.editing_panes.size;
+        G.editing_pane = G.editing_panes[i];
+        G.selected_pane = G.editing_pane;
+      }
       break;}
 
     case CONTROL('j'): {
       // Find sibling below
       Pane *p = G.editing_pane;
+      // TODO: go down to same depth as current pane?
       while (p->parent) {
         if (p->parent->selected_subpane < p->parent->subpanes.size-1) {
           ++p->parent->selected_subpane;
@@ -3395,9 +3402,15 @@ static void handle_input(Key key) {
       for (i = 0; i < G.editing_panes.size; ++i)
         if (G.editing_panes[i] == G.editing_pane)
           break;
-      i = (i-1+G.editing_panes.size)%G.editing_panes.size;
-      G.editing_pane = G.editing_panes[i];
-      G.selected_pane = G.editing_pane;
+      // find next root-level pane
+      for (--i; i >= 0; --i)
+        if (!G.editing_panes[i]->parent)
+          break;
+      if (i >= 0) {
+        i = (i-1 + G.editing_panes.size)%G.editing_panes.size;
+        G.editing_pane = G.editing_panes[i];
+        G.selected_pane = G.editing_pane;
+      }
       break;}
 
     case ' ':
@@ -5695,7 +5708,6 @@ int Pane::numchars_x() const {
 }
 
 int Pane::numchars_y() const {
-  // return (this->bounds.h - 2*this->margin) / G.line_height + 1;
   const int header_height = type == PANETYPE_EDIT ? G.line_height : 0;
   return ((this->bounds.h - header_height - 2*this->margin) / G.line_height) + 2;
 }
