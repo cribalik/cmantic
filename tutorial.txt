@@ -8,7 +8,8 @@
             Welcome to cmantic!
 
 
-            First of all, press '+' and '-' to make the font bigger or smaller.
+            Before we start, please press '+' and '-' to make the font bigger or smaller.
+
             Happy you are here! Let's get started, shall we?
 
 
@@ -86,13 +87,19 @@
             ###################
 
 
-            To <I>nsert some text, press I
+            To <I>nsert some text, press I. This will put you in "Insert Mode", where you can type away freely.
 
-            How about you insert some text in the blanks?
+            The normal mode is called.. Normal Mode. You can see the current mode you're in in the status bar at the bottom.
+
+            Now, how about you insert some text in the blanks?
 
             First enter Insert mode, and press backspace to delete the blank, and start typing!
 
             When you're done, hit Escape, and you will go back to normal mode
+
+
+
+
 
             wow, this tutorial is _! It's making me feel all kinds of stuff, like _ and _. I should _ the author and _ him.
 
@@ -129,11 +136,11 @@
             ### Jump along indentation ###
             ##############################
 
-            As you know, j and k move you up and down.
+            As you know, J and K move you up and down.
 
             But sometimes you want to jump a bit further.
 
-            J and K will move you to the next block of text that has the same indentation.
+            Shift+J and Shift+K will move you to the next block of text that has the same indentation.
 
             Give it a try!
 
@@ -205,7 +212,7 @@
             KnockKnock. RaceCondition. Who'sThere? FunHuh. IThoughtOfThatMyself. NotReally, ItWasLikeTheFirstGoogleResult:
             https://www.reddit.com/r/AskReddit/comments/1kvhmz/whats_the_best_programming_joke_that_you_know/. AnyWho, IHaveToGetThisTutorialDone
             HopeYouHadSomeFun, OrThatIAtleastThisEditorWillBeAbleToMakeYouABitMoreProductive. CatchYouOnTheFlipSide. ArrivaDerpy. AlsoDontForgetTo
-            UseYourNewFoundJumpPowersToJumpDownToTheNextParagraph. TheresAnExclamationMarkJustWaitingForYouThere. ExpertlyPlaced.
+            UseYourNewFoundJumpPowersToJumpDownToTheNextParagraph. TheresAnExclamationMarkJustWaitingForYouThere. ExpertlyPlacedIfIMightSaySoMyself.
 
 
 
@@ -233,8 +240,8 @@
             ### The menu ###
             ################
 
-            Press ':' to enter THE MENU <a cascade of obnoxious airhorns>.
-            You can do everything from here. But probably the most important thing you should never touch which is quit. Because why would you want that
+            Press ':' to enter.. !!THE MENU!! <queue cascade of obnoxious airhorns>.
+            You can do everything from here. But probably the most important thing you should never touch is quit. Because why would you want that.
             Try typing some stuff like save, close, "set indent" etc.
             It has fuzzy autocomplete, so you should be decently able to find what you're looking for.
             Extra points if you find the hidden cake.
@@ -259,7 +266,7 @@
             Press S to start Selection.
             A marker will be placed there to indicate where you started the selection.
             To Delete the selection, press D.
-            Well learn more things you can do with selection further on
+            We'll learn more things you can do with selection further on
 
 
             ________________ohgodpleasedeleteme______________
@@ -310,9 +317,9 @@
 
             W:    move forward by Word
             B:    move Back by word
-            {, }: move to next brace
-            [, ]: move to next bracket
-            (, ): move to next paren
+            {, }: move to previous/next brace
+            [, ]: move to previous/next bracket
+            (, ): move to previous/next paren
 
 
 
@@ -325,13 +332,17 @@
             ### Movement + Action = <3 ###
             ##############################
 
-            As we said above, Copy doesn't know by itself how much to copy. You can tell it with a Selection, but it's a bit clunky
-            Instead, we can combine Copy with a movement!
-            Try Copying the Word below. Go to the beginning of it and press C followed by W
+            As we said above, Copy doesn't know by itself how much to copy.
+            You can tell it with a Selection, but thats a bit clunky.
+            Instead, we can combine Copy with a movement! If you do a movement after pressing C,
+            instead of actually moving you will Copy the area you would've covered with the movement.
+            Try Copying the Word below. Go to the beginning of it and press C followed by W. You will have copied the whole word.
 
             CopyThisWord.
 
-            Nice!
+            A command that can be combined with a movement is called an action. We'll look at a few other actions in the following sections
+
+
 
 
 
@@ -341,7 +352,7 @@
             ### Delete Action ###
             #####################
 
-            Another action that works with movements is the Delete action. Press D, followed by a movement, and it will delete the area that would've been covered by the movement.
+            An action that works with movements is the Delete action. Press D, followed by a movement, and it will delete the area that would've been covered by the movement.
             Try it on this function. Stand by the function name, and press 'D' followed by '}', and instead of moving to the matching '}', you delete that range instead.
 
             def this_is_a_function() {
@@ -361,8 +372,8 @@
             ### Replace Action ###
             ######################
 
-            Yet another action is the Replace action. It performs both a Delete and a Paste.
-            Try Copying the following line using Shift+H and Shift+L, and replace the second line with a well-placed Replace Shift+L.
+            Yet another action is the Replace action. It performs first a Delete and then a Paste.
+            Try Copying the following line using Shift+H, Copy (C), and Shift+L, and replace the second line with a well-placed Replace Shift+L.
 
             Copy this entire line by standing to the left and doing C Shift+L
             And then replace this entire line by standing to the left and doing R Shift+L
@@ -386,7 +397,7 @@
             A movement isn't the only way to apply an action.
             You can for example apply an action to an entire string by following the action with a "
 
-            Try out the Delete action on strings on this "crafty" but "silly" "line"
+            Try out the "Delete" action on "the strings in" this "crafty" but "silly line"
 
             The available areas are:
 
