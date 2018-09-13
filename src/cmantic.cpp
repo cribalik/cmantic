@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * dp on empty ()
  * gd for multiple definitions with the same name
  * Need higher precision for colors when working in linear space
  * If a buffer is only 1 line long, the line will never be read
@@ -3784,6 +3785,11 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
     b.language = LANGUAGE_PYTHON;
   else if (filename.ends_with(".jl"))
     b.language = LANGUAGE_JULIA;
+  else if (filename.ends_with(".sh"))
+    b.language = LANGUAGE_BASH;
+  // bash will have to do for makefiles
+  else if (Path::name(filename) == "Makefile" || Path::name(filename) == "makefile")
+    b.language = LANGUAGE_BASH;
   else if (filename.ends_with(".cmantic-colorscheme"))
     b.language = LANGUAGE_CMANTIC_COLORSCHEME;
 

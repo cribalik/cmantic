@@ -337,11 +337,68 @@ static Keyword julia_keywords[] = {
   {"end", KEYWORD_CONTROL},
 };
 
+static Keyword bash_keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"unset", KEYWORD_CONSTANT},
+
+  // types
+
+  // function
+
+  // specifiers
+
+  {"static", KEYWORD_SPECIFIER},
+  {"const", KEYWORD_SPECIFIER},
+  {"extern", KEYWORD_SPECIFIER},
+  {"nothrow", KEYWORD_SPECIFIER},
+  {"noexcept", KEYWORD_SPECIFIER},
+  {"public", KEYWORD_SPECIFIER},
+  {"private", KEYWORD_SPECIFIER},
+  {"in", KEYWORD_SPECIFIER},
+  {"delegate", KEYWORD_SPECIFIER},
+  {"protected", KEYWORD_SPECIFIER},
+  {"override", KEYWORD_SPECIFIER},
+  {"virtual", KEYWORD_SPECIFIER},
+  {"abstract", KEYWORD_SPECIFIER},
+
+  // declarations
+
+  {"export", KEYWORD_DEFINITION},
+  {"set", KEYWORD_DEFINITION},
+  {"function", KEYWORD_DEFINITION},
+
+  // macro
+
+  // flow control
+
+  {"switch", KEYWORD_CONTROL},
+  {"case", KEYWORD_CONTROL},
+  {"in", KEYWORD_CONTROL},
+  {"esac", KEYWORD_CONTROL},
+  {"if", KEYWORD_CONTROL},
+  {"elif", KEYWORD_CONTROL},
+  {"else", KEYWORD_CONTROL},
+  {"fi", KEYWORD_CONTROL},
+  {"for", KEYWORD_CONTROL},
+  {"then", KEYWORD_CONTROL},
+  {"while", KEYWORD_CONTROL},
+  {"do", KEYWORD_CONTROL},
+  {"done", KEYWORD_CONTROL},
+  {"return", KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break", KEYWORD_CONTROL},
+};
+
 enum Language {
   LANGUAGE_NULL,
   LANGUAGE_C,
   LANGUAGE_PYTHON,
   LANGUAGE_JULIA,
+  LANGUAGE_BASH,
   LANGUAGE_CMANTIC_COLORSCHEME,
   NUM_LANGUAGES
 };
@@ -378,6 +435,54 @@ static const Slice python_operators[] = {
   {(char*)"!==", 3},
   {(char*)"<<=", 3},
   {(char*)">>=", 3},
+  {(char*)"||", 2},
+  {(char*)"&&", 2},
+  {(char*)"==", 2},
+  {(char*)"!=", 2},
+  {(char*)"<<", 2},
+  {(char*)">>", 2},
+  {(char*)"++", 2},
+  {(char*)"::", 2},
+  {(char*)"--", 2},
+  {(char*)"+", 1},
+  {(char*)"-", 1},
+  {(char*)"*", 1},
+  {(char*)"/", 1},
+  {(char*)"&", 1},
+  {(char*)"%", 1},
+  {(char*)"=", 1},
+  {(char*)":", 1},
+  {(char*)"<", 1},
+  {(char*)">", 1},
+};
+
+static const Slice julia_operators[] = {
+  {(char*)"===", 3},
+  {(char*)"!==", 3},
+  {(char*)"<<=", 3},
+  {(char*)">>=", 3},
+  {(char*)"||", 2},
+  {(char*)"&&", 2},
+  {(char*)"==", 2},
+  {(char*)"!=", 2},
+  {(char*)"<<", 2},
+  {(char*)">>", 2},
+  {(char*)"++", 2},
+  {(char*)"::", 2},
+  {(char*)"--", 2},
+  {(char*)"+", 1},
+  {(char*)"-", 1},
+  {(char*)"*", 1},
+  {(char*)"/", 1},
+  {(char*)"&", 1},
+  {(char*)"%", 1},
+  {(char*)"=", 1},
+  {(char*)":", 1},
+  {(char*)"<", 1},
+  {(char*)">", 1},
+};
+
+static const Slice bash_operators[] = {
   {(char*)"||", 2},
   {(char*)"&&", 2},
   {(char*)"==", 2},
@@ -458,12 +563,12 @@ static bool parse_whitespace(Slice line, int &x, TokenInfo &t) {
   return false;
 }
 
-static bool parse_identifier(Slice line, int &x, TokenInfo &t, const char *additional_identifier_heads) {
+static bool parse_identifier(Slice line, int &x, TokenInfo &t, const char *additional_identifier_heads, const char *additional_identifier_tails) {
   char c = line[x];
   if (!is_identifier_head(c) && !Slice::contains(additional_identifier_heads, c))
     return false;
   NEXT_CHAR(1);
-  while (is_identifier_tail(c))
+  while (is_identifier_tail(c) || Slice::contains(additional_identifier_tails, c))
     NEXT_CHAR(1);
   t.token = TOKEN_IDENTIFIER;
   return true;
@@ -652,7 +757,7 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     }
 
     // identifier
-    if (parse_identifier(line, x, t, "@"))
+    if (parse_identifier(line, x, t, "@", ""))
       goto token_done;
 
     // number
@@ -664,10 +769,10 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
       goto token_done;
 
     // operators
-    for (int i = 0; i < (int)ARRAY_LEN(python_operators); ++i) {
-      if (line.begins_with(x, python_operators[i])) {
+    for (int i = 0; i < (int)ARRAY_LEN(julia_operators); ++i) {
+      if (line.begins_with(x, julia_operators[i])) {
         t.token = TOKEN_OPERATOR;
-        NEXT_CHAR(python_operators[i].length);
+        NEXT_CHAR(julia_operators[i].length);
         goto token_done;
       }
     }
@@ -703,6 +808,103 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
           definitions += tokens[i+1].r;
           break;
         }
+        break;
+
+      default:
+        break;
+    }
+  }
+  return {tokens, definitions, identifiers};
+}
+
+static ParseResult bash_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      goto token_done;
+    }
+
+    // line comment
+    if (c == '#') {
+      t.token = TOKEN_LINE_COMMENT;
+      x = line.length;
+      goto token_done;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t, "0123456789", "-+"))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // string
+    if (parse_string(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(bash_operators); ++i) {
+      if (line.begins_with(x, bash_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(bash_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  // find definitions
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo *ti = tokens+i;
+    switch (ti->token) {
+      case TOKEN_IDENTIFIER:
+        if      (i+1 < tokens.size && (ti->str == "function" || ti->str == "export"))
+          definitions += ti[1].r, ++i;
+        else if (i+1 < tokens.size && ti[1].str == "=" && (i == 0 || ti[-1].a.y < ti[0].a.y))
+          definitions += ti[0].r, ++i;
         break;
 
       default:
@@ -887,6 +1089,7 @@ LanguageSettings language_settings[] = {
   {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse}, // LANGUAGE_C
   {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse},  // LANGUAGE_PYTHON
   {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse},  // LANGUAGE_JULIA
+  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},   Slice::create("#"),  bash_parse},  // LANGUAGE_BASH
   {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse},  // LANGUAGE_CMANTIC_COLORSCHEME
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
