@@ -153,6 +153,7 @@ static Keyword cpp_keywords[] = {
   {"else", KEYWORD_CONTROL},
   {"for", KEYWORD_CONTROL},
   {"while", KEYWORD_CONTROL},
+  {"do", KEYWORD_CONTROL},
   {"return", KEYWORD_CONTROL},
   {"continue", KEYWORD_CONTROL},
   {"break", KEYWORD_CONTROL},
@@ -344,24 +345,6 @@ enum Language {
   LANGUAGE_CMANTIC_COLORSCHEME,
   NUM_LANGUAGES
 };
-
-StaticArray<Keyword> keywords[] = {
-  {},
-  {cpp_keywords, ARRAY_LEN(cpp_keywords)},
-  {python_keywords, ARRAY_LEN(python_keywords)},
-  {julia_keywords, ARRAY_LEN(julia_keywords)},
-  {},
-};
-STATIC_ASSERT(ARRAY_LEN(keywords) == NUM_LANGUAGES, all_keywords_defined);
-
-Slice line_comments[] = {
-  {"#"},               // LANGUAGE_NULL
-  Slice::create("//"), // LANGUAGE_C
-  Slice::create("#"),  // LANGUAGE_PYTHON
-  Slice::create("#"),   // LANGUAGE_JULIA
-  Slice::create("#")   // LANGUAGE_CMANTIC_COLORSCHEME
-};
-STATIC_ASSERT(ARRAY_LEN(line_comments) == NUM_LANGUAGES, all_line_comments_defined);
 
 // MUST BE REVERSE SIZE ORDER
 static const Slice cpp_operators[] = {
@@ -893,16 +876,20 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
   return {tokens, definitions, identifiers};
 }
 
-
 typedef ParseResult (*ParseFun)(const Array<StringBuffer> lines);
-ParseFun parse_funs[] = {
-  {},           // LANGUAGE_NULL
-  cpp_parse,    // LANGUAGE_C
-  python_parse, // LANGUAGE_PYTHON
-  julia_parse,  // LANGUAGE_JULIA
-  python_parse, // LANGUAGE_CMANTIC_COLORSCHEME
+struct LanguageSettings {
+  StaticArray<Keyword> keywords;
+  Slice line_comment;
+  ParseFun parse_fun;
 };
-STATIC_ASSERT(ARRAY_LEN(parse_funs) == NUM_LANGUAGES, all_parse_funs_listed);
+LanguageSettings language_settings[] = {
+  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse},  // LANGUAGE_NULL
+  {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse}, // LANGUAGE_C
+  {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse},  // LANGUAGE_PYTHON
+  {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse},  // LANGUAGE_JULIA
+  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse},  // LANGUAGE_CMANTIC_COLORSCHEME
+};
+STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 
 static ParseResult parse(const Array<StringBuffer> lines, Language language) {
   if (language == LANGUAGE_NULL)
@@ -912,7 +899,7 @@ static ParseResult parse(const Array<StringBuffer> lines, Language language) {
     return {};
   }
 
-  return parse_funs[language](lines);
+  return language_settings[language].parse_fun(lines);
 }
 
 #endif /* PARSE_CPP */

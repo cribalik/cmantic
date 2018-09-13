@@ -20,12 +20,23 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned short u16;
-#define U16_MAX 65535
+#define U16_MAX 0xFFFF
+#define U32_MAX 0xFFFFFFFF
 
 static int graphics_init(SDL_Window **window);
 
+struct Color16 {
+  u16 r;
+  u16 g;
+  u16 b;
+  u16 a;
+};
+
 struct Color {
-  u8 r,g,b,a;
+  u8 r;
+  u8 g;
+  u8 b;
+  u8 a;
 
   // h [0,360]
   // s [0,1]
@@ -43,6 +54,7 @@ struct Color {
   static Color invert(Color c);
   static Color constrasting(Color c);
 };
+typedef Color Color8;
 
 /**************
  *    TEXT    *

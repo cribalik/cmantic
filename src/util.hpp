@@ -566,7 +566,8 @@ void util_free(Array<T> &a) {
 }
 
 
-#define ARRAY_FIND(a, pptr, expr) {for ((*pptr) = (a).items; (*pptr) < (a).items+(a).size; ++(*pptr)) {if (expr) break;} if ((*pptr) == (a).items+(a).size) {(*pptr) = 0;}}
+#define ARRAY_FIND(a, pptr, expr) do {for ((*pptr) = (a).items; (*pptr) < (a).items+(a).size; ++(*pptr)) {if (expr) break;} if ((*pptr) == (a).items+(a).size) {(*pptr) = 0;}} while (0)
+#define ARRAY_EXISTS(a, pbool, expr) do {*pbool = false; for (auto it : a) if (expr) {*pbool = true; break;}} while (0)
 #define ARRAY_MIN_BY(a, field) (VIEW(a, field).min())
 #define ARRAY_MAX_BY(a, field) (VIEW(a, field).max())
 #define ARRAY_MAXVAL_BY(a, field) VIEW(a, field).maxval()

@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * gd for multiple definitions with the same name
+ * Need higher precision for colors when working in linear space
  * If a buffer is only 1 line long, the line will never be read
  * multicursor autocomplete broken
  * goto declaration list, remove all whitespace
@@ -968,7 +970,6 @@ struct State {
   Pane dropdown_pane;
   BufferData dropdown_buffer;
   BufferData null_buffer;
-  Pane build_result_pane;
   BufferData build_result_buffer;
 
   float activation_meter;
@@ -2093,8 +2094,6 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
     }
     if (!a.toint(&ai))
       ai = 255;
-    else
-      log_warn("read alpha %i for key {}\n", ai, key);
 
     Color c = {(u8)ri, (u8)gi, (u8)bi, (u8)ai};
     c = Color::to_linear(c);
@@ -2400,7 +2399,7 @@ static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
   for (int y = y0; y <= y1; ++y) {
     int x  = buffer.data->begin_of_line(y);
     Pos a = {x, y};
-    const Slice comment = line_comments[buffer.data->language];
+    const Slice comment = language_settings[buffer.data->language].line_comment;
     if (buffer.data->lines[y].begins_with(x, comment)) {
       Pos b = a;
       b.x += 2;
@@ -2444,14 +2443,18 @@ static void do_build() {
   // reset buffer and pane
   G.build_result_buffer.init(false, Slice::create("[Build Result]"));
   G.build_result_buffer.disable_undo();
-  Pane::init_edit(G.build_result_pane, &G.build_result_buffer, &G.color_scheme.background, &G.color_scheme.syntax_text, &G.active_highlight_background_color.color, &G.color_scheme.line_highlight_inactive, false);
-  Pane **p;
-  ARRAY_FIND(G.editing_panes, &p, (*p)->buffer.data == &G.build_result_buffer);
-  if (!p)
+  bool exists;
+  ARRAY_EXISTS(G.editing_panes, &exists, it->buffer.data == &G.build_result_buffer);
+  if (!exists)
     G.editing_pane->add_subpane(&G.build_result_buffer, {});
   else {
-    (*p)->buffer.collapse_cursors();
-    (*p)->buffer.cursors[0] = Cursor::create(Pos{});
+    // update all panes showing build result
+    for (Pane *p : G.editing_panes) {
+      if (p->buffer.data != &G.build_result_buffer)
+        continue;
+      p->buffer.collapse_cursors();
+      p->buffer.cursors[0] = Cursor::create(Pos{});
+    }
   }
 
   COROUTINE_END;
@@ -2890,6 +2893,7 @@ static void handle_input(Key key) {
         if (t->token != TOKEN_IDENTIFIER)
           break;
 
+        // TODO: what if we have multiple matches?
         Range *def = buffer.data->getdefinition(t->str);
         if (!def)
           break;
@@ -3581,13 +3585,21 @@ static void do_update(float dt) {
       if (n == 0)
         break;
 
-      Pane **p;
-      ARRAY_FIND(G.editing_panes, &p, (*p)->buffer.data == &b);
-      Pos prevpos = p ? (*p)->buffer.cursors[0].pos : Pos{};
+      Array<Cursor> prev = {};
+      for (Pane *p : G.editing_panes)
+        if (p->buffer.data == &G.build_result_buffer)
+          prev += p->buffer.cursors[0];
       Array<Cursor> cursors = {};
       b.insert(cursors, {b.lines.last().length, b.lines.size-1}, Slice::create(buf, n), -1);
-      if (p)
-        (*p)->buffer.cursors[0] = Cursor::create(prevpos);
+
+      int prev_idx = 0;
+      for (Pane *p : G.editing_panes) {
+        if (p->buffer.data == &G.build_result_buffer) {
+          p->buffer.collapse_cursors();
+          p->buffer.cursors[0] = prev[prev_idx++];
+        }
+      }
+      util_free(prev);
     }
   }
 
@@ -4339,15 +4351,11 @@ void BufferData::remove_trailing_whitespace(Array<Cursor> &cursors, int cursor_i
   int y = cursors[cursor_idx].y;
   if (lines[y].length == 0)
     return;
+  for (int x = 0; x < lines[y].length; ++x)
+    if (!getchar(x,y).isspace())
+      return;
 
-  int x = lines[y].length - 1;
-  if (!getchar(x,y).isspace())
-    return;
-
-  // TODO: @utf8
-  while (x >= 0 && getchar(x, y).isspace())
-    --x;
-  remove_range(cursors, {x+1, y}, {lines[y].length, y}, cursor_idx);
+  remove_range(cursors, {0, y}, {lines[y].length, y}, cursor_idx);
 }
 
 void BufferData::delete_line(Array<Cursor> &cursors, int y) {
@@ -5047,9 +5055,11 @@ void TextCanvas::_normalize_range(Pos &a, Pos &b) {
   a -= offset;
   b -= offset;
   a.x = clamp(a.x, 0, w-1);
-  a.y = clamp(a.y, 0, h-1);
   b.x = clamp(b.x, 0, w-1);
-  b.y = clamp(b.y, 0, h-1);
+  if (a.y < 0)
+    a.y = 0, a.x = 0;
+  if (b.y >= h)
+    b.y = h-1, b.x = w-1;
 }
 
 void TextCanvas::blend_textcolor(Range range, Color c) {
@@ -5365,7 +5375,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
           if (t->str.length > 0 && t->str[0] == '#')
             render_highlight(keyword_colors[KEYWORD_MACRO]);
           else {
-            for (Keyword keyword : keywords[b.data->language]) {
+            for (Keyword keyword : language_settings[b.data->language].keywords) {
               if (t->str == keyword.name) {
                 render_highlight(keyword_colors[keyword.type]);
                 break;
