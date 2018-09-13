@@ -341,6 +341,7 @@ enum Language {
   LANGUAGE_C,
   LANGUAGE_PYTHON,
   LANGUAGE_JULIA,
+  LANGUAGE_CMANTIC_COLORSCHEME,
   NUM_LANGUAGES
 };
 
@@ -349,6 +350,7 @@ StaticArray<Keyword> keywords[] = {
   {cpp_keywords, ARRAY_LEN(cpp_keywords)},
   {python_keywords, ARRAY_LEN(python_keywords)},
   {julia_keywords, ARRAY_LEN(julia_keywords)},
+  {},
 };
 STATIC_ASSERT(ARRAY_LEN(keywords) == NUM_LANGUAGES, all_keywords_defined);
 
@@ -356,7 +358,8 @@ Slice line_comments[] = {
   {"#"},               // LANGUAGE_NULL
   Slice::create("//"), // LANGUAGE_C
   Slice::create("#"),  // LANGUAGE_PYTHON
-  Slice::create("#")   // LANGUAGE_JULIA
+  Slice::create("#"),   // LANGUAGE_JULIA
+  Slice::create("#")   // LANGUAGE_CMANTIC_COLORSCHEME
 };
 STATIC_ASSERT(ARRAY_LEN(line_comments) == NUM_LANGUAGES, all_line_comments_defined);
 
@@ -842,7 +845,7 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
           break;
         }
 
-        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union") &&
+        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
             tokens[i+2].token == '{') {
           definitions += tokens[i+1].r;
@@ -893,10 +896,11 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
 
 typedef ParseResult (*ParseFun)(const Array<StringBuffer> lines);
 ParseFun parse_funs[] = {
-  {},
-  cpp_parse,
-  python_parse,
-  julia_parse
+  {},           // LANGUAGE_NULL
+  cpp_parse,    // LANGUAGE_C
+  python_parse, // LANGUAGE_PYTHON
+  julia_parse,  // LANGUAGE_JULIA
+  python_parse, // LANGUAGE_CMANTIC_COLORSCHEME
 };
 STATIC_ASSERT(ARRAY_LEN(parse_funs) == NUM_LANGUAGES, all_parse_funs_listed);
 

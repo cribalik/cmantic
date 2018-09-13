@@ -31,6 +31,7 @@ struct Color {
   // s [0,1]
   // v [0,1]
   static Color from_hsl(float h, float s, float l);
+  // static Color to_hsl(float h, float s, float l);
   static Color blend(Color back, Color front);
   static Color blend(Color back, Color front, float alpha);
   static Color blend_additive(Color back, Color front);
@@ -39,6 +40,8 @@ struct Color {
   static float to_linear(float val);
   static Color to_srgb(Color c);
   static float to_srgb(float val);
+  static Color invert(Color c);
+  static Color constrasting(Color c);
 };
 
 /**************
@@ -868,6 +871,15 @@ static void render_shadow_top(int x, int y, int w, int shadow_size = 3) {
   );
 }
 
+static void render_shadow_bottom(int x, int y, int w, int shadow_size = 3) {
+  push_quad(
+    quad(x + w, y + shadow_size, shadow_color2),
+    quad(x + w, y,               shadow_color),
+    quad(x,     y,               shadow_color),
+    quad(x,     y + shadow_size, shadow_color2)
+  );
+}
+
 static void render_shadow_left(int x, int y, int h, int shadow_size = 3) {
   push_quad(
     quad(x,               y,     shadow_color),
@@ -995,5 +1007,13 @@ Color Color::to_srgb(Color c) {
   };
 }
 
+Color Color::invert(Color c) {
+  return {
+    (u8)(255 - c.r),
+    (u8)(255 - c.g),
+    (u8)(255 - c.b),
+    c.a
+  };
+}
 
 #endif /* GRAPHICS_H */

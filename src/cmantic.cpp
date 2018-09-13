@@ -545,6 +545,7 @@ struct TextCanvas {
   void render_char(Pos p, Color text_color, const Color *background_color, char c);
   void fill(Color text, Color background);
   void fill_background(Rect r, Color c);
+  void fill_background(Range r, Color c);
   void fill_textcolor(Rect r, Color c);
   void fill_textcolor(Range range, Color c);
   void blend_textcolor(Range range, Color c);
@@ -2193,7 +2194,9 @@ static void state_init() {
   G.line_margin = 0;
   G.line_height = G.font_height + G.line_margin;
 
-  read_colorscheme_file("./colorschemes/default.cmantic-colorscheme", true);
+  String path = String::createf("%s/.config/cmantic/colorscheme.cmantic-colorscheme", getenv("HOME"));
+  read_colorscheme_file(path.chars, true);
+  util_free(path);
 
   keyword_colors[KEYWORD_NONE]        = {};
   keyword_colors[KEYWORD_CONTROL]     = G.color_scheme.syntax_control;
@@ -3589,9 +3592,12 @@ static void do_update(float dt) {
   }
 
   static u64 last_modified;
-  if (update_idx%50 == 0)
-    if (File::was_modified("./colorschemes/default.cmantic-colorscheme", &last_modified))
-      read_colorscheme_file("./colorschemes/default.cmantic-colorscheme", true);
+  if (update_idx%50 == 0) {
+    String path = String::createf("%s/.config/cmantic/colorscheme.cmantic-colorscheme", getenv("HOME"));
+    if (File::was_modified(path.chars, &last_modified))
+      read_colorscheme_file(path.chars, true);
+    util_free(path);
+  }
 }
 
 static void do_render() {
@@ -3766,6 +3772,8 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
     b.language = LANGUAGE_PYTHON;
   else if (filename.ends_with(".jl"))
     b.language = LANGUAGE_JULIA;
+  else if (filename.ends_with(".cmantic-colorscheme"))
+    b.language = LANGUAGE_CMANTIC_COLORSCHEME;
 
   b.endline_string = ENDLINE_UNIX;
 
@@ -5126,6 +5134,28 @@ void TextCanvas::fill_textcolor(Rect r, Color c) {
     text_colors[y*this->w + x] = c;
 }
 
+// fills a to b but only inside the bounds 
+void TextCanvas::fill_background(Range range, Color c) {
+  Pos a = range.a;
+  Pos b = range.b;
+  _normalize_range(a, b);
+
+  if (a.y == b.y) {
+    for (int x = a.x; x < b.x; ++x)
+      this->background_colors[a.y*this->w + x] = c;
+    return;
+  }
+
+  int y = a.y;
+  for (int x = a.x; x < w; ++x)
+    this->background_colors[y*this->w + x] = c;
+  for (++y; y < b.y; ++y)
+    for (int x = 0; x < w; ++x)
+      this->background_colors[y*this->w + x] = c;
+  for (int x = 0; x < b.x; ++x)
+    this->background_colors[y*this->w + x] = c;
+}
+
 // w,h: use -1 to say it goes to the end
 void TextCanvas::fill_background(Rect r, Color c) {
   r.x -= offset.x;
@@ -5288,7 +5318,7 @@ void Pane::render_as_dropdown() {
 
   // highlight the line you're on
   for (int i = 0; i < b.cursors.size; ++i)
-    canvas.fill_background({0, b.cursors[i].y, {-1, 1}}, *active_highlight_background_color);
+    canvas.fill_background(Rect{0, b.cursors[i].y, {-1, 1}}, *active_highlight_background_color);
 
   canvas.render(this->bounds.p);
 
@@ -5303,7 +5333,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
   BufferView &b = this->buffer;
   // syntax @highlighting
   int y0 = canvas.offset.y;
-  Pos pos = {0, canvas.offset.y};
+  const Pos pos = {0, canvas.offset.y};
   TokenInfo *t = b.data->gettoken(pos);
 
   if (t) {
@@ -5347,6 +5377,42 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
         default:
           break;
       }
+    }
+  }
+
+  // we hack this here until we have language-specific syntax highlighting
+  if (b.data->language == LANGUAGE_CMANTIC_COLORSCHEME) {
+    t = b.data->gettoken(pos);
+    while (t + 4 < b.data->parser.tokens.end()) {
+      if (t->token != TOKEN_IDENTIFIER) {
+        ++t;
+        continue;
+      }
+      ++t;
+      if (t[0].token != TOKEN_NUMBER || t[1].token != TOKEN_NUMBER || t[2].token != TOKEN_NUMBER)
+        continue;
+
+      bool success = true;
+      int ri,gi,bi;
+      success &= b.data->getslice(t[0].r).toint(&ri);
+      success &= b.data->getslice(t[1].r).toint(&gi);
+      success &= b.data->getslice(t[2].r).toint(&bi);
+      Color color = {(u8)ri, (u8)gi, (u8)bi, 255};
+
+      if (!success)
+        break;
+
+      Range r = {t[-1].a};
+      while (t < b.data->parser.tokens.end() && t->token == TOKEN_NUMBER) {
+        r.b = t->b;
+        ++t;
+      }
+      r.a = b.data->to_visual_pos(r.a);
+      r.b = b.data->to_visual_pos(r.b);
+
+      color = Color::to_linear(color);
+      canvas.fill_textcolor(r, Color::invert(color));
+      canvas.fill_background(r, color);
     }
   }
 
@@ -5423,9 +5489,9 @@ void Pane::render_single_line() {
 
   // draw marker
   if (G.selected_pane == this)
-    canvas.fill_background({b.cursors[0].pos + buf_offset, {1, 1}}, G.marker_background_color.color);
+    canvas.fill_background(Rect{b.cursors[0].pos + buf_offset, {1, 1}}, G.marker_background_color.color);
   else if (G.bottom_pane != this)
-    canvas.fill_background({b.cursors[0].pos + buf_offset, {1, 1}}, G.color_scheme.marker_inactive);
+    canvas.fill_background(Rect{b.cursors[0].pos + buf_offset, {1, 1}}, G.color_scheme.marker_inactive);
 
   canvas.render(this->bounds.p);
 
@@ -5462,7 +5528,7 @@ void Pane::render_menu_popup() {
       canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i].slice);
 
     // highlight
-    canvas.fill_background({0, menu.current_suggestion, {-1, 1}}, *active_highlight_background_color);
+    canvas.fill_background(Rect{0, menu.current_suggestion, {-1, 1}}, *active_highlight_background_color);
 
     canvas.render(p);
     util_free(canvas);
@@ -5525,6 +5591,17 @@ void Pane::render_edit() {
   for (int y = buf_offset.y; y < buf_y1; ++y)
     canvas.render_str({0, y}, text_color, NULL, 0, -1, d.lines[y].slice);
 
+  // highlight the line you're on
+  const Color *highlight_background_color = G.editing_pane == this ? active_highlight_background_color : line_highlight_inactive;
+  if (highlight_background_color)
+    for (Cursor c : b.cursors)
+      canvas.fill_background(Rect{d.to_visual_pos(Pos{0, c.y}), {-1, 1}}, *highlight_background_color);
+
+  // highlight visual start
+  if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
+    for (Pos pos : G.visual_start.cursors)
+      canvas.fill_background(Rect{d.to_visual_pos({0, pos.y}), {-1, 1}}, *line_highlight_inactive);
+
   // draw syntax highlighting
   render_syntax_highlight(canvas, buf_y1);
 
@@ -5560,36 +5637,25 @@ void Pane::render_edit() {
     util_free(msg);
   }
 
-  // highlight the line you're on
-  const Color *highlight_background_color = G.editing_pane == this ? active_highlight_background_color : line_highlight_inactive;
-  if (highlight_background_color)
-    for (Cursor c : b.cursors)
-      canvas.fill_background({d.to_visual_pos(Pos{0, c.y}), {-1, 1}}, *highlight_background_color);
-
-  // highlight visual start
-  if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
-    for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({d.to_visual_pos({0, pos.y}), {-1, 1}}, *line_highlight_inactive);
-
   // if there is a search term, highlight that as well
   if (G.search_term.length > 0) {
     Pos pos = {0, buf_offset.y};
     while (d.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
-      canvas.fill_background({d.to_visual_pos(pos), G.search_term.length, 1}, G.search_term_background_color.color);
+      canvas.fill_background(Rect{d.to_visual_pos(pos), G.search_term.length, 1}, G.search_term_background_color.color);
   }
 
   // draw visual start marker
   if (G.visual_start.buffer == buffer.data)
     for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background({d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
+      canvas.fill_background(Rect{d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
 
   // draw marker
   for (Cursor c : b.cursors) {
     if (G.selected_pane == this)
-      // canvas.fill_background({buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
-      canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
+      // canvas.fill_background(Rect{buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
+      canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
     else if (G.bottom_pane != this)
-      canvas.fill_background({d.to_visual_pos(c.pos), {1, 1}}, G.color_scheme.marker_inactive);
+      canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.color_scheme.marker_inactive);
   }
 
   // draw visual jump
@@ -5612,8 +5678,9 @@ void Pane::render_edit() {
   // shadow
   if (bounds.x >= 7)
     render_shadow_left(bounds.x, bounds.y - header_height, bounds.h + header_height, 7);
-  if (bounds.y - header_height >= 7)
-    render_shadow_top(bounds.x, bounds.y - header_height, bounds.w, 4);
+  // if (bounds.y - header_height >= 7)
+    // render_shadow_top(bounds.x, bounds.y - header_height, bounds.w, 2);
+  render_shadow_bottom(bounds.x, bounds.y, bounds.w, 4);
 
   util_free(canvas);
   render_quads();
