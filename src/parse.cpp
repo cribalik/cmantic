@@ -258,7 +258,9 @@ static Keyword python_keywords[] = {
   {"goto", KEYWORD_CONTROL},
   {"yield", KEYWORD_CONTROL},
   {"default", KEYWORD_CONTROL},
+  {"raise", KEYWORD_CONSTANT},
   {"and", KEYWORD_CONTROL},
+  {"not", KEYWORD_CONTROL},
   {"or", KEYWORD_CONTROL},
   {"with", KEYWORD_CONTROL},
   {"try", KEYWORD_CONTROL},
@@ -623,6 +625,38 @@ static bool parse_string(Slice line, int &x, TokenInfo &t) {
   return true;
 }
 
+static bool parse_triple_string(Slice line, Array<StringBuffer> lines, int &x, int &y, TokenInfo &t) {
+  char c = line[x];
+  if (!line.begins_with(x, "\"\"\""))
+    return false;
+
+  NEXT_CHAR(3);
+  // goto matching end block
+  for (;;) {
+    // EOF
+    if (y >= lines.size)
+      goto done;
+    // EOL
+    if (x >= line.length) {
+      ++y;
+      if (y == lines.size)
+        break;
+      line = lines[y].slice;
+      x = 0;
+      continue;
+    }
+    // End block
+    if (line.begins_with(x, "\"\"\"")) {
+      NEXT_CHAR(3);
+      break;
+    }
+    NEXT_CHAR(1);
+  }
+  done:
+  t.token = TOKEN_STRING;
+  return true;
+}
+
 static ParseResult python_parse(const Array<StringBuffer> lines) {
   Array<TokenInfo> tokens = {};
   Array<String> identifiers = {};
@@ -665,6 +699,10 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
 
     // number
     if (parse_number(line, x, t))
+      goto token_done;
+
+    // triple quoted string
+    if (parse_triple_string(line, lines, x, y, t))
       goto token_done;
 
     // string
