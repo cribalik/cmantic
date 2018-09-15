@@ -44,6 +44,7 @@
 // @includes
 #include "util.hpp"
 #include "graphics.hpp"
+#include <ctime>
 
 void util_free(Pos) {}
 
@@ -986,6 +987,8 @@ struct State {
 
   /* idle game state */
   TextureHandle pokemon_texture;
+  Array<Rect> pokemon_sprites;
+  int pokemon_index;
 };
 
 State G;
@@ -2125,6 +2128,7 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
 }
 
 static void state_init() {
+  srand(time(0));
 
   if (!File::cwd(&G.current_working_directory))
     log_err("Failed to find current working directory, something is very wrong\n"), exit(1);
@@ -2144,6 +2148,22 @@ static void state_init() {
 
   if (!load_texture_from_file("assets/sprites.bmp", &G.pokemon_texture))
     exit(1);
+  G.pokemon_index = rand() % 3;
+
+  // parse sprite meta data
+  {
+    String file;
+    if (!File::get_contents("assets/sprite_positions", &file)) {
+      log_err("Failed to read assets/sprite_positions\n");
+      exit(1);
+    }
+    int i = 0;
+    for (Slice row; row = file.token(&i, '\n'), row.length;) {
+      Rect r;
+      sscanf(row.chars, "%i %i %i %i", &r.x, &r.y, &r.w, &r.h);
+      G.pokemon_sprites += r;
+    }
+  }
 
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
 
@@ -6056,24 +6076,53 @@ int main(int, const char *[])
 
     // draw activation meter
     {
-      StringBuffer sb = {};
-      sb.appendf("%i", (int)G.activation_meter);
-      Color c = COLOR_WHITE;
-      if (G.activation_meter < 10.0f)
-        c = COLOR_WHITE;
-      else if (G.activation_meter < 20.0f)
-        c = COLOR_BLUE;
-      else if (G.activation_meter < 30.0f)
-        c = COLOR_ORANGE;
-      else
-        c = COLOR_DEEP_ORANGE;
+      static float frame_time;
+      static float frame_delay = 60.0f;
+      static int frame = 0;
+      frame_time += dt;
+      if (frame_time > frame_delay) {
+        ++frame;
+        frame_time = 0;
+      }
 
-      push_text(sb.chars, G.win_width - G.font_width*3, G.win_height - G.font_height*2, true, c);
-      util_free(sb);
+      int animation;
+      int num_frames;
+      int num_images;
+      const int *frames;
 
-      push_text(sb.chars, G.win_width - G.font_width*3, G.win_height - G.font_height*2, true, c);
+      if (G.activation_meter < 10.0f) {
+        static int f[] = {0,1};
+        animation = G.pokemon_index*3 + 0;
+        frame_delay = 60.0f;
+        frames = f;
+        num_frames = ARRAY_LEN(f);
+        num_images = 2;
+      }
+      else {
+        static int f[] = {0,1,2,1};
+        static int g[] = {0,1,2};
+        animation = G.pokemon_index*3 + 2;
+        frame_delay = 10.0f;
+        frames = f;
+        num_frames = ARRAY_LEN(f);
+        num_images = 3;
+        if (G.pokemon_index == 2) {
+          frames = g;
+          num_frames = ARRAY_LEN(g);
+        }
+      }
+
+      Rect r = G.pokemon_sprites[animation];
+      r.w /= num_images;
+      frame = frame % num_frames;
+      r.x = r.w * frames[frame];
+
+      int w = r.w*2;
+      int h = r.h*2;
+      int x = G.win_width - w - 10;
+      int y = G.win_height - h - 10;
+      push_square_tquad({x, y, w, h}, r);
     }
-    push_square_tquad({0, 0, 400, 400}, {0, 0, 100, 100});
 
     render_quads();
     render_textured_quads(G.pokemon_texture);

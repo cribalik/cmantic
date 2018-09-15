@@ -11,3 +11,7 @@ include
 *.lnk
 .vs
 3party/*.h
+analyze_sprite_image
+metaprogram
+cmantic
+assets/sprite_positions
