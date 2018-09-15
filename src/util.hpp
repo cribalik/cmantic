@@ -406,7 +406,7 @@ union Array {
   }
 
   void free_shallow() {
-    dealloc(items);
+    dealloc_array(items, cap);
   }
 
   void zero() {
@@ -559,7 +559,7 @@ void util_free(Array<T> &a) {
   if (a.items) {
     for (int i = 0; i < a.size; ++i)
       util_free(a.items[i]);
-    dealloc(a.items);
+    dealloc_array(a.items, a.cap);
   }
   a.items = 0;
   a.size = a.cap = 0;
@@ -1110,7 +1110,7 @@ static bool operator==(String a, const char *b) {
 
 void util_free(String &s) {
   if (s.chars)
-    dealloc(s.chars);
+    dealloc_array(s.chars, s.length);
   s.chars = 0;
   s.length = 0;
 }
@@ -1424,7 +1424,7 @@ union StringBuffer {
 
 void util_free(StringBuffer &s) {
   if (s.chars)
-    dealloc(s.chars);
+    dealloc_array(s.chars, s.cap);
   s.chars = 0;
   s.length = s.cap = 0;
 }

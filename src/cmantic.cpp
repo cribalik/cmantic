@@ -1,17 +1,14 @@
 /*
  * TODO:
+ * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
+ * Optimize tokenization
+ * project file
  * Show current class/function/method/namespace
  * create new file
  * dp on empty ()
  * gd for multiple definitions with the same name
  * Need higher precision for colors when working in linear space
- * If a buffer is only 1 line long, the line will never be read
- * multicursor autocomplete broken
- * goto declaration list, remove all whitespace
- * We don't need to rewrite the whole tokenization on edit, just the y-range that changed.
- *     Also we should do it on every insert/delete, so that bugs like
- *     'o' autoindenting on the old line, get fixed
- *
+ * If a file is only 1 line long, the line will never be read
  * Code folding
  * always distinguish block selection on inner and outer?
  * Goto definition should show entire function parameter list
@@ -371,7 +368,7 @@ struct BufferData {
   bool find(char c, bool stay, Pos *pos);
   TokenInfo* find_start_of_identifier(Pos p);
   void insert(Array<Cursor> &cursors, Slice s);
-  void insert(Array<Cursor> &cursors, Pos p, Slice s, int cursor_idx = -1);
+  void insert(Array<Cursor> &cursors, Pos p, Slice s, int cursor_idx = -1, bool re_parse = true);
   void insert(Array<Cursor> &cursors, Slice s, int cursor_idx);
   void remove_trailing_whitespace(Array<Cursor> &cursors, int cursor_idx);
   void insert(Array<Cursor> &cursors, Pos p, Utf8char ch);
@@ -380,7 +377,7 @@ struct BufferData {
   void delete_line_at(int y);
   void delete_line(Array<Cursor> &cursors);
   void delete_line(Array<Cursor> &cursors, int y);
-  void remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx = -1);
+  void remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx = -1, bool re_parse = true);
   void delete_char(Array<Cursor>& cursors);
   void delete_char(Array<Cursor> &cursors, int cursor_idx);
   void insert_tab(Array<Cursor> &cursors);
@@ -1015,27 +1012,27 @@ static void status_message_set(const char *fmt, ...) {
   G.bottom_pane = &G.status_message_pane;
 }
 
-static const Color COLOR_PINK = {236, 64, 122, 255};
-static const Color COLOR_YELLOW = {255, 235, 59, 255};
-static const Color COLOR_LIGHT_YELLOW = {255, 240, 79, 255};
-static const Color COLOR_AMBER = {255,193,7, 255};
-static const Color COLOR_DEEP_ORANGE = {255,138,101, 255};
-static const Color COLOR_ORANGE = {255,183,77, 255};
-static const Color COLOR_GREEN = {129,199,132, 255};
-static const Color COLOR_LIGHT_GREEN = {174,213,129, 255};
-static const Color COLOR_INDIGO = {121,134,203, 255};
-static const Color COLOR_DEEP_PURPLE = {149,117,205, 255};
-static const Color COLOR_RED = {229,115,115, 255};
-static const Color COLOR_CYAN = {77,208,225, 255};
-static const Color COLOR_LIGHT_BLUE = {79,195,247, 255};
-static const Color COLOR_PURPLE = {186,104,200, 255};
-static const Color COLOR_BLUEGREY = {84, 110, 122, 255};
-static const Color COLOR_GREY = {51, 51, 51, 255};
-static const Color COLOR_LIGHT_GREY = {76, 76, 76, 255};
-static const Color COLOR_BLACK = {25, 25, 25, 255};
-static const Color COLOR_WHITE = {240, 240, 240, 255};
-static const Color COLOR_BLUE = {79,195,247, 255};
-static const Color COLOR_DARK_BLUE = {124, 173, 213, 255};
+static const Color COLOR_PINK = Color::to_linear({236, 64, 122, 255});
+static const Color COLOR_YELLOW = Color::to_linear({255, 235, 59, 255});
+static const Color COLOR_LIGHT_YELLOW = Color::to_linear({255, 240, 79, 255});
+static const Color COLOR_AMBER = Color::to_linear({255,193,7, 255});
+static const Color COLOR_DEEP_ORANGE = Color::to_linear({255,138,101, 255});
+static const Color COLOR_ORANGE = Color::to_linear({255,183,77, 255});
+static const Color COLOR_GREEN = Color::to_linear({129,199,132, 255});
+static const Color COLOR_LIGHT_GREEN = Color::to_linear({174,213,129, 255});
+static const Color COLOR_INDIGO = Color::to_linear({121,134,203, 255});
+static const Color COLOR_DEEP_PURPLE = Color::to_linear({149,117,205, 255});
+static const Color COLOR_RED = Color::to_linear({229,115,115, 255});
+static const Color COLOR_CYAN = Color::to_linear({77,208,225, 255});
+static const Color COLOR_LIGHT_BLUE = Color::to_linear({79,195,247, 255});
+static const Color COLOR_PURPLE = Color::to_linear({186,104,200, 255});
+static const Color COLOR_BLUEGREY = Color::to_linear({84, 110, 122, 255});
+static const Color COLOR_GREY = Color::to_linear({51, 51, 51, 255});
+static const Color COLOR_LIGHT_GREY = Color::to_linear({76, 76, 76, 255});
+static const Color COLOR_BLACK = Color::to_linear({25, 25, 25, 255});
+static const Color COLOR_WHITE = Color::to_linear({240, 240, 240, 255});
+static const Color COLOR_BLUE = Color::to_linear({79,195,247, 255});
+static const Color COLOR_DARK_BLUE = Color::to_linear({124, 173, 213, 255});
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
   #ifdef OS_WINDOWS
@@ -1577,10 +1574,6 @@ static void mode_insert() {
 
   G.editing_pane->buffer.action_begin();
 
-  // so even if the caller did some changes, and commits them with action_end, it will not have an effect
-  // since we do action_begin here. So we need to do things that action_end do manually here
-  G.editing_pane->buffer.data->parse();
-
   status_message_set("insert");
 }
 
@@ -1632,12 +1625,15 @@ static bool dropdown_autocomplete(BufferView &b) {
   if (G.dropdown_buffer.isempty())
     return false;
 
-  TokenInfo *t = b.data->find_start_of_identifier(b.cursors[0].pos);
-  if (!t)
-    return false;
   b.action_begin();
-  b.remove_range(t->r, 0);
-  b.insert(G.dropdown_buffer[G.dropdown_pane.buffer.cursors[0].y].slice);
+  Slice selection = G.dropdown_buffer[G.dropdown_pane.buffer.cursors[0].y].slice;
+  for (int i = 0; i < b.cursors.size; ++i) {
+    TokenInfo *t = b.data->find_start_of_identifier(b.cursors[i].pos);
+    if (!t)
+      continue;
+    b.remove_range(t->r, i);
+    b.insert(selection, i);
+  }
   b.action_end();
   return true;
 }
@@ -3114,8 +3110,6 @@ static void handle_input(Key key) {
         insert_occured = insert_default(*G.editing_pane, key);
         break;
     }
-    if (insert_occured)
-      buffer.data->parse();
     break;}
 
   case MODE_NORMAL:
@@ -3717,16 +3711,29 @@ String BufferData::get_merged_range(Range r) const {
   sb += lines[r.a.y](r.a.x, -1);
   sb += ' ';
   for (int y = r.a.y+1; y < r.b.y; ++y) {
-    // skip whitespace
-    int x = 0;
-    Slice s = lines[y].token(&x, ' ');
-    if (!s.length)
-      continue;
-    sb += lines[y](s.chars - lines[y].chars, -1);
+    sb += lines[y](0, -1);
     sb += ' ';
   }
   sb += lines[r.b.y](0, r.b.x);
-  return sb.string;
+
+  // remove whitespaces
+  char *out = sb.chars;
+  bool in_space = false;
+  for (int i = 0; i < sb.length; ++i) {
+    if (!isspace(sb[i])) {
+      *out++ = sb[i];
+      in_space = false;
+    }
+    else {
+      if (!in_space)
+        *out++ = ' ';
+      in_space = true;
+    }
+  }
+  sb.length = out - sb.chars;
+  String result = String::create(sb.slice);
+  util_free(sb);
+  return result;
 }
 
 bool BufferData::reload(BufferData *b) {
@@ -3948,10 +3955,6 @@ void BufferData::action_end(Array<Cursor> &cursors) {
     push_undo_action(UndoAction::cursor_snapshot(cursors));
     push_undo_action({ACTIONTYPE_GROUP_END});
 
-    // retokenize
-    if (buffer_changed)
-      this->parse();
-
     // CLIPBOARD
     {
       Array<StringBuffer> clips = {};
@@ -4022,11 +4025,11 @@ void BufferData::undo(Array<Cursor> &cursors) {
     switch (a.type) {
       case ACTIONTYPE_INSERT:
         // printf("Removing {%i %i}, {%i %i}\n", a.insert.a.x, a.insert.a.y, a.insert.b.x, a.insert.b.y);
-        remove_range(cursors, a.insert.a, a.insert.b);
+        remove_range(cursors, a.insert.a, a.insert.b, -1, false);
         break;
       case ACTIONTYPE_DELETE:
         // printf("Inserting '%.*s' at {%i %i}\n", a.remove.s.slice.length, a.remove.s.slice.chars, a.remove.a.x, a.remove.a.y);
-        insert(cursors, a.remove.a, a.remove.s.slice);
+        insert(cursors, a.remove.a, a.remove.s.slice, -1, false);
         break;
       case ACTIONTYPE_CURSOR_SNAPSHOT:
         util_free(cursors);
@@ -4039,9 +4042,8 @@ void BufferData::undo(Array<Cursor> &cursors) {
   }
   // printf("cursors: %i\n", cursors.size);
   --undo_disabled;
+  parse();
 
-  // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-  this->parse();
   raw_end();
 }
 
@@ -4064,11 +4066,11 @@ void BufferData::redo(Array<Cursor> &cursors) {
     switch (a.type) {
       case ACTIONTYPE_INSERT:
         // printf("Inserting '%s' at {%i %i}\n", a.insert.s.slice.chars, a.insert.a.x, a.insert.a.y);
-        insert(cursors, a.insert.a, a.insert.s.slice);
+        insert(cursors, a.insert.a, a.insert.s.slice, -1, false);
         break;
       case ACTIONTYPE_DELETE:
         // printf("Removing {%i %i}, {%i %i}\n", a.remove.a.x, a.remove.a.y, a.remove.b.x, a.remove.b.y);
-        remove_range(cursors, a.remove.a, a.remove.b);
+        remove_range(cursors, a.remove.a, a.remove.b, -1, false);
         break;
       case ACTIONTYPE_CURSOR_SNAPSHOT:
         util_free(cursors);
@@ -4080,9 +4082,8 @@ void BufferData::redo(Array<Cursor> &cursors) {
     }
   }
   ++_next_undo_action;
+  parse();
   --undo_disabled;
-  // TODO: @hack should we be able to do action_begin and action_end here so we don't need to hardcode in retokenization?
-  this->parse();
   raw_end();
 }
 
@@ -4417,7 +4418,7 @@ static void name(BufferData *buffer, Pos a, Pos b) { \
 UPDATE_CURSORS(move_cursors_on_insert, move_on_insert)
 UPDATE_CURSORS(move_cursors_on_delete, move_on_delete)
 
-void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx) {
+void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx, bool re_parse) {
   // log_info("before: (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);
   if (b <= a)
     swap_range(*this, a, b);
@@ -4439,6 +4440,9 @@ void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_i
     // delete lines a+1 to and including b
     lines.remove_slow_and_free(a.y+1, at_most(b.y - a.y, lines.size - a.y - 1));
   }
+
+  if (re_parse)
+    parse();
 
   move_cursors_on_delete(this, a, b);
 
@@ -4627,7 +4631,7 @@ void BufferData::insert(Array<Cursor> &cursors, Slice s, int cursor_idx) {
   insert(cursors, cursors[cursor_idx].pos, s, cursor_idx);
 }
 
-void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_index_hint) {
+void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor_index_hint, bool re_parse) {
   if (!s.length)
     return;
 
@@ -4679,6 +4683,8 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
     }
   }
 
+  if (re_parse)
+    parse();
   move_cursors_on_insert(this, a, b);
 
   paste_highlights += PasteHighlight{a, b, 1.0f};
