@@ -1257,6 +1257,10 @@ static void menu_option_blame() {
   COROUTINE_END;
 }
 
+static void menu_option_next_pet() {
+  ++G.pokemon_index;
+}
+
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
   {
     Slice::create("quit"),
@@ -1317,6 +1321,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("set indent"),
     Slice::create("set indentation. > 0 for spaces, 0 for tabs"),
     menu_option_set_indent
+  },
+  {
+    Slice::create("next pet"),
+    Slice::create("Switch to the next pet"),
+    menu_option_next_pet
   },
 };
 
@@ -6084,6 +6093,8 @@ int main(int, const char *[])
         ++frame;
         frame_time = 0;
       }
+
+      G.pokemon_index = G.pokemon_index % 3;
 
       int animation;
       int num_frames;
