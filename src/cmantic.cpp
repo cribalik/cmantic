@@ -48,40 +48,6 @@
 #include "util.hpp"
 #include "graphics.hpp"
 
-struct Pos {
-  int x,y;
-  bool operator!=(Pos p) {
-    return x != p.x || y != p.y;
-  }
-  void operator+=(Pos p) {
-    x += p.x;
-    y += p.y;
-  }
-  void operator-=(Pos p) {
-    x -= p.x;
-    y -= p.y;
-  }
-  bool operator==(Pos p) {
-    return x == p.x && y == p.y;
-  }
-  bool operator<(Pos p) {
-    if (y == p.y)
-      return x < p.x;
-    return y < p.y;
-  }
-  bool operator<=(Pos p) {
-    if (y == p.y)
-      return x <= p.x;
-    return y <= p.y;
-  }
-  bool operator>(Pos p) {
-    return p < *this;
-  }
-  bool operator>=(Pos p) {
-    return p <= *this;
-  }
-};
-
 void util_free(Pos) {}
 
 struct Range {
@@ -240,18 +206,6 @@ static Pos operator+(Pos a, Pos b) {
 }
 
 static void util_free(Range) {}
-union Rect {
-  struct {
-    Pos p;
-    Pos size;
-  };
-  struct {
-    int x;
-    int y;
-    int w;
-    int h;
-  };
-};
 
 union Cursor {
   struct {
@@ -1032,6 +986,9 @@ struct State {
   /* visual jump */
   Pane *current_visual_jump_pane;
   Array<Pos> visual_jump_positions;
+
+  /* idle game state */
+  TextureHandle pokemon_texture;
 };
 
 State G;
@@ -2174,9 +2131,9 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
 static void state_init() {
 
   if (!File::cwd(&G.current_working_directory))
-    fprintf(stderr, "Failed to find current working directory, something is very wrong\n"), exit(1);
+    log_err("Failed to find current working directory, something is very wrong\n"), exit(1);
   G.ttf_file = G.current_working_directory.copy();
-  G.ttf_file.push("font.ttf");
+  G.ttf_file.push("assets/font.ttf");
 
   // initialize graphics library
   if (graphics_init(&G.window))
@@ -2185,6 +2142,11 @@ static void state_init() {
   if (graphics_text_init(G.ttf_file.string.chars, G.font_height))
     exit(1);
   if (graphics_quad_init())
+    exit(1);
+  if (graphics_textured_quad_init())
+    exit(1);
+
+  if (!load_texture_from_file("assets/sprites.bmp", &G.pokemon_texture))
     exit(1);
 
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
@@ -5288,7 +5250,7 @@ void TextCanvas::render(Pos pos) {
     render_shadow_bottom_right(pos.x, pos.y, size.x, size.y);
 
   // render base background
-  push_square_quad((u16)pos.x, (u16)(pos.x+size.x), (u16)(pos.y), (u16)(pos.y+size.y), background);
+  push_square_quad({pos, size}, background);
   pos.x += margin;
   pos.y += margin;
 
@@ -5300,7 +5262,7 @@ void TextCanvas::render(Pos pos) {
       Pos p0 = char2pixel(x0,y) + pos;
       Pos p1 = char2pixel(x1,y+1) + pos;
       const Color c = background_colors[y*w + x0];
-      push_square_quad((u16)p0.x, (u16)p1.x, (u16)p0.y, (u16)p1.y, c);
+      push_square_quad({p0, p1-p0}, c);
       x0 = x1;
     }
   }
@@ -5694,7 +5656,7 @@ void Pane::render_edit() {
   const Slice filename = d.name();
   const int header_text_size = header_height - 6;
   push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
-  push_square_quad(bounds.x, bounds.x + bounds.w, bounds.y - header_height, bounds.y, G.color_scheme.menu_background);
+  push_square_quad({bounds.p, {bounds.w, -header_height}}, G.color_scheme.menu_background);
 
   // shadow
   if (bounds.x >= 7)
@@ -5928,19 +5890,15 @@ static void test() {
   assert(memmem("abcd", 4, "xabcdy", 6));
   Slice a = Slice::create("hello world");
   Slice b = Slice::create("hello");
-  printf("%s %i\n", b(2,-1).chars, b(2,-1).length);
   assert(a.begins_with(0, b));
   assert(a.begins_with(2, b(2, -1)));
   int x;
   b = Slice::create("llo");
   assert(a.find(2, b, &x));
-  printf("%i\n", x);
   assert(x == 2);
   assert(a.find(1, b, &x));
-  printf("%i\n", x);
   assert(x == 2);
   assert(a.find(0, b, &x));
-  printf("%i\n", x);
   assert(x == 2);
 
   #ifdef OS_WINDOWS
@@ -6106,9 +6064,13 @@ int main(int, const char *[])
 
       push_text(sb.chars, G.win_width - G.font_width*3, G.win_height - G.font_height*2, true, c);
       util_free(sb);
+
+      push_text(sb.chars, G.win_width - G.font_width*3, G.win_height - G.font_height*2, true, c);
     }
+    push_square_tquad({0, 0, 400, 400}, {0, 0, 100, 100});
 
     render_quads();
+    render_textured_quads(G.pokemon_texture);
     render_text();
 
     G.activation_meter = at_least(G.activation_meter - dt / 500.0f, 0.0f);

@@ -12,10 +12,40 @@
 #endif
 
 #include <SDL.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 /**************
  *   GENERAL  *
  *************/
+
+struct Pos {
+  int x;
+  int y;
+
+  bool operator!=(Pos p) {return x != p.x || y != p.y; }
+  void operator+=(Pos p) {x += p.x; y += p.y; }
+  void operator-=(Pos p) {x -= p.x; y -= p.y; }
+  bool operator==(Pos p) {return x == p.x && y == p.y; }
+  bool operator<(Pos p) {if (y == p.y) return x < p.x; return y < p.y; }
+  bool operator<=(Pos p) {if (y == p.y) return x <= p.x; return y <= p.y; }
+  bool operator>(Pos p) {return p < *this; }
+  bool operator>=(Pos p) {return p <= *this; }
+  Pos operator-(Pos p) {return Pos{x-p.x, y-p.y};}
+};
+
+union Rect {
+  struct {
+    Pos p;
+    Pos size;
+  };
+  struct {
+    int x;
+    int y;
+    int w;
+    int h;
+  };
+};
 
 typedef unsigned char u8;
 typedef unsigned int u32;
@@ -25,11 +55,11 @@ typedef unsigned short u16;
 
 static int graphics_init(SDL_Window **window);
 
-struct Color16 {
-  u16 r;
-  u16 g;
-  u16 b;
-  u16 a;
+struct LinearColor {
+  float r;
+  float g;
+  float b;
+  float a;
 };
 
 struct Color {
@@ -52,9 +82,7 @@ struct Color {
   static Color to_srgb(Color c);
   static float to_srgb(float val);
   static Color invert(Color c);
-  static Color constrasting(Color c);
 };
-typedef Color Color8;
 
 /**************
  *    TEXT    *
@@ -79,6 +107,27 @@ static Quad quad(int x, int y, Color c) {return {(u16)x, (u16)y, c};}
 static int graphics_quad_init();
 static void push_quad(Quad a, Quad b, Quad c, Quad d);
 static void render_quads();
+static void push_square_quad(Rect r, Color topleft, Color topright, Color bottomleft, Color bottomright);
+static void push_square_quad(Rect r, Color c);
+
+/**********************
+ *    TexturedQuad    *
+ *********************/
+
+struct TexturedQuad {
+  u16 x,y;
+  u16 tx,ty;
+};
+struct TextureHandle {
+  uint value;
+};
+static TexturedQuad tquad(int x, int y, int tx, int ty) {return {(u16)x, (u16)y, (u16)tx, (u16)ty};}
+static int graphics_textured_quad_init();
+static void push_tquad(TexturedQuad a, TexturedQuad b, TexturedQuad c, TexturedQuad d);
+static void push_square_tquad(Rect pos, Rect tex);
+static void render_textured_quads(TextureHandle texture);
+static bool load_texture_from_file(const char *filename, TextureHandle *result);
+
 
 #ifdef OS_WINDOWS
   #ifndef WIN32_LEAN_AND_MEAN
@@ -110,6 +159,7 @@ static void render_quads();
   #define GL_VERTEX_SHADER                  0x8B31
   #define GL_COMPILE_STATUS                 0x8B81
   #define GL_FRAGMENT_SHADER                0x8B30
+  #define GL_MIRRORED_REPEAT                0x8370
 
   #define GL_TEXTURE0                       0x84C0
   #define GL_TEXTURE1                       0x84C1
@@ -818,12 +868,12 @@ static void push_quad(Quad a, Quad b, Quad c, Quad d) {
   graphics_quad_state.num_vertices += 6;
 }
 
-static void push_square_quad(u16 x0, u16 x1, u16 y0, u16 y1, Color topleft, Color topright, Color bottomleft, Color bottomright) {
-  push_quad({x0,y0,topleft}, {x1,y0,topright}, {x1,y1,bottomright}, {x0,y1,bottomleft});
+static void push_square_quad(Rect r, Color topleft, Color topright, Color bottomleft, Color bottomright) {
+  push_quad(quad(r.x,r.y,topleft), quad(r.x+r.w,r.y,topright), quad(r.x+r.w,r.y+r.h,bottomright), quad(r.x,r.y+r.h,bottomleft));
 }
 
-static void push_square_quad(u16 x0, u16 x1, u16 y0, u16 y1, Color c) {
-  push_quad({x0,y0,c}, {x1,y0,c}, {x1,y1,c}, {x0,y1,c});
+static void push_square_quad(Rect r, Color c) {
+  push_quad(quad(r.x,r.y,c), quad(r.x+r.w,r.y,c), quad(r.x+r.w,r.y+r.h,c), quad(r.x,r.y+r.h,c));
 }
 
 static void render_quads() {
@@ -900,6 +950,188 @@ static void render_shadow_left(int x, int y, int h, int shadow_size = 3) {
     quad(x,               y + h, shadow_color)
   );
 }
+
+/**********************
+ *    TexturedQuad    *
+ *********************/
+
+typedef TexturedQuad TexturedQuadVertex;
+
+static struct {
+  bool initialized;
+  GLuint shader;
+  GLuint texture;
+  Array<TexturedQuadVertex> vertices;
+  Array<GLuint> loaded_textures;
+  GLuint vertex_array, vertex_buffer;
+} graphics_tquad_state;
+
+static int graphics_textured_quad_init() {
+  assert(graphics_state.initialized);
+
+  graphics_tquad_state.vertices.resize(512);
+
+  /* Allocate quad buffer */
+  gl_ok_or_die;
+  glGenVertexArrays(1, &graphics_tquad_state.vertex_array);
+  glGenBuffers(1, &graphics_tquad_state.vertex_buffer);
+  glBindVertexArray(graphics_tquad_state.vertex_array);
+  glBindBuffer(GL_ARRAY_BUFFER, graphics_tquad_state.vertex_buffer);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(graphics_tquad_state.vertices), 0, GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(TexturedQuadVertex), (void*) 0);
+  glVertexAttribIPointer(1, 2, GL_UNSIGNED_SHORT, sizeof(TexturedQuadVertex), (void*) offsetof(TexturedQuadVertex, tx));
+  gl_ok_or_die;
+
+  // @shader
+  const char *vertex_src = R"STRING(
+  #version 330 core
+
+  layout(location = 0) in ivec2 pos;
+  layout(location = 1) in ivec2 tex;
+
+  out vec2 fpos;
+  out vec2 ftex;
+
+  uniform vec2 screensize;
+  uniform vec2 texsize;
+
+  void main() { 
+    vec2 p = vec2(pos.x*2.0f/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);
+    gl_Position = vec4(p, 0, 1);
+    vec2 tp = vec2(tex.x/texsize.x, 1.0f - tex.y/texsize.y);
+    ftex = tp;
+  }
+  )STRING";
+
+  const char *fragment_src = R"STRING(
+  #version 330 core
+
+  in vec2 fpos;
+  in vec2 ftex;
+
+  out vec4 color;
+
+  uniform sampler2D u_texture;
+
+  float to_srgbf(float val) {
+    if(val < 0.0031308f)
+      val = val * 12.92f;
+    else 
+      val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+    return val;
+  }
+
+  vec3 to_srgb(vec3 v) {
+    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
+  }
+
+  void main () {
+    vec3 c = texture(u_texture, ftex).xyz;
+    if (c == vec3(1.0, 0.0, 1.0) || c == vec3(0.0, 1.0, 1.0))
+      discard;
+    color = vec4(c, 1.0);
+  }
+  )STRING";
+
+  graphics_tquad_state.shader = graphics_compile_shader(vertex_src, fragment_src);
+  if (!graphics_tquad_state.shader)
+    return 1;
+  gl_ok_or_die;
+
+  graphics_tquad_state.initialized = true;
+  return 0;
+}
+
+static void push_tquad(TexturedQuad a, TexturedQuad b, TexturedQuad c, TexturedQuad d) {
+  assert(graphics_tquad_state.initialized);
+
+  // allocate new memory if needed
+  graphics_tquad_state.vertices.resize(graphics_tquad_state.vertices.size + 6);
+
+  TexturedQuadVertex *v = graphics_tquad_state.vertices.end() - 6;
+
+  v[0] = a;
+  v[1] = b;
+  v[2] = c;
+  v[3] = a;
+  v[4] = c;
+  v[5] = d;
+}
+
+static void push_square_tquad(Rect pos, Rect tex) {
+  push_tquad(
+    tquad(pos.x,         pos.y,         tex.x,         tex.y),
+    tquad(pos.x + pos.w, pos.y,         tex.x + tex.w, tex.y),
+    tquad(pos.x + pos.w, pos.y + pos.h, tex.x + tex.w, tex.y + tex.h),
+    tquad(pos.x,         pos.y + pos.h, tex.x,         tex.y + tex.h)
+  );
+}
+
+static void render_textured_quads(TextureHandle texture) {
+  SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
+  glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
+
+  glUseProgram(graphics_tquad_state.shader);
+
+  // set texture size
+  int w, h;
+  glBindTexture(GL_TEXTURE_2D, texture.value);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+  glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+  glUniform2f(glGetUniformLocation(graphics_tquad_state.shader, "texsize"), (float)w, (float)h);
+  glUniform1i(glGetUniformLocation(graphics_tquad_state.shader, "u_texture"), 0);
+
+  // set screen size
+  glUniform2f(glGetUniformLocation(graphics_tquad_state.shader, "screensize"), (float)graphics_state.window_width, (float)graphics_state.window_height);
+
+  // set alpha blending
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  // send vertex data
+  glBindVertexArray(graphics_tquad_state.vertex_array);
+  glBindBuffer(GL_ARRAY_BUFFER, graphics_tquad_state.vertex_buffer);
+  glBufferData(GL_ARRAY_BUFFER, graphics_tquad_state.vertices.size*sizeof(graphics_tquad_state.vertices[0]), graphics_tquad_state.vertices, GL_DYNAMIC_DRAW);
+
+  //draw
+  glDrawArrays(GL_TRIANGLES, 0, graphics_tquad_state.vertices.size);
+  glBindVertexArray(0);
+
+  // clear
+  graphics_tquad_state.vertices.size = 0;
+  gl_ok_or_die;
+}
+
+static bool load_texture_from_file(const char *filename, TextureHandle *result) {
+  GLuint t;
+
+  int channels = 3;
+  // load file
+  stbi_set_flip_vertically_on_load(1);
+  int w,h;
+  unsigned char *data = stbi_load(filename, &w, &h, &channels, 0);
+  if (!data)
+    return false;
+
+  // put into gltexture
+  glGenTextures(1, &t);
+  glBindTexture(GL_TEXTURE_2D, t);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  // free
+  stbi_image_free(data);
+  gl_ok_or_die;
+
+  result->value = t;
+  return true;
+}
+
+
 
 // alpha in range [0,1]
 Color Color::blend(Color back, Color front, float alpha) {
