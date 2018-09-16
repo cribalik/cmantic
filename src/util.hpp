@@ -1777,6 +1777,27 @@ namespace File {
     return true;
   }
 
+  bool was_modified(const char *path, u64 *time) {
+    FILETIME mod;
+    HANDLE f = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+      log_warn("Failed to open %s to check modify time (%i)\n", path, GetLastError());
+      return false;
+    }
+
+    bool success = GetFileTime(f, 0, 0, &mod);
+    CloseHandle(f);
+    if (!success) {
+      log_warn("Failed to get filetime of %s (%i)\n", path, GetLastError());
+      return false;
+    }
+
+    u64 t = mod.dwLowDateTime | ((u64)mod.dwHighDateTime << 32);
+    bool result = *time != t;
+    *time = t;
+    return result;
+  }
+
   #endif /* OS */
 
   bool get_contents(const char *path, Array<u8> *result) {

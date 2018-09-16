@@ -556,15 +556,6 @@ struct ParseResult {
 
 #define NEXT_CHAR(n) (x += n, c = line[x])
 
-static bool parse_whitespace(Slice line, int &x, TokenInfo &t) {
-  char c = line[x];
-  if (isspace(c)) {
-    NEXT_CHAR(1);
-    return true;
-  }
-  return false;
-}
-
 static bool parse_identifier(Slice line, int &x, TokenInfo &t, const char *additional_identifier_heads, const char *additional_identifier_tails) {
   char c = line[x];
   if (!is_identifier_head(c) && !Slice::contains(additional_identifier_heads, c))
@@ -683,7 +674,7 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
     // whitespace
     if (isspace(c)) {
       NEXT_CHAR(1);
-      goto token_done;
+      continue;
     }
 
     // line comment
@@ -784,7 +775,7 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     // whitespace
     if (isspace(c)) {
       NEXT_CHAR(1);
-      goto token_done;
+      continue;
     }
 
     // line comment
@@ -881,7 +872,7 @@ static ParseResult bash_parse(const Array<StringBuffer> lines) {
     // whitespace
     if (isspace(c)) {
       NEXT_CHAR(1);
-      goto token_done;
+      continue;
     }
 
     // line comment
@@ -977,8 +968,10 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
     c = line[x];
 
     // whitespace
-    if (parse_whitespace(line, x, t))
-      goto token_done;
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
 
     // identifier
     if (parse_identifier(line, x, t))

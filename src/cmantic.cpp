@@ -2137,7 +2137,8 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
 }
 
 static void state_init() {
-  srand(time(0));
+  srand((uint)time(NULL));
+  rand(); rand(); rand();
 
   if (!File::cwd(&G.current_working_directory))
     log_err("Failed to find current working directory, something is very wrong\n"), exit(1);

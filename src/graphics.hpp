@@ -1217,7 +1217,7 @@ float Color::to_linear(float val) {
   if (val < 0.04045f)
     return val/12.92f;
   else
-    return pow((val + 0.055f)/1.055f, 2.4f);
+    return powf((val + 0.055f)/1.055f, 2.4f);
 }
 
 Color Color::to_linear(Color c) {
@@ -1236,7 +1236,7 @@ float Color::to_srgb(float val) {
   if (val < 0.0031308f)
     return val * 12.92f;
   else
-    return 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+    return 1.055f * powf(val, 1.0f/2.4f) - 0.055f;
 }
 
 Color Color::to_srgb(Color c) {

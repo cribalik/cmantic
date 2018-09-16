@@ -26,7 +26,6 @@ int main(int argc, char const *argv[])
   struct SpriteData {
   	int x,y,w,h;
   };
-  Array<SpriteData> rows;
 
   int y0 = 0;
   for (int y = 0; y < h; ++y) {
