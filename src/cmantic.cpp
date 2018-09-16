@@ -1,6 +1,8 @@
 /*
  * TODO:
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
+ * language-dependent autoindent
+ * json language support, and auto formatting (requires language-dependent autoindent)
  * Optimize tokenization
  * project file
  * Show current class/function/method/namespace
@@ -759,11 +761,7 @@ struct Pane {
   static void init_edit(Pane &p, BufferData *b, Color *background_color, Color *text_color, Color *active_highlight_background_color, Color *line_highlight_inactive, bool is_dynamic);
 };
 
-void util_free(Pane &p) {
-  util_free(p.buffer);
-  p = {};
-}
-
+static void util_free(Pane&);
 void Pane::init_edit(Pane &p,
                       BufferData *b,
                       Color *background_color,
@@ -992,6 +990,19 @@ struct State {
 };
 
 State G;
+
+void util_free(Pane &p) {
+  util_free(p.buffer);
+
+  // free subpanes
+  for (SubPane sp : p.subpanes) {
+    sp.pane->parent = 0;
+    G.panes_to_remove += sp.pane;
+  }
+  p.subpanes.free_shallow();
+
+  p = {};
+}
 
 static int get_text_offset_y(int font_height) {
   return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
@@ -1259,6 +1270,7 @@ static void menu_option_blame() {
 
 static void menu_option_next_pet() {
   ++G.pokemon_index;
+  status_message_set("Changed to pet %i\n", (G.pokemon_index % 3) + 1);
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -5984,77 +5996,72 @@ static void test_update() {
 STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 
 static void handle_pending_removes() {
-  // remove panes
-  for (int pane_idx = 0; pane_idx < G.panes_to_remove.size; ++pane_idx) {
-    Pane *p = G.panes_to_remove[pane_idx];
+  while (G.panes_to_remove.size || G.buffers_to_remove.size) {
 
-    // remove from parent subpane list
-    if (p->parent) {
-      Pane *parent = p->parent;
-      for (int i = 0; i < parent->subpanes.size; ++i) {
-        if (parent->subpanes[i].pane == p) {
-          parent->subpanes.remove_slow(i);
-          Pane *next = parent->subpanes.size == 0 ? parent : parent->subpanes[clamp(i, 0, parent->subpanes.size-1)].pane;
-          if (G.editing_pane == p)
-            G.editing_pane = next;
-          if (G.selected_pane == p)
-            G.selected_pane = next;
-          break;
+    // remove panes
+    for (int pane_idx = 0; pane_idx < G.panes_to_remove.size; ++pane_idx) {
+      Pane *p = G.panes_to_remove[pane_idx];
+
+      // remove from parent subpane list
+      if (p->parent) {
+        Pane *parent = p->parent;
+        for (int i = 0; i < parent->subpanes.size; ++i) {
+          if (parent->subpanes[i].pane == p) {
+            parent->subpanes.remove_slow(i);
+            Pane *next = parent->subpanes.size == 0 ? parent : parent->subpanes[clamp(i, 0, parent->subpanes.size-1)].pane;
+            if (G.editing_pane == p)
+              G.editing_pane = next;
+            if (G.selected_pane == p)
+              G.selected_pane = next;
+            break;
+          }
         }
+        p->parent->selected_subpane = clamp(p->parent->selected_subpane, 0, p->parent->subpanes.size-1);
       }
-      p->parent->selected_subpane = clamp(p->parent->selected_subpane, 0, p->parent->subpanes.size-1);
+
+      // free pane
+      util_free(*p);
+      if (p->is_dynamic)
+        delete p;
+
+      // remove from global pane list
+      int idx = G.editing_panes.find(p) - G.editing_panes.items;
+      G.editing_panes.remove_item_slow(p);
+
+      // update global pane pointers
+      if (G.editing_pane == p && G.editing_panes.size > 0)
+        G.editing_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
+      if (G.selected_pane == p && G.editing_panes.size > 0)
+        G.selected_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
+    }
+    G.panes_to_remove.size = 0;
+
+    if (G.editing_panes.size == 0) {
+      Pane *main_pane = new Pane{};
+      Pane::init_edit(*main_pane, &G.null_buffer, &G.color_scheme.background, &G.color_scheme.syntax_text, &G.active_highlight_background_color.color, &G.color_scheme.line_highlight_inactive, true);
+      G.editing_panes += main_pane;
+      G.selected_pane = main_pane;
+      G.editing_pane = main_pane;
     }
 
-    // remove subpanes
-    for (SubPane sp : p->subpanes) {
-      sp.pane->parent = 0;
-      G.panes_to_remove += sp.pane;
+    // remove buffers
+    for (BufferData *b : G.buffers_to_remove) {
+      if (!b->is_bound_to_file())
+        continue;
+
+      // free buffer
+      util_free(*b);
+      G.buffers.remove_item_slow(b);
+      if (b->is_dynamic)
+        delete b;
+
+      // reset any panes that were using this buffer
+      for (int k = 0; k < G.editing_panes.size; ++k)
+        if (G.editing_panes[k]->buffer.data == b)
+          Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.color_scheme.background, &G.color_scheme.syntax_text, &G.active_highlight_background_color.color, &G.color_scheme.line_highlight_inactive, true);
     }
-    p->subpanes.free_shallow();
-    p->selected_subpane = 0;
-
-    // free pane
-    util_free(*p);
-    if (p->is_dynamic)
-      delete p;
-
-    // remove from global pane list
-    int idx = G.editing_panes.find(p) - G.editing_panes.items;
-    G.editing_panes.remove_item_slow(p);
-
-    // update global pane pointers
-    if (G.editing_pane == p && G.editing_panes.size > 0)
-      G.editing_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
-    if (G.selected_pane == p && G.editing_panes.size > 0)
-      G.selected_pane = G.editing_panes[clamp(idx, 0, G.editing_panes.size-1)];
+    G.buffers_to_remove.size = 0;
   }
-  G.panes_to_remove.size = 0;
-
-  if (G.editing_panes.size == 0) {
-    Pane *main_pane = new Pane{};
-    Pane::init_edit(*main_pane, &G.null_buffer, &G.color_scheme.background, &G.color_scheme.syntax_text, &G.active_highlight_background_color.color, &G.color_scheme.line_highlight_inactive, true);
-    G.editing_panes += main_pane;
-    G.selected_pane = main_pane;
-    G.editing_pane = main_pane;
-  }
-
-  // remove buffers
-  for (BufferData *b : G.buffers_to_remove) {
-    if (!b->is_bound_to_file())
-      continue;
-
-    // free buffer
-    util_free(*b);
-    G.buffers.remove_item_slow(b);
-    if (b->is_dynamic)
-      delete b;
-
-    // reset any panes that were using this buffer
-    for (int k = 0; k < G.editing_panes.size; ++k)
-      if (G.editing_panes[k]->buffer.data == b)
-        Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.color_scheme.background, &G.color_scheme.syntax_text, &G.active_highlight_background_color.color, &G.color_scheme.line_highlight_inactive, true);
-  }
-  G.buffers_to_remove.size = 0;
 }
 
 #ifdef OS_WINDOWS
@@ -6108,7 +6115,7 @@ int main(int, const char *[])
       int num_images;
       const int *frames;
 
-      if (G.activation_meter < 10.0f) {
+      if (G.activation_meter < 30.0f) {
         static int f[] = {0,1};
         animation = G.pokemon_index*3 + 0;
         frame_delay = 60.0f;
