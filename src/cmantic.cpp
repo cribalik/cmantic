@@ -3441,15 +3441,21 @@ static void handle_input(Key key) {
         for (Cursor c : buffer.cursors)
           destination += c.pos;
 
+        for (int i = 0; i < G.visual_start.cursors.size; ++i) {
+          if (destination[i] < G.visual_start.cursors[i])
+            swap(destination[i], G.visual_start.cursors[i]);
+        }
+
         if (G.visual_entire_line) {
           for (int i = 0; i < G.visual_start.cursors.size; ++i) {
-            if (destination[i] < G.visual_start.cursors[i])
-              swap(destination[i], G.visual_start.cursors[i]);
             G.visual_start.cursors[i].x = 0;
             destination[i].x = 0;
             ++destination[i].y;
           }
         }
+        else
+          for (Pos &p : destination)
+            buffer.advance(p);
 
         range_to_clipboard(*buffer.data, view(G.visual_start.cursors), view(destination));
         util_free(destination);
