@@ -2127,12 +2127,12 @@ static bool call_async(View<Slice> command, Stream *output) {
   // finally we need to create our own non-shareable pipe, and close the shared one (in practice, this shouldn't be much of a problem, since the shared pipe will be freed by the child process when it exits)
   HANDLE our_pipe;
   if (!DuplicateHandle(GetCurrentProcess(), shared_pipe, GetCurrentProcess(), &our_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-    log_err("%s: Failed to duplicate pipe (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to duplicate pipe (%i)\n", command[0], (int)GetLastError());
     goto err_3;
   }
 
   if (!CloseHandle(shared_pipe)) {
-    log_err("%s: Failed to close shared pipe (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to close shared pipe (%i)\n", command[0], (int)GetLastError());
     goto err_4;
   }
   shared_pipe = INVALID_HANDLE_VALUE;
@@ -2141,7 +2141,7 @@ static bool call_async(View<Slice> command, Stream *output) {
   for (Slice s : command)
     cmd += s;
   if (!CreateProcessA(NULL, cmd.chars, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &info, &process_info)) {
-    log_err("%s: Failed to create process (%i)\n", (int)GetLastError());
+    log_err("%s: Failed to create process (%i)\n", command[0], (int)GetLastError());
     goto err_4;
   }
 

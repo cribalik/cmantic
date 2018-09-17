@@ -1058,7 +1058,7 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
       case TOKEN_IDENTIFIER: {
         if (i+1 < tokens.size && ti.str == "#define") {
           definitions += tokens[i+1].r;
-          break;
+          continue;
         }
 
         if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace") &&
@@ -1101,6 +1101,11 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
           }
           no_definition:;
         }
+
+        // if preprocessor command, jump to next line
+        int prev_y = tokens[i].a.y;
+        while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
+          ++i;
         break;}
       default:
         break;
