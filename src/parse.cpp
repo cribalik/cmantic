@@ -330,6 +330,7 @@ static Keyword julia_keywords[] = {
   {"break", KEYWORD_CONTROL},
   {"goto", KEYWORD_CONTROL},
   {"yield", KEYWORD_CONTROL},
+  {"do", KEYWORD_CONTROL},
   {"default", KEYWORD_CONTROL},
   {"and", KEYWORD_CONTROL},
   {"or", KEYWORD_CONTROL},
@@ -833,7 +834,7 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER:
-        if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct")) {
+        if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct" || ti.str == "const")) {
           definitions += tokens[i+1].r;
           break;
         }
@@ -1058,14 +1059,14 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
       case TOKEN_IDENTIFIER: {
         if (i+1 < tokens.size && ti.str == "#define") {
           definitions += tokens[i+1].r;
-          continue;
+          goto token_def_done;
         }
 
         if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace") &&
             tokens[i+1].token == TOKEN_IDENTIFIER &&
             tokens[i+2].token == '{') {
           definitions += tokens[i+1].r;
-          break;
+          goto token_def_done;
         }
 
         // check for function definition
@@ -1074,7 +1075,7 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
           // is it a keyword, then ignore (things like else if (..) is not a definition)
           for (Keyword keyword : cpp_keywords)
             if (ti.str == keyword.name && keyword.type != KEYWORD_TYPE)
-              goto no_definition;
+              goto token_def_done;
 
           {
             int j = i;
@@ -1082,7 +1083,7 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
             for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
               if (tokens[j].str == "*" || tokens[j].str == "&")
                 continue;
-              goto no_definition;
+              goto token_def_done;
             }
 
             if (j+1 < tokens.size &&
@@ -1099,10 +1100,10 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
               definitions += {tokens[j].a, tokens[j+2].b};
             }
           }
-          no_definition:;
         }
 
         // if preprocessor command, jump to next line
+        token_def_done:
         if (ti.str[0] == '#') {
           int prev_y = tokens[i].a.y;
           while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
@@ -1121,14 +1122,15 @@ struct LanguageSettings {
   StaticArray<Keyword> keywords;
   Slice line_comment;
   ParseFun parse_fun;
+  Slice name;
 };
 LanguageSettings language_settings[] = {
-  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse},  // LANGUAGE_NULL
-  {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse}, // LANGUAGE_C
-  {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse},  // LANGUAGE_PYTHON
-  {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse},  // LANGUAGE_JULIA
-  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},   Slice::create("#"),  bash_parse},  // LANGUAGE_BASH
-  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse},  // LANGUAGE_CMANTIC_COLORSCHEME
+  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse, Slice::create("")},  // LANGUAGE_NULL
+  {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse, Slice::create("C/C++")}, // LANGUAGE_C
+  {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse, Slice::create("Python")},  // LANGUAGE_PYTHON
+  {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse, Slice::create("Julia")},  // LANGUAGE_JULIA
+  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},   Slice::create("#"),  bash_parse, Slice::create("Shell")},  // LANGUAGE_BASH
+  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 

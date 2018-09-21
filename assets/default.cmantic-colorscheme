@@ -5,9 +5,9 @@ syntax_definition_keyword 236 64 122
 syntax_definition       129 199 132
 syntax_function         79 195 247
 syntax_macro            255 138 101
-syntax_constant         229 130 70
-syntax_number           229 130 70
-syntax_string           229 130 70
+syntax_constant         255 180 101
+syntax_number           255 180 101
+syntax_string           255 180 101
 syntax_comment          84 110 122
 syntax_operator         250 250 250
 syntax_text             250 250 250

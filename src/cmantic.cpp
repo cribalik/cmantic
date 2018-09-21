@@ -384,7 +384,7 @@ struct BufferData {
   void delete_char(Array<Cursor>& cursors);
   void delete_char(Array<Cursor> &cursors, int cursor_idx);
   void insert_tab(Array<Cursor> &cursors);
-  void insert_tab(Array<Cursor> &cursors, Pos pos);
+  void insert_tab(Array<Cursor> &cursors, int cursor_idx);
   int getindent(int y);
   int indentdepth(int y, bool *has_statement);
   void autoindent(Array<Cursor> &cursors, const int y);
@@ -602,7 +602,7 @@ struct BufferView {
   void insert_newline() {data->insert_newline(cursors);}
   void insert_newline_below() {data->insert_newline_below(cursors);}
   void insert_tab() {data->insert_tab(cursors);}
-  void insert_tab(Pos p) {data->insert_tab(cursors, p);}
+  void insert_tab(int cursor_idx) {data->insert_tab(cursors, cursor_idx);}
   void empty() {data->empty(cursors);}
   void delete_char() {data->delete_char(cursors);}
   Utf8char getchar(int cursor_idx) {return data->getchar(cursors[cursor_idx].pos);}
@@ -1645,16 +1645,21 @@ TokenInfo* BufferData::find_start_of_identifier(Pos pos) {
   return t;
 }
 
-static bool dropdown_autocomplete(BufferView &b) {
-  if (G.dropdown_buffer.isempty())
+static bool dropdown_autocomplete_or_insert_tab(Pane &p) {
+  BufferView &b = p.buffer;
+  if (G.dropdown_buffer.isempty()) {
+    b.insert_tab();
     return false;
+  }
 
   b.action_begin();
   Slice selection = G.dropdown_buffer[G.dropdown_pane.buffer.cursors[0].y].slice;
   for (int i = 0; i < b.cursors.size; ++i) {
     TokenInfo *t = b.data->find_start_of_identifier(b.cursors[i].pos);
-    if (!t)
+    if (!t) {
+      b.insert_tab(i);
       continue;
+    }
     b.remove_range(t->r, i);
     b.insert(selection, i);
   }
@@ -3015,7 +3020,7 @@ static void handle_input(Key key) {
         if (BufferData::from_file(filename, b)) {
           G.buffers += b;
           G.editing_pane->switch_buffer(b);
-          status_message_set("Loaded file {} (%s)", (Slice)filename, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
+          status_message_set("Loaded file {} ({}) (%s)", (Slice)filename, language_settings[b->language].name, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
         } else {
           status_message_set("Failed to load file {}", (Slice)filename);
           free(b);
@@ -3112,7 +3117,6 @@ static void handle_input(Key key) {
     break;}
 
   case MODE_INSERT: {
-    bool insert_occured = true;
     switch (key) {
       case KEY_RETURN:
         buffer.action_begin();
@@ -3122,7 +3126,7 @@ static void handle_input(Key key) {
         break;
 
       case KEY_TAB:
-        if (dropdown_autocomplete(buffer))
+        if (dropdown_autocomplete_or_insert_tab(*G.editing_pane))
           break;
         insert_default(*G.editing_pane, key);
         break;
@@ -3137,7 +3141,6 @@ static void handle_input(Key key) {
         int f = G.flags.cursor_dirty;
         G.dropdown_pane.buffer.move_y(1);
         G.flags.cursor_dirty = f;
-        insert_occured = false;
         break;}
 
       case CONTROL('k'): {
@@ -3145,11 +3148,10 @@ static void handle_input(Key key) {
         int f = G.flags.cursor_dirty;
         G.dropdown_pane.buffer.move_y(-1);
         G.flags.cursor_dirty = f;
-        insert_occured = false;
         break;}
 
       default:
-        insert_occured = insert_default(*G.editing_pane, key);
+        insert_default(*G.editing_pane, key);
         break;
     }
     break;}
@@ -3969,10 +3971,8 @@ void BufferData::action_end(Array<Cursor> &cursors) {
   if (_action_group_depth == 0) {
     // check if something actually happened
     bool changed = true;
-    bool buffer_changed = true;
     if (_undo_actions[_next_undo_action-1].type == ACTIONTYPE_CURSOR_SNAPSHOT && _undo_actions[_next_undo_action-2].type == ACTIONTYPE_GROUP_BEGIN) {
       changed = false;
-      buffer_changed = false;
       UndoAction a = _undo_actions[_next_undo_action-1];
       // check if cursors changed
       if (a.cursors.size != cursors.size)
@@ -4585,7 +4585,8 @@ void BufferData::autoindent(Array<Cursor> &cursors) {
 void BufferData::autoindent(Array<Cursor> &cursors, const int y) {
   action_begin(cursors);
 
-  int y_above = y-1;
+  // TODO: handle correctly if y=0
+  int y_above = at_least(y-1, 0);
   // skip empty lines
   while (y_above >= 0 && lines[y_above].length == 0)
     --y_above;
@@ -4770,14 +4771,14 @@ void BufferData::insert(Array<Cursor> &cursors, Utf8char ch) {
   action_end(cursors);
 }
 
-void BufferData::insert_tab(Array<Cursor> &cursors, Pos p) {
+void BufferData::insert_tab(Array<Cursor> &cursors, int cursor_idx) {
   action_begin(cursors);
 
   if (tab_type == 0)
-    insert(cursors, p, Utf8char::create('\t'));
+    insert(cursors, Utf8char::create('\t'), cursor_idx);
   else
-    for (int i =0 ; i < tab_type; ++i)
-      insert(cursors, p, Utf8char::create(' '));
+    for (int i = 0; i < tab_type; ++i)
+      insert(cursors, Utf8char::create(' '), cursor_idx);
 
   action_end(cursors);
 }
@@ -4785,11 +4786,8 @@ void BufferData::insert_tab(Array<Cursor> &cursors, Pos p) {
 void BufferData::insert_tab(Array<Cursor> &cursors) {
   action_begin(cursors);
 
-  if (tab_type == 0)
-    insert(cursors, Utf8char::create('\t'));
-  else
-    for (int i = 0; i < tab_type; ++i)
-      insert(cursors, Utf8char::create(' '));
+  for (int i = 0; i < cursors.size; ++i)
+    insert_tab(cursors, i);
 
   action_end(cursors);
 }
