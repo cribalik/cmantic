@@ -1657,8 +1657,8 @@ namespace File {
       log_warn("Failed to stat %s: %s\n", path, strerror(errno));
       return false;
     }
-    bool result = *time != attr.st_mtime;
-    *time = attr.st_mtime;
+    bool result = *time != (u64)attr.st_mtime;
+    *time = (u64)attr.st_mtime;
     return result;
   }
 

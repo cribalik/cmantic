@@ -39,8 +39,6 @@ static Keyword cpp_keywords[] = {
   {"true", KEYWORD_CONSTANT},
   {"false", KEYWORD_CONSTANT},
   {"NULL", KEYWORD_CONSTANT},
-  {"delete", KEYWORD_CONSTANT},
-  {"new", KEYWORD_CONSTANT},
   {"null", KEYWORD_CONSTANT},
   {"this", KEYWORD_CONSTANT},
 
@@ -120,6 +118,8 @@ static Keyword cpp_keywords[] = {
   {"override", KEYWORD_SPECIFIER},
   {"virtual", KEYWORD_SPECIFIER},
   {"abstract", KEYWORD_SPECIFIER},
+  {"delete", KEYWORD_SPECIFIER},
+  {"new", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -308,6 +308,7 @@ static Keyword julia_keywords[] = {
 
   {"function", KEYWORD_DEFINITION},
   {"struct", KEYWORD_DEFINITION},
+  {"immutable", KEYWORD_DEFINITION},
   {"using", KEYWORD_DEFINITION},
   {"export", KEYWORD_DEFINITION},
   {"as", KEYWORD_DEFINITION},
@@ -338,6 +339,7 @@ static Keyword julia_keywords[] = {
   {"try", KEYWORD_CONTROL},
   {"except", KEYWORD_CONTROL},
   {"end", KEYWORD_CONTROL},
+  {"elseif", KEYWORD_CONTROL},
 };
 
 static Keyword bash_keywords[] = {
@@ -790,6 +792,10 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     if (parse_identifier(line, x, t, "@", ""))
       goto token_done;
 
+    // triple quoted string
+    if (parse_triple_string(line, lines, x, y, t))
+      goto token_done;
+
     // number
     if (parse_number(line, x, t))
       goto token_done;
@@ -834,7 +840,7 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER:
-        if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct" || ti.str == "const")) {
+        if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct" || ti.str == "const" || ti.str == "immutable")) {
           definitions += tokens[i+1].r;
           break;
         }

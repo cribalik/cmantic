@@ -3340,6 +3340,8 @@ static void handle_input(Key key) {
         p->switch_buffer(G.editing_pane->buffer.data);
         p->buffer = G.editing_pane->buffer.copy();
       }
+      G.editing_pane = p;
+      G.selected_pane = p;
       break;}
 
     case CONTROL('q'):

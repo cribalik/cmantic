@@ -1,24 +1,25 @@
+COMMON_FLAGS=-no-pie -std=c++11 -Wall -Wno-unused-function 
 fast: assets
 	# -Wno-unused-but-set-variable -Wno-unused-variable
 	./metaprogram ./src/cmantic.cpp ./src/out.cpp
-	g++ -std=c++11 -I./3party/SDL2 -Wno-unused-function -I./3party ./src/out.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL
+	g++ ${COMMON_FLAGS} -I./3party/SDL2 -I./3party ./src/out.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL
 	rm ./src/out.cpp
 
 release: assets
 	./metaprogram ./src/cmantic.cpp ./src/out.cpp
-	g++ -O3 -std=c++11 -I./3party/SDL2 -Wno-unused-function -I./3party ./src/out.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL
+	g++ ${COMMON_FLAGS} -O3 -I./3party/SDL2 -I./3party ./src/out.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL
 	rm ./src/out.cpp
 
 debug: assets
 	# -Wno-unused-but-set-variable -Wno-unused-variable
 	./metaprogram ./src/cmantic.cpp ./src/out.cpp
-	g++ -g -Wall -std=c++11 -I./3party/SDL2 -Wno-unused-function -I./3party ./src/out.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL -fsanitize=address
+	g++ -g ${COMMON_FLAGS} -I./3party/SDL2 -I./3party ./src/out.cpp -o cmantic -L./3party -ldl -lX11 -lSDL2 -lGL -fsanitize=address
 	rm ./src/out.cpp
 
 .PHONY: tools
 tools:
-	g++ -std=c++11 ./tools/coroutines.cpp -o metaprogram
-	g++ -std=c++11 ./tools/analyze_sprite_image.cpp -o analyze_sprite_image
+	g++ ${COMMON_FLAGS} ./tools/coroutines.cpp -o metaprogram
+	g++ ${COMMON_FLAGS} ./tools/analyze_sprite_image.cpp -o analyze_sprite_image
 
 .PHONY: assets
 assets: tools
