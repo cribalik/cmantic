@@ -1110,8 +1110,8 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
 
         // if preprocessor command, jump to next line
         token_def_done:
-        if (ti.str[0] == '#') {
-          int prev_y = tokens[i].a.y;
+        if (ti.token == TOKEN_IDENTIFIER && ti.str[0] == '#') {
+          int prev_y = ti.a.y;
           while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
             ++i;
         }
