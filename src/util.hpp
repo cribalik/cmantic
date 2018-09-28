@@ -447,7 +447,7 @@ union Array {
   }
 
   void reserve(int l) {
-    if (l > size) {
+    if (l > cap) {
       items = realloc(items, cap, l);
       cap = l;
     }

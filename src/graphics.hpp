@@ -1048,9 +1048,9 @@ static void push_tquad(TexturedQuad a, TexturedQuad b, TexturedQuad c, TexturedQ
   assert(graphics_tquad_state.initialized);
 
   // allocate new memory if needed
-  graphics_tquad_state.vertices.resize(graphics_tquad_state.vertices.size + 6);
+  graphics_tquad_state.vertices.reserve(graphics_tquad_state.vertices.size + 6);
 
-  TexturedQuadVertex *v = graphics_tquad_state.vertices.end() - 6;
+  TexturedQuadVertex *v = graphics_tquad_state.vertices.end();
 
   v[0] = a;
   v[1] = b;
@@ -1058,6 +1058,8 @@ static void push_tquad(TexturedQuad a, TexturedQuad b, TexturedQuad c, TexturedQ
   v[3] = a;
   v[4] = c;
   v[5] = d;
+
+  graphics_tquad_state.vertices.size += 6;
 }
 
 static void push_square_tquad(Rect pos, Rect tex) {

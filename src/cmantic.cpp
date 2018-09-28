@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
  * language-dependent autoindent
  * json language support, and auto formatting (requires language-dependent autoindent)
@@ -294,10 +295,10 @@ static void util_free(ParseResult &p) {
 
 static void util_free(UndoAction &a);
 
-struct PasteHighlight {
+struct BufferHighlight {
   Pos a;
   Pos b;
-  float alpha; // 1 -> 0
+  float invalpha; // starts at 0 and goes to 1 (so you can zero initialize)
 };
 
 struct BufferRectIter {
@@ -335,7 +336,7 @@ struct BufferData {
   Array<StringBuffer> lines;
   GroupedData<Array<BlameData>> blame;
 
-  Array<PasteHighlight> paste_highlights;
+  Array<BufferHighlight> highlights;
 
   int tab_type; /* 0 for tabs, 1+ for spaces */
 
@@ -406,6 +407,7 @@ struct BufferData {
   StringBuffer range_to_string(Range r);
   // Finds the token at or before given position
   TokenInfo* gettoken(Pos p);
+  void highlight_range(Pos a, Pos b);
 
   // Undo functionality:
   //
@@ -659,6 +661,8 @@ struct Pane {
 
   bool is_dynamic; // some panes are statically allocated because they are singletons, like the build result pane, status message pane, etc.
 
+  float width_weight;
+  float height_weight;
   Array<SubPane> subpanes;
   int selected_subpane;
   Pane *parent;
@@ -670,6 +674,7 @@ struct Pane {
   union {
     // PANETYPE_EDIT
     struct {
+      // The part of the buffer that is visible
       Rect buffer_viewport;
     };
 
@@ -2049,8 +2054,7 @@ static void _filetree_fill(Path path) {
 static void filetree_init() {
   util_free(G.files);
   Path cwd = {};
-  if (File::cwd(&cwd))
-    _filetree_fill(cwd);
+  _filetree_fill(G.current_working_directory);
   util_free(cwd);
 }
 
@@ -2489,6 +2493,10 @@ static void do_visual_jump() {
     for (BufferRectIter it = G.editing_pane->buffer.data->getrect(r); it.next();)
       if (*it == target)
         matches += it.p;
+
+    // set character as search term, so we can jump to the next one with 'n'
+    util_free(G.search_term);
+    G.search_term = String::create(&target, 1);
 
     // now go inside-out
     _pos_to_distance_compare = G.editing_pane->buffer.cursors[0].pos;
@@ -3044,16 +3052,22 @@ static void handle_input(Key key) {
       }
     }
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
-      buffer.jumplist_push();
-      G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
-      if (G.search_failed) {
-        buffer.move_to(G.search_begin_pos);
-        status_message_set("'{}' not found", (Slice)G.search_term.slice);
-        mode_normal(false);
+      if (!G.menu_buffer.lines[0].length) {
+        util_free(G.search_term);
+        mode_normal(true);
       }
       else {
         buffer.jumplist_push();
-        mode_normal(true);
+        G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
+        if (G.search_failed) {
+          buffer.move_to(G.search_begin_pos);
+          status_message_set("'{}' not found", (Slice)G.search_term.slice);
+          mode_normal(false);
+        }
+        else {
+          buffer.jumplist_push();
+          mode_normal(true);
+        }
       }
     }
     else {
@@ -3082,6 +3096,11 @@ static void handle_input(Key key) {
     Array<Range> selections = {};
     if (get_action_selection(buffer, key, &selections)) {
       range_to_clipboard(*buffer.data, VIEW(selections, a), VIEW(selections, b));
+
+      // highlight
+      for (Range r : selections)
+        buffer.data->highlight_range(r.a, r.b);
+
       util_free(selections);
       goto yank_done;
     }
@@ -3095,12 +3114,13 @@ static void handle_input(Key key) {
         util_free(prev);
         goto yank_done;
       }
-  
-      // some movements we want to include the end position
-      // for (Cursor &c : cursors)
-        // buffer.data->advance(c.pos);
+
       range_to_clipboard(*buffer.data, VIEW(prev, pos), VIEW(buffer.cursors, pos));
-  
+
+      // highlight
+      for (int i = 0; i < prev.size; ++i)
+        buffer.data->highlight_range(prev[i].pos, buffer.cursors[i].pos);
+
       // go back to where we started
       for (int i = 0; i < prev.size; ++i)
         buffer.cursors[i] = prev[i];
@@ -3186,8 +3206,9 @@ static void handle_input(Key key) {
       break;
 
     case '?':
-      buffer.data->print_undo_actions();
-      log_info("%i %i\n", buffer.data->_next_undo_action, buffer.data->_last_save_undo_action);
+      // buffer.data->print_undo_actions();
+      // log_info("%i %i\n", buffer.data->_next_undo_action, buffer.data->_last_save_undo_action);
+      log_info("%f %f\n", G.editing_pane->width_weight, G.editing_pane->height_weight);
       break;
 
     case 'x':
@@ -3222,6 +3243,38 @@ static void handle_input(Key key) {
 
     case CONTROL('i'):
       buffer.jumplist_next();
+      break;
+
+    case CONTROL(KEY_ARROW_LEFT): {
+      Pane *p = G.editing_pane->parent ? G.editing_pane->parent : G.editing_pane;
+      float &w = p->width_weight;
+      w = (w + 1.0f) / 1.3f - 1.0f;
+      break;}
+
+    case CONTROL(KEY_ARROW_RIGHT): {
+      Pane *p = G.editing_pane->parent ? G.editing_pane->parent : G.editing_pane;
+      float &w = p->width_weight;
+      w = (w + 1.0f) * 1.3f - 1.0f;
+      break;}
+
+    case CONTROL(KEY_ARROW_DOWN):
+      // find first parent with multiple children
+      for (Pane *p = G.editing_pane; p; p = p->parent) {
+        if (p->parent && p->parent->subpanes.size > 1) {
+          p->height_weight = (p->height_weight + 1.0f) / 1.3f - 1.0f;
+          break;
+        }
+      }
+      break;
+
+    case CONTROL(KEY_ARROW_UP):
+      // find first parent with multiple children
+      for (Pane *p = G.editing_pane; p; p = p->parent) {
+        if (p->parent && p->parent->subpanes.size > 1) {
+          p->height_weight = (p->height_weight + 1.0f) * 1.3f - 1.0f;
+          break;
+        }
+      }
       break;
 
     case '>':
@@ -3336,12 +3389,11 @@ static void handle_input(Key key) {
 
     case CONTROL('w'): {
       Pane *p = G.editing_pane->add_subpane(buffer.data, {});
-      if (G.editing_pane) {
-        p->switch_buffer(G.editing_pane->buffer.data);
-        p->buffer = G.editing_pane->buffer.copy();
-      }
+      p->switch_buffer(G.editing_pane->buffer.data);
+      p->buffer = G.editing_pane->buffer.copy();
       G.editing_pane = p;
       G.selected_pane = p;
+      p->parent->selected_subpane = p->parent->subpanes.size-1;
       break;}
 
     case CONTROL('q'):
@@ -3475,6 +3527,10 @@ static void handle_input(Key key) {
             buffer.advance(p);
 
         range_to_clipboard(*buffer.data, view(G.visual_start.cursors), view(destination));
+
+        for (int i = 0; i < G.visual_start.cursors.size; ++i)
+          buffer.data->highlight_range(G.visual_start.cursors[i], destination[i]);
+
         util_free(destination);
         util_free(G.visual_start);
         buffer.action_end();
@@ -3572,11 +3628,11 @@ static void do_update(float dt) {
 
   // update paste highlights
   for (BufferData *b : G.buffers) {
-    for (int i = 0; i < b->paste_highlights.size; ++i) {
-      b->paste_highlights[i].alpha -= dt*0.03f;
+    for (int i = 0; i < b->highlights.size; ++i) {
+      b->highlights[i].invalpha += dt*0.03f;
 
-      if (b->paste_highlights[i].alpha < 0)
-        b->paste_highlights[i--] = b->paste_highlights[--b->paste_highlights.size];
+      if (b->highlights[i].invalpha > 1.0f)
+        b->highlights[i--] = b->highlights[--b->highlights.size];
     }
   }
 
@@ -3752,7 +3808,7 @@ void util_free(BufferData &b) {
   util_free(b.filename);
   util_free(b.parser);
   util_free(b._undo_actions);
-  b.paste_highlights.free_shallow();
+  b.highlights.free_shallow();
 }
 
 String BufferData::get_merged_range(Range r) const {
@@ -3796,6 +3852,12 @@ bool BufferData::reload(BufferData *b) {
   bool succ = BufferData::from_file(filename.slice, b);
   util_free(filename);
   return succ;
+}
+
+void BufferData::highlight_range(Pos a, Pos b) {
+  if (b < a)
+    swap_range(*this, a,b);
+  highlights += BufferHighlight{a,b};
 }
 
 bool BufferData::from_file(Slice filename, BufferData *buffer) {
@@ -4459,7 +4521,7 @@ static void name(BufferData *buffer, Pos a, Pos b) { \
   } \
 \
   /* paste highlights */ \
-  for (PasteHighlight &ph : buffer->paste_highlights) { \
+  for (BufferHighlight &ph : buffer->highlights) { \
     move_function(ph.a, a, b); \
     move_function(ph.b, a, b); \
   } \
@@ -4738,7 +4800,7 @@ void BufferData::insert(Array<Cursor> &cursors, const Pos a, Slice s, int cursor
     parse();
   move_cursors_on_insert(this, a, b);
 
-  paste_highlights += PasteHighlight{a, b, 1.0f};
+  highlight_range(a,b);
   action_end(cursors);
 }
 
@@ -5592,9 +5654,9 @@ void Pane::render_edit() {
   bounds.h -= header_height;
 
   // recalculate the bounds of this pane depending on the number of subpanes
-  int subpane_depth = calc_max_subpane_depth();
-  int total_width = orig_bounds.w;
-  bounds.w = total_width/(subpane_depth+1);
+  const int subpane_depth = calc_max_subpane_depth();
+  const int total_width = orig_bounds.w;
+  bounds.w = total_width*(width_weight+1)/(subpane_depth+width_weight+1);
 
   // calc buffer bound
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
@@ -5602,7 +5664,7 @@ void Pane::render_edit() {
 
   // draw gutter
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
-  {
+  if (_gutter_width && numchars_y()) {
     TextCanvas gutter;
     gutter.init(_gutter_width, numchars_y());
     gutter.background = *background_color;
@@ -5615,96 +5677,104 @@ void Pane::render_edit() {
     util_free(gutter);
   }
 
+  // record buffer viewport (mainly used for visual jump)
   buffer_viewport = {buf_offset.x, buf_offset.y, numchars_x()-_gutter_width, buf_y1 - buf_offset.y-1};
 
-  TextCanvas canvas;
-  canvas.init(buffer_viewport.w, numchars_y());
-  canvas.fill(*text_color, *background_color);
-  canvas.background = *background_color;
-  canvas.margin = margin;
-  canvas.offset = buf_offset;
+  // render buffer
+  // TODO: The reason we don't use buffer_viewport.h here is because we might be at the end of the buffer,
+  //       causing the background to never render.. This is kind of depressing. We should probably just render a big
+  //       background first, and then use buffer_viewport.h for the canvas
+  if (buffer_viewport.w > 0 && numchars_y() > 0) {
+    TextCanvas canvas;
+    canvas.init(buffer_viewport.w, numchars_y());
+    canvas.fill(*text_color, *background_color);
+    canvas.background = *background_color;
+    canvas.margin = margin;
+    canvas.offset = buf_offset;
 
-  // draw each line 
-  for (int y = buf_offset.y; y < buf_y1; ++y)
-    canvas.render_str({0, y}, text_color, NULL, 0, -1, d.lines[y].slice);
+    // draw each line 
+    for (int y = buf_offset.y; y < buf_y1; ++y)
+      canvas.render_str({0, y}, text_color, NULL, 0, -1, d.lines[y].slice);
 
-  // highlight the line you're on
-  const Color *highlight_background_color = G.editing_pane == this ? active_highlight_background_color : line_highlight_inactive;
-  if (highlight_background_color)
-    for (Cursor c : b.cursors)
-      canvas.fill_background(Rect{d.to_visual_pos(Pos{0, c.y}), {-1, 1}}, *highlight_background_color);
+    // highlight the line you're on
+    const Color *highlight_background_color = G.editing_pane == this ? active_highlight_background_color : line_highlight_inactive;
+    if (highlight_background_color)
+      for (Cursor c : b.cursors)
+        canvas.fill_background(Rect{d.to_visual_pos(Pos{0, c.y}), {-1, 1}}, *highlight_background_color);
 
-  // highlight visual start
-  if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
-    for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background(Rect{d.to_visual_pos({0, pos.y}), {-1, 1}}, *line_highlight_inactive);
+    // highlight visual start
+    if (G.visual_start.buffer == buffer.data && G.visual_entire_line)
+      for (Pos pos : G.visual_start.cursors)
+        canvas.fill_background(Rect{d.to_visual_pos({0, pos.y}), {-1, 1}}, *line_highlight_inactive);
 
-  // draw syntax highlighting
-  render_syntax_highlight(canvas, buf_y1);
+    // draw syntax highlighting
+    render_syntax_highlight(canvas, buf_y1);
 
-  // draw paste highlight
-  for (PasteHighlight ph : d.paste_highlights) {
-    if (ph.b.y < buf_offset.y || ph.a.y > buf_y1)
-      continue;
-    Color color = COLOR_LIGHT_YELLOW;
-    color.a = (u8)(ph.alpha*255.0f);
-    canvas.blend_textcolor(Range{d.to_visual_pos(ph.a), d.to_visual_pos(ph.b)}, color);
-  }
-
-  // draw blame
-  if (d.blame.data.size) {
-    Slice last_hash = {};
-    StringBuffer msg = {};
-    int i = 0;
-    for (int y = buf_offset.y; y < buf_y1; ++y) {
-      // TODO: binary search
-      while (i < d.blame.data.size && d.blame.data[i].line <= y)
-        ++i;
-      BlameData bd = d.blame.data[i-1];
-      if (last_hash == bd.hash)
+    // draw paste highlight
+    for (BufferHighlight ph : d.highlights) {
+      if (ph.b.y < buf_offset.y || ph.a.y > buf_y1)
         continue;
-      last_hash = Slice::create(bd.hash);
-
-      Pos p = d.to_visual_pos({d.lines[y].length, y});
-      p.x = at_least(p.x+2, 30);
-      msg.length = 0;
-      msg.appendf("%s - %s - %s", bd.hash, bd.author, bd.summary);
-      canvas.render_str(p, &G.color_scheme.git_blame, NULL, p.x, -1, msg.slice);
+      Color color = COLOR_LIGHT_YELLOW;
+      color.a = (u8)((1.0 - ph.invalpha)*255.0f);
+      canvas.blend_textcolor(Range{d.to_visual_pos(ph.a), d.to_visual_pos(ph.b)}, color);
     }
-    util_free(msg);
-  }
 
-  // if there is a search term, highlight that as well
-  if (G.search_term.length > 0) {
-    Pos pos = {0, buf_offset.y};
-    while (d.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
-      canvas.fill_background(Rect{d.to_visual_pos(pos), G.search_term.length, 1}, G.search_term_background_color.color);
-  }
+    // draw blame
+    if (d.blame.data.size) {
+      Slice last_hash = {};
+      StringBuffer msg = {};
+      int i = 0;
+      for (int y = buf_offset.y; y < buf_y1; ++y) {
+        // TODO: binary search
+        while (i < d.blame.data.size && d.blame.data[i].line <= y)
+          ++i;
+        BlameData bd = d.blame.data[i-1];
+        if (last_hash == bd.hash)
+          continue;
+        last_hash = Slice::create(bd.hash);
 
-  // draw visual start marker
-  if (G.visual_start.buffer == buffer.data)
-    for (Pos pos : G.visual_start.cursors)
-      canvas.fill_background(Rect{d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
-
-  // draw marker
-  for (Cursor c : b.cursors) {
-    if (G.selected_pane == this)
-      // canvas.fill_background(Rect{buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
-      canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
-    else if (G.bottom_pane != this)
-      canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.color_scheme.marker_inactive);
-  }
-
-  // draw visual jump
-  if (G.current_visual_jump_pane == this) {
-    for (int i = 0; i < G.visual_jump_positions.size; ++i) {
-      Pos p = G.visual_jump_positions[i];
-      char placeholder = visual_jump_highlight_keys[i];
-      canvas.render_char(d.to_visual_pos(p), G.visual_jump_color.color, &G.visual_jump_background_color.color, placeholder);
+        Pos p = d.to_visual_pos({d.lines[y].length, y});
+        p.x = at_least(p.x+2, 30);
+        msg.length = 0;
+        msg.appendf("%s - %s - %s", bd.hash, bd.author, bd.summary);
+        canvas.render_str(p, &G.color_scheme.git_blame, NULL, p.x, -1, msg.slice);
+      }
+      util_free(msg);
     }
-  }
 
-  canvas.render(bounds.p + Pos{_gutter_width*G.font_width, 0});
+    // if there is a search term, highlight that as well
+    if (G.search_term.length > 0) {
+      Pos pos = {0, buf_offset.y};
+      while (d.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
+        canvas.fill_background(Rect{d.to_visual_pos(pos), G.search_term.length, 1}, G.search_term_background_color.color);
+    }
+
+    // draw visual start marker
+    if (G.visual_start.buffer == buffer.data)
+      for (Pos pos : G.visual_start.cursors)
+        canvas.fill_background(Rect{d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
+
+    // draw marker
+    for (Cursor c : b.cursors) {
+      if (G.selected_pane == this)
+        // canvas.fill_background(Rect{buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
+        canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
+      else if (G.bottom_pane != this)
+        canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.color_scheme.marker_inactive);
+    }
+
+    // draw visual jump
+    if (G.current_visual_jump_pane == this) {
+      for (int i = 0; i < G.visual_jump_positions.size; ++i) {
+        Pos p = G.visual_jump_positions[i];
+        char placeholder = visual_jump_highlight_keys[i];
+        canvas.render_char(d.to_visual_pos(p), G.visual_jump_color.color, &G.visual_jump_background_color.color, placeholder);
+      }
+    }
+
+    canvas.render(bounds.p + Pos{_gutter_width*G.font_width, 0});
+    util_free(canvas);
+  }
 
   // render filename
   const Slice filename = d.name();
@@ -5715,11 +5785,8 @@ void Pane::render_edit() {
   // shadow
   if (bounds.x >= 7)
     render_shadow_left(bounds.x, bounds.y - header_height, bounds.h + header_height, 7);
-  // if (bounds.y - header_height >= 7)
-    // render_shadow_top(bounds.x, bounds.y - header_height, bounds.w, 2);
   render_shadow_bottom(bounds.x, bounds.y, bounds.w, 4);
 
-  util_free(canvas);
   render_quads();
   render_text();
 
@@ -5727,31 +5794,23 @@ void Pane::render_edit() {
     render_dropdown(this);
 
   // reflow and render subpanes
-  {
-    float w,h,x,y;
-    int num_panes_in_sight = 0;
-    int subpane_margin = 0;
-    int total_margin = 0;
-    num_panes_in_sight = subpanes.size;
-    if (!num_panes_in_sight)
-      goto subpanes_done;
+  if (subpanes.size) {
+    float height_weight_sum = 0.0f;
+    for (SubPane p : subpanes)
+      height_weight_sum += p.pane->height_weight+1;
 
-    // total_margin = subpane_margin*(num_panes_in_sight+1);
-    // subpane_margin = total_margin / (num_panes_in_sight+1);
+    float w = (float)total_width - bounds.w;
+    float x = (float)orig_bounds.x + bounds.w;
+    float y = (float)orig_bounds.y;
 
-    w = (float)total_width - bounds.w;
-    h = (float)(orig_bounds.h - total_margin)/num_panes_in_sight;
-    x = (float)orig_bounds.x + bounds.w;
-    y = (float)orig_bounds.y + subpane_margin;
     for (SubPane p : subpanes) {
-      // if (p.anchor_pos.y < buf_offset.y || p.anchor_pos.y > buf_y1)
-        // continue;
+      float h = orig_bounds.h * (p.pane->height_weight+1) / height_weight_sum;
+      if ((int)h <= 0)
+        continue;
       p.pane->bounds = {(int)x, (int)y, (int)w, (int)h};
       p.pane->render();
-      y += h + subpane_margin;
+      y += h;
     }
-
-    subpanes_done:;
   }
 
   bounds.w = total_width;
