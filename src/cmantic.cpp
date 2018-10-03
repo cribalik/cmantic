@@ -2053,7 +2053,6 @@ static void _filetree_fill(Path path) {
 
 static void filetree_init() {
   util_free(G.files);
-  Path cwd = {};
   _filetree_fill(G.current_working_directory);
   util_free(cwd);
 }
