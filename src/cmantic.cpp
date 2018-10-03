@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * when a long line is under selection, show expansion of that one line
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
  * language-dependent autoindent
@@ -958,6 +959,9 @@ struct State {
   } prompt_result;
   void (*prompt_callback)(void);
 
+  /* status message state */
+  bool status_message_was_set;
+
   /* goto state */
   unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
 
@@ -989,9 +993,9 @@ struct State {
   Array<Pos> visual_jump_positions;
 
   /* idle game state */
-  TextureHandle pokemon_texture;
-  Array<Rect> pokemon_sprites;
-  int pokemon_index;
+  TextureHandle pet_texture;
+  Array<Rect> pet_sprites;
+  int pet_index;
 };
 
 State G;
@@ -1020,6 +1024,8 @@ static void status_message_set(const char *fmt, ...) {
   G.status_message_pane.buffer.empty();
   G.status_message_buffer[0].clear();
   G.status_message_buffer[0].appendv(fmt, args);
+
+  G.status_message_was_set = true;
 
   // grab only the first line
   int i;
@@ -1274,8 +1280,8 @@ static void menu_option_blame() {
 }
 
 static void menu_option_next_pet() {
-  ++G.pokemon_index;
-  status_message_set("Changed to pet %i\n", (G.pokemon_index % 3) + 1);
+  ++G.pet_index;
+  status_message_set("Changed to pet %i\n", (G.pet_index % 3) + 1);
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1579,7 +1585,7 @@ static void mode_delete() {
   status_message_set("delete");
 }
 
-static void mode_normal(bool set_message) {
+static void mode_normal() {
   mode_cleanup();
   if (G.mode == MODE_INSERT)
     G.default_marker_background_color.jump();
@@ -1588,8 +1594,9 @@ static void mode_normal(bool set_message) {
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = G.editing_pane;
 
-  if (set_message)
+  if (!G.status_message_was_set)
     status_message_set("normal");
+  G.status_message_was_set = false;
 }
 
 static void mode_insert() {
@@ -1730,7 +1737,7 @@ static bool insert_default(Pane &p, Key key) {
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (key == KEY_ESCAPE) {
-    mode_normal(true);
+    mode_normal();
     return false;
   }
 
@@ -2177,9 +2184,9 @@ static void state_init() {
   if (graphics_textured_quad_init())
     exit(1);
 
-  if (!load_texture_from_file("assets/sprites.bmp", &G.pokemon_texture))
+  if (!load_texture_from_file("assets/sprites.bmp", &G.pet_texture))
     exit(1);
-  G.pokemon_index = rand() % 3;
+  G.pet_index = rand() % 3;
 
   // parse sprite meta data
   {
@@ -2192,7 +2199,7 @@ static void state_init() {
     for (Slice row; row = file.token(&i, '\n'), row.length;) {
       Rect r;
       sscanf(row.chars, "%i %i %i %i", &r.x, &r.y, &r.w, &r.h);
-      G.pokemon_sprites += r;
+      G.pet_sprites += r;
     }
   }
 
@@ -2587,6 +2594,11 @@ static bool get_action_selection(BufferView &buffer, Key key, Array<Range> *resu
   Array<Range> selections = {};
 
   switch (key) {
+    case ' ':
+      for (Cursor c : buffer.cursors)
+        selections += Range{{0, c.y}, {0, c.y+1}};
+      break;
+
     case 'p': {
       for (int i = 0; i < buffer.cursors.size; ++i) {
         int depth = 0;
@@ -2786,11 +2798,11 @@ static void handle_input(Key key) {
       util_free(G.current_working_directory);
       G.current_working_directory = p;
       filetree_init();
-      mode_normal(false);
+      mode_normal();
       break;
       err:
       util_free(p);
-      mode_normal(false);
+      mode_normal();
     }
     else if (key == KEY_BACKSPACE) {
       Path p = Path::create(G.menu_buffer.lines[0](0, -2));
@@ -2877,7 +2889,7 @@ static void handle_input(Key key) {
     break;
 
     prompt_done:
-    mode_normal(false);
+    mode_normal();
     G.prompt_callback();
     break;
 
@@ -2924,7 +2936,7 @@ static void handle_input(Key key) {
         break;}
     }
     G.goto_line_number = 0;
-    mode_normal(true);
+    mode_normal();
     break;
 
   case MODE_COUNT:
@@ -2933,7 +2945,7 @@ static void handle_input(Key key) {
   case MODE_MENU:
     if (key == KEY_RETURN) {
       if (G.menu_buffer.isempty()) {
-        mode_normal(true);
+        mode_normal();
         break;
       }
 
@@ -2951,12 +2963,12 @@ static void handle_input(Key key) {
       done:
       // if the menu option changed the mode, leave it
       if (G.mode == MODE_MENU)
-        mode_normal(false);
+        mode_normal();
     }
     else if (key == KEY_ESCAPE)
-      mode_normal(true);
+      mode_normal();
     else if (key == KEY_BACKSPACE && G.menu_buffer[0].length == 0)
-      mode_normal(true);
+      mode_normal();
     else
       handle_menu_insert(key);
     break;
@@ -2964,7 +2976,7 @@ static void handle_input(Key key) {
   case MODE_GOTO_DEFINITION: {
     if (key == KEY_ESCAPE) {
       G.editing_pane->buffer.move_to(G.goto_definition_begin_pos);
-      mode_normal(true);
+      mode_normal();
       break;
     }
 
@@ -2972,7 +2984,7 @@ static void handle_input(Key key) {
       int opt = G.menu_pane.menu_get_selection_idx();
       if (opt == -1) {
         status_message_set("\"{}\": No such file", (Slice)G.menu_buffer[0].slice);
-        mode_normal(false);
+        mode_normal();
         break;
       }
 
@@ -2980,7 +2992,7 @@ static void handle_input(Key key) {
       buffer.jumplist_push();
       buffer.move_to(G.definition_positions[opt]);
       buffer.jumplist_push();
-      mode_normal(true);
+      mode_normal();
       break;
     }
 
@@ -2998,44 +3010,41 @@ static void handle_input(Key key) {
       Slice *opt = G.menu_pane.menu_get_selection();
       if (!opt) {
         status_message_set("\"{}\": No such file", (Slice)G.menu_buffer[0].slice);
-        mode_normal(false);
+        mode_normal();
         break;
       }
 
-      Slice filename = *opt;
-      // TODO: selections should have metadata baked in, and not hack it like this (what if there are miultiple files with the same name?)
-      for (Path p : G.files) {
-        if (filename == p.name()) {
-          filename = p.string.slice;
-          break;
+      Slice selection = *opt;
+      Path full_path = G.current_working_directory.copy();
+      full_path.push(selection);
+
+      // check if buffer is already open
+      for (BufferData *b: G.buffers) {
+        if (full_path.string.slice == b->filename.slice) {
+          status_message_set("Switched to {}", (Slice)b->filename.slice);
+          G.editing_pane->switch_buffer(b);
+          goto filesearch_done;
         }
       }
 
-      BufferData *b = 0;
-      for (BufferData *bb : G.buffers) {
-        if (filename == bb->filename.slice) {
-          b = bb;
-          filename = bb->filename.slice;
-          break;
-        }
-      }
-      if (b) {
-        status_message_set("Switched to {}", (Slice)filename);
-        G.editing_pane->switch_buffer(b);
-      }
-      else {
-        b = new BufferData{};
-        if (BufferData::from_file(filename, b)) {
+      // otherwise open new file
+      {
+        BufferData *b = new BufferData{};
+        if (BufferData::from_file(full_path.string.slice, b)) {
           G.buffers += b;
           G.editing_pane->switch_buffer(b);
-          status_message_set("Loaded file {} ({}) (%s)", (Slice)filename, language_settings[b->language].name, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
-        } else {
-          status_message_set("Failed to load file {}", (Slice)filename);
+          status_message_set("Loaded file {} ({}) (%s)", (Slice)full_path.name(), language_settings[b->language].name, b->endline_string == ENDLINE_UNIX ? "Unix" : "Windows");
+        }
+        else {
+          status_message_set("Failed to load file {}", (Slice)full_path.name());
           free(b);
         }
       }
+
+      filesearch_done:
+      util_free(full_path);
       G.menu_pane.buffer.empty();
-      mode_normal(false);
+      mode_normal();
       break;
     }
     else {
@@ -3054,7 +3063,7 @@ static void handle_input(Key key) {
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
       if (!G.menu_buffer.lines[0].length) {
         util_free(G.search_term);
-        mode_normal(true);
+        mode_normal();
       }
       else {
         buffer.jumplist_push();
@@ -3062,11 +3071,11 @@ static void handle_input(Key key) {
         if (G.search_failed) {
           buffer.move_to(G.search_begin_pos);
           status_message_set("'{}' not found", (Slice)G.search_term.slice);
-          mode_normal(false);
+          mode_normal();
         }
         else {
           buffer.jumplist_push();
-          mode_normal(true);
+          mode_normal();
         }
       }
     }
@@ -3086,7 +3095,7 @@ static void handle_input(Key key) {
     do_delete_movement(key);
     do_paste();
     buffer.action_end();
-    mode_normal(true);
+    mode_normal();
     break;}
 
   case MODE_YANK: {
@@ -3128,12 +3137,12 @@ static void handle_input(Key key) {
     }
   
     yank_done:;
-    mode_normal(true);
+    mode_normal();
     break;}
 
   case MODE_DELETE: {
     do_delete_movement(key);
-    mode_normal(true);
+    mode_normal();
     break;}
 
   case MODE_INSERT: {
@@ -3153,7 +3162,7 @@ static void handle_input(Key key) {
 
       case KEY_ESCAPE:
         buffer.remove_trailing_whitespace();
-        mode_normal(true);
+        mode_normal();
         break;
 
       case CONTROL('j'): {
@@ -3540,18 +3549,6 @@ static void handle_input(Key key) {
       mode_yank();
       break;
 
-    case 'C': {
-      StringBuffer s = {};
-      for (int i = 0; i < buffer.cursors.size; ++i) {
-        s += StringBuffer::create(buffer.data->lines[buffer.cursors[i].y].slice);
-        s += '\n';
-        if (i < buffer.cursors.size-1)
-          s += '\n';
-      }
-      SDL_SetClipboardText(s.chars);
-      util_free(s);
-      break;}
-
     case ':':
       mode_menu();
       break;
@@ -3860,6 +3857,7 @@ void BufferData::highlight_range(Pos a, Pos b) {
   highlights += BufferHighlight{a,b};
 }
 
+// filename must be absolute
 bool BufferData::from_file(Slice filename, BufferData *buffer) {
   FILE* f = 0;
   int num_lines = 0;
@@ -5656,7 +5654,7 @@ void Pane::render_edit() {
   // recalculate the bounds of this pane depending on the number of subpanes
   const int subpane_depth = calc_max_subpane_depth();
   const int total_width = orig_bounds.w;
-  bounds.w = total_width*(width_weight+1)/(subpane_depth+width_weight+1);
+  bounds.w = (int)(total_width*(width_weight+1)/(subpane_depth+width_weight+1));
 
   // calc buffer bound
   Pos buf_offset = {this->calc_left_visible_column(), this->calc_top_visible_row()};
@@ -6123,6 +6121,62 @@ static void handle_pending_removes() {
   }
 }
 
+static void do_pet_update_and_draw(float dt) {
+  static float frame_time;
+  static float frame_delay = 60.0f;
+  static int frame = 0;
+  frame_time += dt;
+  if (frame_time > frame_delay) {
+    ++frame;
+    frame_time = 0;
+  }
+
+  G.pet_index = G.pet_index % 3;
+
+  int animation;
+  int num_frames;
+  int num_images;
+  const int *frames;
+
+  // sleeping animation
+  // if (G.activation_meter < 30.0f) {
+  {
+    static int f[] = {0,1};
+    animation = G.pet_index*3 + 0;
+    frame_delay = 60.0f;
+    frames = f;
+    num_frames = ARRAY_LEN(f);
+    num_images = 2;
+  }
+  #if 0
+  // running animation
+  else {
+    static int f[] = {0,1,2,1};
+    static int g[] = {0,1,2};
+    animation = G.pet_index*3 + 2;
+    frame_delay = 10.0f;
+    frames = f;
+    num_frames = ARRAY_LEN(f);
+    num_images = 3;
+    if (G.pet_index == 2) {
+      frames = g;
+      num_frames = ARRAY_LEN(g);
+    }
+  }
+  #endif
+
+  Rect r = G.pet_sprites[animation];
+  r.w /= num_images;
+  frame = frame % num_frames;
+  r.x = r.w * frames[frame];
+
+  const int w = r.w*2;
+  const int h = r.h*2;
+  const int x = G.win_width - w - 10;
+  const int y = G.win_height - h - 10;
+  push_square_tquad({x, y, w, h}, r);
+}
+
 #ifdef OS_WINDOWS
 int wmain(int, const wchar_t *[], wchar_t *[])
 #else
@@ -6156,60 +6210,10 @@ int main(int, const char *[])
     do_update(dt);
     do_render();
 
-    // draw activation meter
-    {
-      static float frame_time;
-      static float frame_delay = 60.0f;
-      static int frame = 0;
-      frame_time += dt;
-      if (frame_time > frame_delay) {
-        ++frame;
-        frame_time = 0;
-      }
-
-      G.pokemon_index = G.pokemon_index % 3;
-
-      int animation;
-      int num_frames;
-      int num_images;
-      const int *frames;
-
-      if (G.activation_meter < 30.0f) {
-        static int f[] = {0,1};
-        animation = G.pokemon_index*3 + 0;
-        frame_delay = 60.0f;
-        frames = f;
-        num_frames = ARRAY_LEN(f);
-        num_images = 2;
-      }
-      else {
-        static int f[] = {0,1,2,1};
-        static int g[] = {0,1,2};
-        animation = G.pokemon_index*3 + 2;
-        frame_delay = 10.0f;
-        frames = f;
-        num_frames = ARRAY_LEN(f);
-        num_images = 3;
-        if (G.pokemon_index == 2) {
-          frames = g;
-          num_frames = ARRAY_LEN(g);
-        }
-      }
-
-      Rect r = G.pokemon_sprites[animation];
-      r.w /= num_images;
-      frame = frame % num_frames;
-      r.x = r.w * frames[frame];
-
-      int w = r.w*2;
-      int h = r.h*2;
-      int x = G.win_width - w - 10;
-      int y = G.win_height - h - 10;
-      push_square_tquad({x, y, w, h}, r);
-    }
+    do_pet_update_and_draw(dt);
 
     render_quads();
-    render_textured_quads(G.pokemon_texture);
+    render_textured_quads(G.pet_texture);
     render_text();
 
     G.activation_meter = at_least(G.activation_meter - dt / 500.0f, 0.0f);
