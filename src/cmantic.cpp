@@ -1,16 +1,16 @@
 /*
  * TODO:
- * when a long line is under selection, show expansion of that one line
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
  * language-dependent autoindent
  * use autoindent to figure out indentation
- * json language support, and auto formatting (requires language-dependent autoindent)
+ * when a long line is under selection, show expansion of that one line
  * Optimize tokenization
  * project file
  * Show current class/function/method/namespace
  * create new file
  * dp on empty ()
+ * json language support, and auto formatting (requires language-dependent autoindent)
  * gd for multiple definitions with the same name
  * If a file is only 1 line long, the line will never be read
  * Code folding
@@ -38,7 +38,6 @@
  * Syntactical Regex engine (regex with extensions for lexical tokens like identifiers, numbers, and maybe even functions, expressions etc.)
  * Compress undo history?
  * Multiuser editing
- * Update markers in other panes with same buffer (or at least make sure they are in range)
  */
 
 #if 1
@@ -75,6 +74,22 @@ void util_free(GroupedData<T> &d) {
 }
 #include "git.cpp"
 
+
+// performance time stuff
+enum {
+  TIMING_MAIN_LOOP,
+  TIMING_PANE_RENDER,
+  NUM_TIMINGS,
+};
+static struct {const char *name; Uint64 t; int depth;} timing_data[NUM_TIMINGS] = {
+  {"main loop  "},
+  {"pane render"},
+};
+STATIC_ASSERT(ARRAY_LEN(timing_data) == NUM_TIMINGS, all_timing_data_defined);
+#define TIMING_BEGIN(enum_name) if (++timing_data[enum_name].depth == 1) timing_data[enum_name].t -= SDL_GetPerformanceCounter()
+#define TIMING_END(enum_name) if (--timing_data[enum_name].depth == 0) timing_data[enum_name].t += SDL_GetPerformanceCounter()
+
+// fuzzy matching stuff
 struct FuzzyMatch {
   Slice str;
   float points;
@@ -1000,8 +1015,10 @@ struct State {
   Array<Rect> pet_sprites;
   int pet_index;
 };
-
-State G;
+static State G;
+// ensure State is POD
+#include <type_traits>
+STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
 
 void util_free(Pane &p) {
   util_free(p.buffer);
@@ -3642,7 +3659,7 @@ static void do_update(float dt) {
   // highlight some colors
   G.default_marker_background_color.tick(dt);
 
-  // get some build data
+  // fetch some build result data
   if (G.build_result_output) {
     BufferData &b = G.build_result_buffer;
 
@@ -3683,6 +3700,7 @@ static void do_update(float dt) {
       read_colorscheme_file(path.chars, true);
     util_free(path);
   }
+
 }
 
 static void do_render() {
@@ -5647,6 +5665,7 @@ void Pane::render_menu() {
 }
 
 void Pane::render_edit() {
+  IF_DEBUG(TIMING_BEGIN(TIMING_PANE_RENDER));
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
 
@@ -5819,6 +5838,7 @@ void Pane::render_edit() {
   bounds.w = total_width;
   bounds.y -= header_height;
   bounds.h += header_height;
+  IF_DEBUG(TIMING_END(TIMING_PANE_RENDER));
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -6054,9 +6074,6 @@ static void test_update() {
   #endif
 }
 
-#include <type_traits>
-STATIC_ASSERT(std::is_pod<State>::value, state_must_be_pod);
-
 static void handle_pending_removes() {
   while (G.panes_to_remove.size || G.buffers_to_remove.size) {
 
@@ -6196,7 +6213,8 @@ int main(int, const char *[])
   #endif
 
   bool window_active = true;
-  for (;;) {
+  for (uint loop_idx;; ++loop_idx) {
+
     static u32 ticks = SDL_GetTicks();
     const float dt = clamp((float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 0.3f, 3.0f);
     ticks = SDL_GetTicks();
@@ -6205,12 +6223,17 @@ int main(int, const char *[])
     if (!window_active)
       continue;
 
+    IF_DEBUG(
+      TIMING_BEGIN(TIMING_MAIN_LOOP);
+    );
+
     if (key)
       handle_input(key);
 
     #ifdef DEBUG
     test_update();
     #endif
+
 
     do_update(dt);
     do_render();
@@ -6231,5 +6254,15 @@ int main(int, const char *[])
 
     if (G.mode != MODE_INSERT)
       assert(G.editing_pane->buffer.data->_action_group_depth == 0);
+
+    // reset performance timers
+    IF_DEBUG(
+      TIMING_END(TIMING_MAIN_LOOP);
+      if (loop_idx%100 == 0)
+        for (int i = TIMING_MAIN_LOOP+1; i < NUM_TIMINGS; ++i)
+          log_info("%s: %f%%\n", timing_data[i].name, (double)timing_data[i].t / timing_data[TIMING_MAIN_LOOP].t * 100.0);
+      for (int i = 0; i < NUM_TIMINGS; ++i)
+        timing_data[i].t = 0;
+    );
   }
 }
