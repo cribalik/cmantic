@@ -817,7 +817,7 @@ struct RotatingColor {
 
   void tick(float dt) {
     hue = fmodf(hue + dt*speed*0.1f, 360.0f);
-    color = to_linear(hsl_to_color8(hue, saturation, light));
+    color = hsl_to_linear_color(hue, saturation, light);
   }
   void jump() {
     hue = fmodf(hue + 180.0f, 360.0f);

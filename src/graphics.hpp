@@ -86,9 +86,7 @@ struct Color8 {
   u8 b;
   u8 a;
 };
-static Color8 hsl_to_color8(float h, float s, float l); // (h,s,v) in range ([0,360], [0,1], [0,1])
 static Color  to_linear(Color8);
-static Color8 invert(Color8);
 static bool   operator==(Color8, Color8);
 
 /**************
@@ -1189,64 +1187,11 @@ static float to_srgb(float val) {
 }
 
 // Color8
-
-static Color8 hsl_to_color8(float h, float s, float l) {
-  const float c = (1.0f - fabsf(2*l - 1)) * s;
-  const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
-  const float m = l - c/2.0f;
-  float r,g,b;
-
-  if (h > 300.0f)
-    r = c,
-    g = 0.0f,
-    b = x;
-  else if (h > 240.0f)
-    r = x,
-    g = 0.0f,
-    b = c;
-  else if (h > 180.0f)
-    r = 0.0f,
-    g = x,
-    b = c;
-  else if (h > 120.0f)
-    r = 0.0f,
-    g = c,
-    b = x;
-  else if (h > 60.0f)
-    r = x,
-    g = c,
-    b = 0.0f;
-  else
-    r = c,
-    g = x,
-    b = 0.0f;
-
-  r += m;
-  g += m;
-  b += m;
-
-  return {
-    (u8)(r*255),
-    (u8)(g*255),
-    (u8)(b*255),
-    255
-  };
-}
-
 static Color to_linear(Color8 c) {
   float r = to_linear(c.r/255.0f);
   float g = to_linear(c.g/255.0f);
   float b = to_linear(c.b/255.0f);
   return {r,g,b, c.a/255.0f};
-}
-
-static Color8 invert(Color8 c) {
-  return {
-    (u8)(255 - c.r),
-    (u8)(255 - c.g),
-    (u8)(255 - c.b),
-    c.a
-  };
 }
 
 bool operator==(Color8 a, Color8 b) {
