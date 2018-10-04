@@ -2061,7 +2061,6 @@ static void _filetree_fill(Path path) {
 static void filetree_init() {
   util_free(G.files);
   _filetree_fill(G.current_working_directory);
-  util_free(cwd);
 }
 
 static void read_colorscheme_file(const char *path, bool quiet = true) {
@@ -3269,7 +3268,10 @@ static void handle_input(Key key) {
       // find first parent with multiple children
       for (Pane *p = G.editing_pane; p; p = p->parent) {
         if (p->parent && p->parent->subpanes.size > 1) {
-          p->height_weight = (p->height_weight + 1.0f) / 1.3f - 1.0f;
+          if (p->parent->subpanes[0].pane == p)
+            p->height_weight = (p->height_weight + 1.0f) * 1.3f - 1.0f;
+          else
+            p->height_weight = (p->height_weight + 1.0f) / 1.3f - 1.0f;
           break;
         }
       }
@@ -3279,7 +3281,10 @@ static void handle_input(Key key) {
       // find first parent with multiple children
       for (Pane *p = G.editing_pane; p; p = p->parent) {
         if (p->parent && p->parent->subpanes.size > 1) {
-          p->height_weight = (p->height_weight + 1.0f) * 1.3f - 1.0f;
+          if (p->parent->subpanes[0].pane == p)
+            p->height_weight = (p->height_weight + 1.0f) / 1.3f - 1.0f;
+          else
+            p->height_weight = (p->height_weight + 1.0f) * 1.3f - 1.0f;
           break;
         }
       }
