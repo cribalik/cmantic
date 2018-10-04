@@ -25,8 +25,6 @@ enum KeywordType {
   KEYWORD_COUNT
 };
 
-Color keyword_colors[KEYWORD_COUNT];
-
 struct Keyword {
   const char *name;
   KeywordType type;

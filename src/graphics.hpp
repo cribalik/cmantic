@@ -622,7 +622,7 @@ static int graphics_text_init(const char *ttf_file, int default_font_size) {
   void main () {
     vec4 c = clamp(fcolor, 0.0, 1.0);
     float alpha = c.w * texture(tex, ftpos).x;
-    alpha = pow(alpha, 0.7);
+    alpha = pow(alpha, 0.8);
     color = vec4(to_srgb(c.xyz), alpha);
   }
 
@@ -744,6 +744,8 @@ static void push_text(const char *str, int pos_x, int pos_y, bool center, Color 
 }
 
 static void render_text() {
+  TIMING_BEGIN(TIMING_PANE_PUSH_TEXT_QUADS);
+
   SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
   glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
 
@@ -778,6 +780,7 @@ static void render_text() {
 
   // clear
   gl_ok_or_die;
+  TIMING_END(TIMING_PANE_PUSH_TEXT_QUADS);
 }
 
 static GLuint graphics_compile_shader_from_file(const char* vertex_filename, const char* fragment_filename) {
@@ -941,12 +944,15 @@ static void render_quads() {
   glBufferData(GL_ARRAY_BUFFER, graphics_quad_state.num_vertices*sizeof(*graphics_quad_state.vertices), graphics_quad_state.vertices, GL_DYNAMIC_DRAW);
 
   //draw
+  TIMING_BEGIN(TIMING_PANE_PUSH_QUADS);
   glDrawArrays(GL_TRIANGLES, 0, graphics_quad_state.num_vertices);
+  TIMING_END(TIMING_PANE_PUSH_QUADS);
   glBindVertexArray(0);
 
   // clear
   graphics_quad_state.num_vertices = 0;
   gl_ok_or_die;
+
 }
 
 static Color shadow_color = {0.0f, 0.0f, 0.0f, 0.314f};

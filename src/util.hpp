@@ -365,6 +365,11 @@ struct StaticArray {
 };
 
 template<class T>
+static StaticArray<T> static_array(T *items, int n) {
+  return {items, n};
+}
+
+template<class T>
 union Array {
   struct {
     T *items;
@@ -2917,3 +2922,21 @@ void util_init() {
 
   #endif /* UTIL_PROCESS */
 }
+
+
+// performance time stuff
+#ifdef DEBUG
+  struct PerfCheckData {
+    const char *name;
+    u64 t;
+    int depth;
+  };
+
+  static StaticArray<PerfCheckData> perfcheck_data;
+  #define TIMING_BEGIN(index) if (++perfcheck_data[index].depth == 1) perfcheck_data[index].t -= SDL_GetPerformanceCounter()
+  #define TIMING_END(index) if (--perfcheck_data[index].depth == 0) perfcheck_data[index].t += SDL_GetPerformanceCounter()
+#else
+  #define TIMING_BEGIN(index)
+  #define TIMING_END(index)
+#endif
+

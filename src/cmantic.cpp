@@ -44,6 +44,19 @@
 #define DEBUG
 #endif
 
+// perfcheck stuff
+enum PerfChecks {
+  TIMING_MAIN_LOOP,
+  TIMING_UPDATE,
+  TIMING_RENDER,
+  TIMING_PANE_RENDER,
+  TIMING_PANE_GUTTER,
+  TIMING_PANE_BUFFER,
+  TIMING_PANE_PUSH_QUADS,
+  TIMING_PANE_PUSH_TEXT_QUADS,
+  NUM_TIMINGS,
+};
+
 // @includes
 #include "util.hpp"
 #include "graphics.hpp"
@@ -74,20 +87,6 @@ void util_free(GroupedData<T> &d) {
 }
 #include "git.cpp"
 
-
-// performance time stuff
-enum {
-  TIMING_MAIN_LOOP,
-  TIMING_PANE_RENDER,
-  NUM_TIMINGS,
-};
-static struct {const char *name; Uint64 t; int depth;} timing_data[NUM_TIMINGS] = {
-  {"main loop  "},
-  {"pane render"},
-};
-STATIC_ASSERT(ARRAY_LEN(timing_data) == NUM_TIMINGS, all_timing_data_defined);
-#define TIMING_BEGIN(enum_name) if (++timing_data[enum_name].depth == 1) timing_data[enum_name].t -= SDL_GetPerformanceCounter()
-#define TIMING_END(enum_name) if (--timing_data[enum_name].depth == 0) timing_data[enum_name].t += SDL_GetPerformanceCounter()
 
 // fuzzy matching stuff
 struct FuzzyMatch {
@@ -1211,16 +1210,20 @@ static void menu_option_closeall() {
 #define yield_break do {step = {}; return;} while(0)
 
 static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
+static void mode_normal();
 static void menu_option_set_build_command() {
   COROUTINE_BEGIN;
 
   mode_prompt(Slice::create("Build command"), menu_option_set_build_command, PROMPT_STRING);
   yield(check_prompt_result);
-  if (!G.prompt_success)
+  if (!G.prompt_success) {
+    mode_normal();
     yield_break;
+  }
   
   if (!G.prompt_result.string.length) {
     status_message_set("Command must be non-empty");
+    mode_normal();
     yield_break;
   }
 
@@ -1230,6 +1233,7 @@ static void menu_option_set_build_command() {
     G.build_command += String::create(arg);
   status_message_set("Build command set");
 
+  mode_normal();
   COROUTINE_END;
 }
 
@@ -1238,24 +1242,30 @@ static void menu_option_set_indent() {
 
   mode_prompt(Slice::create("Set indent"), menu_option_set_indent, PROMPT_INT);
   yield(check_prompt_result);
-  if (!G.prompt_success)
+  if (!G.prompt_success) {
+    mode_normal();
     yield_break;
+  }
   
   if (G.prompt_result.integer < 0) {
     status_message_set("Tab size must be >= 0");
+    mode_normal();
     yield_break;
   }
   
   G.default_tab_type = G.prompt_result.integer;
   G.editing_pane->buffer.data->tab_type = G.prompt_result.integer;
+  mode_normal();
   COROUTINE_END;
 }
 
 static void menu_option_blame() {
   COROUTINE_BEGIN;
 
-  if (!G.editing_pane->buffer.data->is_bound_to_file())
+  if (!G.editing_pane->buffer.data->is_bound_to_file()) {
+    mode_normal();
     yield_break;
+  }
 
   // ask the user if it's okay we save before blaming
   if (G.editing_pane->buffer.data->modified()) {
@@ -1263,6 +1273,7 @@ static void menu_option_blame() {
     yield(check_prompt_result);
     if (!G.prompt_success || !G.prompt_result.boolean) {
       status_message_set("Cancelling blame");
+      mode_normal();
       yield_break;
     }
   }
@@ -1270,11 +1281,13 @@ static void menu_option_blame() {
   BufferData &b = *G.editing_pane->buffer.data;
   if (b.blame.data.size) {
     util_free(b.blame);
+    mode_normal();
     yield_break;
   }
   util_free(b.blame);
 
-  save_buffer(&b);
+  if (b.modified())
+    save_buffer(&b);
 
   // call git
   const char* cmd[] = {"git", "blame", b.filename.chars, "--porcelain", NULL};
@@ -1282,26 +1295,54 @@ static void menu_option_blame() {
   int errcode = 0;
   if (!call(cmd, &errcode, &out)) {
     status_message_set("System call \"{}\" failed", cmd);
+    mode_normal();
     yield_break;
   }
-  if (errcode) {
+  if (errcode || !out.length) {
     // TODO: handle newlines
-    status_message_set("git blame returned exit code %i: {}", errcode, out.slice(0,-2));
+    if (out.length)
+      status_message_set("git blame failed: {}", out.slice(0,-2));
+    else
+      status_message_set("git blame failed");
+    util_free(out);
+    mode_normal();
     yield_break;
   }
-
   b.blame.storage.push();
   git_parse_blame(out, &b.blame.data);
   b.blame.storage.pop();
 
+  if (!b.blame.data.size)
+    status_message_set("git blame failed");
+  else
+    status_message_set("showing git blame");
+
   util_free(out);
 
+  mode_normal();
   COROUTINE_END;
 }
 
 static void menu_option_next_pet() {
   ++G.pet_index;
-  status_message_set("Changed to pet %i\n", (G.pet_index % 3) + 1);
+  status_message_set("Changed to pet %i", (G.pet_index % 3) + 1);
+}
+
+static void menu_option_expand_columns() {
+  BufferView &b = G.editing_pane->buffer;
+  b.action_begin();
+  int max_x = 0;
+  for (Cursor c : b.cursors)
+    max_x = max(max_x, b.data->to_visual_pos(c.pos).x);
+  for (int i = 0; i < b.cursors.size; ++i) {
+    int n = max_x - b.data->to_visual_pos(b.cursors[i].pos).x;
+    while (n--)
+      b.insert(Utf8char::create(' '), i);
+  }
+
+  status_message_set("Expanded columns");
+  b.action_end();
+  mode_normal();
 }
 
 static struct {MenuOption opt; void(*fun)();} menu_options[] = {
@@ -1369,6 +1410,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("next pet"),
     Slice::create("Switch to the next pet"),
     menu_option_next_pet
+  },
+  {
+    Slice::create("expand to column"),
+    Slice::create("Add spaces on the current markers until they align up"),
+    menu_option_expand_columns
   },
 };
 
@@ -2181,9 +2227,27 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
     status_message_set("Updated color scheme");
 }
 
+static Color* keyword_colors[KEYWORD_COUNT];
+
+static PerfCheckData my_perfcheck_data[] = {
+  {"MAIN_LOOP"},
+  {"UPDATE"},
+  {"RENDER"},
+  {"PANE_RENDER"},
+  {"PANE_GUTTER"},
+  {"PANE_BUFFER"},
+  {"PANE_PUSH_QUADS"},
+  {"PANE_PUSH_TEXT_QUADS"},
+};
+STATIC_ASSERT(ARRAY_LEN(my_perfcheck_data) == NUM_TIMINGS, all_perfchecks_defined);
+
 static void state_init() {
   srand((uint)time(NULL));
   rand(); rand(); rand();
+
+  #ifdef DEBUG
+    perfcheck_data = static_array(my_perfcheck_data, ARRAY_LEN(my_perfcheck_data));
+  #endif
 
   if (!File::cwd(&G.current_working_directory))
     log_err("Failed to find current working directory, something is very wrong\n"), exit(1);
@@ -2233,14 +2297,14 @@ static void state_init() {
   read_colorscheme_file(path.chars, true);
   util_free(path);
 
-  keyword_colors[KEYWORD_NONE]        = {};
-  keyword_colors[KEYWORD_CONTROL]     = G.color_scheme.syntax_control;
-  keyword_colors[KEYWORD_TYPE]        = G.color_scheme.syntax_type;
-  keyword_colors[KEYWORD_SPECIFIER]   = G.color_scheme.syntax_specifier;
-  keyword_colors[KEYWORD_DEFINITION]  = G.color_scheme.syntax_definition_keyword;
-  keyword_colors[KEYWORD_FUNCTION]    = G.color_scheme.syntax_function;
-  keyword_colors[KEYWORD_MACRO]       = G.color_scheme.syntax_macro;
-  keyword_colors[KEYWORD_CONSTANT]    = G.color_scheme.syntax_constant;
+  keyword_colors[KEYWORD_NONE]        = 0;
+  keyword_colors[KEYWORD_CONTROL]     = &G.color_scheme.syntax_control;
+  keyword_colors[KEYWORD_TYPE]        = &G.color_scheme.syntax_type;
+  keyword_colors[KEYWORD_SPECIFIER]   = &G.color_scheme.syntax_specifier;
+  keyword_colors[KEYWORD_DEFINITION]  = &G.color_scheme.syntax_definition_keyword;
+  keyword_colors[KEYWORD_FUNCTION]    = &G.color_scheme.syntax_function;
+  keyword_colors[KEYWORD_MACRO]       = &G.color_scheme.syntax_macro;
+  keyword_colors[KEYWORD_CONSTANT]    = &G.color_scheme.syntax_constant;
 
   G.active_highlight_background_color.base_color = &G.color_scheme.line_highlight;
   G.active_highlight_background_color.popped_color = &G.color_scheme.line_highlight_pop;
@@ -2457,13 +2521,16 @@ static void do_build() {
   if (G.build_result_output) {
     mode_prompt(Slice::create("Build is already running, are you sure? [y/n]"), do_build, PROMPT_BOOLEAN);
     yield(wait_for_prompt);
-    if (!G.prompt_success || !G.prompt_result.boolean)
+    if (!G.prompt_success || !G.prompt_result.boolean) {
+      mode_normal();
       yield_break;
+    }
   }
 
   // build arg list
   if (!G.build_command.size) {
     status_message_set("No build command set. Please set with :set build command");
+    mode_normal();
     yield_break;
   }
 
@@ -2473,6 +2540,7 @@ static void do_build() {
 
   if (!success) {
     status_message_set("Failed to call {}", (Slice)G.build_command[0].slice);
+    mode_normal();
     yield_break;
   }
 
@@ -2493,6 +2561,7 @@ static void do_build() {
     }
   }
 
+  mode_normal();
   COROUTINE_END;
 }
 
@@ -2506,8 +2575,10 @@ static void do_visual_jump() {
 
   mode_prompt(Slice::create("jump"), do_visual_jump, PROMPT_KEY);
   yield(wait_for_initial_key);
-  if (!G.prompt_success)
+  if (!G.prompt_success) {
+    mode_normal();
     yield_break;
+  }
 
   // find the chars to highlight
   {
@@ -2555,6 +2626,7 @@ static void do_visual_jump() {
   util_free(G.visual_jump_positions);
   G.current_visual_jump_pane = 0;
 
+  mode_normal();
   COROUTINE_END;
 }
 
@@ -2906,7 +2978,6 @@ static void handle_input(Key key) {
     break;
 
     prompt_done:
-    mode_normal();
     G.prompt_callback();
     break;
 
@@ -3701,15 +3772,13 @@ static void do_update(float dt) {
     util_free(path);
   }
 
+  G.activation_meter = at_least(G.activation_meter - dt / 500.0f, 0.0f);
 }
 
 static void do_render() {
-  // render
   G.font_width = graphics_get_font_advance(G.font_height);
   G.line_height = G.font_height + G.line_margin;
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
-  glClearColor(G.color_scheme.background.r/255.0f, G.color_scheme.background.g/255.0f, G.color_scheme.background.g/255.0f, 1.0f);
-  glClear(GL_COLOR_BUFFER_BIT);
 
   // reflow top level panes
   G.bottom_pane->margin = 3;
@@ -3726,11 +3795,14 @@ static void do_render() {
   }
   G.bottom_pane->bounds = {0, G.win_height - G.bottom_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
+  TIMING_BEGIN(TIMING_PANE_RENDER);
   for (Pane *p : G.editing_panes) {
     if (!p->parent)
       p->render();
   }
+
   G.bottom_pane->render();
+  TIMING_END(TIMING_PANE_RENDER);
 }
 
 Pos BufferData::to_visual_pos(Pos p) {
@@ -5484,11 +5556,11 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
         case TOKEN_IDENTIFIER: {
           // check for keywords
           if (t->str.length > 0 && t->str[0] == '#')
-            render_highlight(keyword_colors[KEYWORD_MACRO]);
+            render_highlight(*keyword_colors[KEYWORD_MACRO]);
           else {
             for (Keyword keyword : language_settings[b.data->language].keywords) {
               if (t->str == keyword.name) {
-                render_highlight(keyword_colors[keyword.type]);
+                render_highlight(*keyword_colors[keyword.type]);
                 break;
               }
             }
@@ -5665,7 +5737,6 @@ void Pane::render_menu() {
 }
 
 void Pane::render_edit() {
-  IF_DEBUG(TIMING_BEGIN(TIMING_PANE_RENDER));
   BufferView &b = buffer;
   BufferData &d = *buffer.data;
 
@@ -5685,6 +5756,7 @@ void Pane::render_edit() {
   int buf_y1 = at_most(buf_offset.y + this->numchars_y(), d.lines.size);
 
   // draw gutter
+  TIMING_BEGIN(TIMING_PANE_GUTTER);
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   if (_gutter_width && numchars_y()) {
     TextCanvas gutter;
@@ -5698,6 +5770,7 @@ void Pane::render_edit() {
     gutter.render(bounds.p);
     util_free(gutter);
   }
+  TIMING_END(TIMING_PANE_GUTTER);
 
   // record buffer viewport (mainly used for visual jump)
   buffer_viewport = {buf_offset.x, buf_offset.y, numchars_x()-_gutter_width, buf_y1 - buf_offset.y-1};
@@ -5706,6 +5779,7 @@ void Pane::render_edit() {
   // TODO: The reason we don't use buffer_viewport.h here is because we might be at the end of the buffer,
   //       causing the background to never render.. This is kind of depressing. We should probably just render a big
   //       background first, and then use buffer_viewport.h for the canvas
+  TIMING_BEGIN(TIMING_PANE_BUFFER);
   if (buffer_viewport.w > 0 && numchars_y() > 0) {
     TextCanvas canvas;
     canvas.init(buffer_viewport.w, numchars_y());
@@ -5797,6 +5871,7 @@ void Pane::render_edit() {
     canvas.render(bounds.p + Pos{_gutter_width*G.font_width, 0});
     util_free(canvas);
   }
+  TIMING_END(TIMING_PANE_BUFFER);
 
   // render filename
   const Slice filename = d.name();
@@ -5838,7 +5913,6 @@ void Pane::render_edit() {
   bounds.w = total_width;
   bounds.y -= header_height;
   bounds.h += header_height;
-  IF_DEBUG(TIMING_END(TIMING_PANE_RENDER));
 }
 
 Pos Pane::buf2pixel(Pos p) const {
@@ -6223,9 +6297,7 @@ int main(int, const char *[])
     if (!window_active)
       continue;
 
-    IF_DEBUG(
-      TIMING_BEGIN(TIMING_MAIN_LOOP);
-    );
+    TIMING_BEGIN(TIMING_MAIN_LOOP);
 
     if (key)
       handle_input(key);
@@ -6234,9 +6306,13 @@ int main(int, const char *[])
     test_update();
     #endif
 
-
+    TIMING_BEGIN(TIMING_UPDATE);
     do_update(dt);
+    TIMING_END(TIMING_UPDATE);
+
+    TIMING_BEGIN(TIMING_RENDER);
     do_render();
+    TIMING_END(TIMING_RENDER);
 
     do_pet_update_and_draw(dt);
 
@@ -6244,25 +6320,22 @@ int main(int, const char *[])
     render_textured_quads(G.pet_texture);
     render_text();
 
-    G.activation_meter = at_least(G.activation_meter - dt / 500.0f, 0.0f);
+    handle_pending_removes();
 
     SDL_GL_SwapWindow(G.window);
 
-    handle_pending_removes();
-
     G.flags.cursor_dirty = false;
 
-    if (G.mode != MODE_INSERT)
-      assert(G.editing_pane->buffer.data->_action_group_depth == 0);
-
     // reset performance timers
-    IF_DEBUG(
-      TIMING_END(TIMING_MAIN_LOOP);
-      if (loop_idx%100 == 0)
+    TIMING_END(TIMING_MAIN_LOOP);
+    #ifdef DEBUG
+      if (loop_idx%100 == 0) {
+        puts("\n");
         for (int i = TIMING_MAIN_LOOP+1; i < NUM_TIMINGS; ++i)
-          log_info("%s: %f%%\n", timing_data[i].name, (double)timing_data[i].t / timing_data[TIMING_MAIN_LOOP].t * 100.0);
+          log_info("%s: %f%%\n", perfcheck_data[i].name, (double)perfcheck_data[i].t / perfcheck_data[TIMING_MAIN_LOOP].t * 100.0);
+      }
       for (int i = 0; i < NUM_TIMINGS; ++i)
-        timing_data[i].t = 0;
-    );
+        perfcheck_data[i].t = 0;
+    #endif
   }
 }
