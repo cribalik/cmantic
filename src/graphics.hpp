@@ -55,34 +55,41 @@ typedef unsigned short u16;
 
 static int graphics_init(SDL_Window **window);
 
-struct LinearColor {
+
+/***************
+ *    COLOR    *
+ **************/
+
+static float to_srgb(float val);
+static float to_linear(float val);
+struct Color;
+struct Color8;
+
+struct Color {
   float r;
   float g;
   float b;
   float a;
 };
+static Color  hsl_to_linear_color(float h, float s, float l); // (h,s,v) in range ([0,360], [0,1], [0,1])
+static Color  blend(Color back, Color front);
+static Color  blend(Color back, Color front, float alpha);
+static Color  blend_additive(Color back, Color front);
+static Color  blend_additive(Color back, Color front, float alpha);
+static Color8 to_srgb(Color c);
+static Color  invert(Color c);
+static bool   operator==(Color, Color);
 
-struct Color {
+struct Color8 {
   u8 r;
   u8 g;
   u8 b;
   u8 a;
-
-  // h [0,360]
-  // s [0,1]
-  // v [0,1]
-  static Color from_hsl(float h, float s, float l);
-  // static Color to_hsl(float h, float s, float l);
-  static Color blend(Color back, Color front);
-  static Color blend(Color back, Color front, float alpha);
-  static Color blend_additive(Color back, Color front);
-  static Color blend_additive(Color back, Color front, float alpha);
-  static Color to_linear(Color c);
-  static float to_linear(float val);
-  static Color to_srgb(Color c);
-  static float to_srgb(float val);
-  static Color invert(Color c);
 };
+static Color8 hsl_to_color8(float h, float s, float l); // (h,s,v) in range ([0,360], [0,1], [0,1])
+static Color  to_linear(Color8);
+static Color8 invert(Color8);
+static bool   operator==(Color8, Color8);
 
 /**************
  *    TEXT    *
@@ -257,10 +264,6 @@ struct Texture {
   GLuint id;
   int w,h;
 };
-
-bool operator==(Color a, Color b) {
-  return *(u32*)&a == *(u32*)&b;
-}
 
 struct TextVertex {
   u16 x,y;
@@ -574,34 +577,56 @@ static int graphics_text_init(const char *ttf_file, int default_font_size) {
   glEnableVertexAttribArray(2);
   glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(TextVertex), (void*) 0);
   glVertexAttribIPointer(1, 2, GL_UNSIGNED_SHORT, sizeof(TextVertex), (void*) offsetof(TextVertex, tx));
-  glVertexAttribPointer(2, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(TextVertex), (void*) offsetof(TextVertex, color));
+  glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(TextVertex), (void*) offsetof(TextVertex, color));
   gl_ok_or_die;
 
   // @shader
-  const char *vertex_src = "#version 330 core\n" \
-  "layout(location = 0) in ivec2 pos;\n" \
-  "layout(location = 1) in ivec2 tpos;\n" \
-  "layout(location = 2) in vec3 color;\n" \
-  "out vec2 ftpos;\n" \
-  "out vec3 fcolor;\n" \
-  "uniform vec2 screensize;\n" \
-  "uniform vec2 texture_size;\n" \
-  "void main() { \n" \
-  "vec2 p = vec2(pos.x*2/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);\n" \
-  "gl_Position = vec4(p, 0, 1);\n" \
-  "ftpos = tpos / texture_size;\n" \
-  "fcolor = color;\n" \
-  "}";
+  const char *vertex_src = R"STRING(
+  #version 330 core
 
-  const char *fragment_src =
-  "#version 330 core\n" \
-  "in vec2 ftpos;\n" \
-  "in vec3 fcolor;\n" \
-  "out vec4 color;\n" \
-  "uniform sampler2D tex;\n" \
-  "float to_srgbf(float val) {if(val < 0.0031308f) {val = val * 12.92f;} else {val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;}return val;}\n" \
-  "vec3 to_srgb(vec3 v) {return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));}\n" \
-  "void main () { color = vec4(to_srgb(fcolor), texture(tex, ftpos).x); }\n";
+  layout(location = 0) in ivec2 pos;
+  layout(location = 1) in ivec2 tpos;
+  layout(location = 2) in vec4 color;
+
+  out vec2 ftpos;
+  out vec4 fcolor;
+
+  uniform vec2 screensize;
+  uniform vec2 texture_size;
+
+  void main() { 
+    vec2 p = vec2(pos.x*2/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);
+    gl_Position = vec4(p, 0, 1);
+    ftpos = tpos / texture_size;
+    fcolor = color;
+  }
+
+  )STRING";
+
+  const char *fragment_src = R"STRING(
+  #version 330 core
+
+  in vec2 ftpos;
+  in vec4 fcolor;
+
+  out vec4 color;
+
+  uniform sampler2D tex;
+
+  float to_srgbf(float val) {
+    return val < 0.0031308f ? val*12.92f : 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+  }
+
+  vec3 to_srgb(vec3 v) {
+    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
+  }
+
+  void main () {
+    vec4 c = clamp(fcolor, 0.0, 1.0);
+    color = vec4(to_srgb(c.xyz), c.w * texture(tex, ftpos).x);
+  }
+
+  )STRING";
 
   glEnable(GL_BLEND);
   graphics_text_state.shader = graphics_compile_shader(vertex_src, fragment_src);
@@ -807,28 +832,49 @@ static int graphics_quad_init() {
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glVertexAttribIPointer(0, 2, GL_UNSIGNED_SHORT, sizeof(QuadVertex), (void*) 0);
-  glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
+  glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(QuadVertex), (void*) offsetof(QuadVertex, color));
   gl_ok_or_die;
 
   // @shader
-  const char *vertex_src = "#version 330 core\n" \
-  "layout(location = 0) in ivec2 pos;\n" \
-  "layout(location = 1) in vec4 color;\n" \
-  "out vec4 fcolor;\n" \
-  "uniform vec2 screensize;\n" \
-  "void main() { \n" \
-  "vec2 p = vec2(pos.x*2.0f/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);\n" \
-    "gl_Position = vec4(p, 0, 1);\n" \
-    "fcolor = color;\n" \
-  "}";
+  const char *vertex_src = R"SHADER(
+  #version 330 core
 
-  const char *fragment_src =
-  "#version 330 core\n" \
-  "in vec4 fcolor;\n" \
-  "out vec4 color;\n" \
-  "float to_srgbf(float val) {if(val < 0.0031308f) {val = val * 12.92f;} else {val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;}return val;}\n" \
-  "vec3 to_srgb(vec3 v) {return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));}\n" \
-  "void main () { color = vec4(to_srgb(fcolor.xyz), fcolor.a); }\n";
+  layout(location = 0) in ivec2 pos;
+  layout(location = 1) in vec4 color;
+
+  out vec4 fcolor;
+
+  uniform vec2 screensize;
+
+  void main() { 
+    vec2 p = vec2(pos.x*2.0f/screensize.x - 1.0f, (1.0f - pos.y/screensize.y)*2 - 1.0f);
+    gl_Position = vec4(p, 0, 1);
+    fcolor = color;
+  }
+
+  )SHADER";
+
+  const char *fragment_src = R"SHADER(
+  #version 330 core
+
+  in vec4 fcolor;
+
+  out vec4 color;
+
+  float to_srgbf(float val) {
+    return val < 0.0031308f ? val*12.92f : 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+  }
+
+  vec3 to_srgb(vec3 v) {
+    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
+  }
+
+  void main () {
+    vec4 c = clamp(fcolor, 0.0, 1.0);
+    color = vec4(to_srgb(c.xyz), c.w);
+  }
+
+  )SHADER";
 
   graphics_quad_state.shader = graphics_compile_shader(vertex_src, fragment_src);
   if (!graphics_quad_state.shader)
@@ -903,8 +949,8 @@ static void render_quads() {
   gl_ok_or_die;
 }
 
-static Color shadow_color = {0, 0, 0, 80};
-static Color shadow_color2 = {0, 0, 0, 0};
+static Color shadow_color = {0.0f, 0.0f, 0.0f, 0.314f};
+static Color shadow_color2 = {0.0f, 0.0f, 0.0f, 0.0f};
 
 static void render_shadow_bottom_right(int x, int y, int w, int h, int shadow_size = 3) {
   // right side
@@ -1134,45 +1180,17 @@ static bool load_texture_from_file(const char *filename, TextureHandle *result) 
 }
 
 
-
-// alpha in range [0,1]
-Color Color::blend(Color back, Color front, float alpha) {
-  if (alpha < 0.0001f)
-    return back;
-
-  float a = alpha + back.a/255.0f*(1.0f-alpha);
-  float r = (back.r/255.0f*back.a/255.0f*(1.0f-alpha) + front.r/255.0f*alpha) / a;
-  float g = (back.g/255.0f*back.a/255.0f*(1.0f-alpha) + front.g/255.0f*alpha) / a;
-  float b = (back.b/255.0f*back.a/255.0f*(1.0f-alpha) + front.b/255.0f*alpha) / a;
-  return {
-    (u8)(r*255),
-    (u8)(g*255),
-    (u8)(b*255),
-    (u8)(a*255),
-  };
+static float to_linear(float val) {
+  return val < 0.04045f ? val/12.92f : powf((val + 0.055f)/1.055f, 2.4f);
 }
 
-Color Color::blend_additive(Color back, Color front, float alpha) {
-  if (alpha < 0.0001f)
-    return back;
-
-  return {
-    (u8)at_most(back.r + front.r*alpha, 255.0f),
-    (u8)at_most(back.g + front.g*alpha, 255.0f),
-    (u8)at_most(back.b + front.b*alpha, 255.0f),
-    back.a
-  };
+static float to_srgb(float val) {
+  return val < 0.0031308f ? val * 12.92f : (1.055f * powf(val, 1.0f/2.4f) - 0.055f);
 }
 
-Color Color::blend_additive(Color back, Color front) {
-  return Color::blend_additive(back, front, front.a/255.0f);
-}
+// Color8
 
-Color Color::blend(Color back, Color front) {
-  return blend(back, front, front.a/255.0f);
-}
-
-Color Color::from_hsl(float h, float s, float l) {
+static Color8 hsl_to_color8(float h, float s, float l) {
   const float c = (1.0f - fabsf(2*l - 1)) * s;
   const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
   const float m = l - c/2.0f;
@@ -1215,51 +1233,134 @@ Color Color::from_hsl(float h, float s, float l) {
   };
 }
 
-float Color::to_linear(float val) {
-  if (val < 0.04045f)
-    return val/12.92f;
-  else
-    return powf((val + 0.055f)/1.055f, 2.4f);
-}
-
-Color Color::to_linear(Color c) {
+static Color to_linear(Color8 c) {
   float r = to_linear(c.r/255.0f);
   float g = to_linear(c.g/255.0f);
   float b = to_linear(c.b/255.0f);
-  return {
-    (u8)(r*255),
-    (u8)(g*255),
-    (u8)(b*255),
-    c.a
-  };
+  return {r,g,b, c.a/255.0f};
 }
 
-float Color::to_srgb(float val) {
-  if (val < 0.0031308f)
-    return val * 12.92f;
-  else
-    return 1.055f * powf(val, 1.0f/2.4f) - 0.055f;
-}
-
-Color Color::to_srgb(Color c) {
-  float r = to_srgb(c.r/255.0f);
-  float g = to_srgb(c.g/255.0f);
-  float b = to_srgb(c.b/255.0f);
-  return {
-    (u8)(r*255),
-    (u8)(g*255),
-    (u8)(b*255),
-    c.a
-  };
-}
-
-Color Color::invert(Color c) {
+static Color8 invert(Color8 c) {
   return {
     (u8)(255 - c.r),
     (u8)(255 - c.g),
     (u8)(255 - c.b),
     c.a
   };
+}
+
+bool operator==(Color8 a, Color8 b) {
+  return *(u32*)&a == *(u32*)&b;
+}
+
+// Color
+static Color blend(Color back, Color front, float alpha) {
+  if (alpha < 0.0001f)
+    return back;
+
+  float a = alpha + back.a*(1.0f-alpha);
+  float r = (back.r*back.a*(1.0f-alpha) + front.r*alpha) / a;
+  float g = (back.g*back.a*(1.0f-alpha) + front.g*alpha) / a;
+  float b = (back.b*back.a*(1.0f-alpha) + front.b*alpha) / a;
+  return {r, g, b, a};
+}
+
+static Color blend_additive(Color back, Color front, float alpha) {
+  return {
+    back.r + front.r*alpha,
+    back.g + front.g*alpha,
+    back.b + front.b*alpha,
+    back.a,
+  };
+}
+
+static Color blend_additive(Color back, Color front) {
+  return blend_additive(back, front, front.a);
+}
+
+static Color blend(Color back, Color front) {
+  return blend(back, front, front.a);
+}
+
+static Color rgb8_to_linear_color(int r, int g, int b) {
+  return {
+    to_linear(r/255.0f),
+    to_linear(g/255.0f),
+    to_linear(b/255.0f),
+    to_linear(1.0f),
+  };
+}
+
+static Color rgba8_to_linear_color(int r, int g, int b, int a) {
+  return {
+    to_linear(r/255.0f),
+    to_linear(g/255.0f),
+    to_linear(b/255.0f),
+    to_linear(a/255.0f),
+  };
+}
+
+static Color hsl_to_linear_color(float h, float s, float l) {
+  const float c = (1.0f - fabsf(2*l - 1)) * s;
+  const float x = c*(1.0f - fabsf(fmodf((h/60.0f), 2.0f) - 1.0f));
+  const float m = l - c/2.0f;
+  float r,g,b;
+
+  if (h > 300.0f)
+    r = c,
+    g = 0.0f,
+    b = x;
+  else if (h > 240.0f)
+    r = x,
+    g = 0.0f,
+    b = c;
+  else if (h > 180.0f)
+    r = 0.0f,
+    g = x,
+    b = c;
+  else if (h > 120.0f)
+    r = 0.0f,
+    g = c,
+    b = x;
+  else if (h > 60.0f)
+    r = x,
+    g = c,
+    b = 0.0f;
+  else
+    r = c,
+    g = x,
+    b = 0.0f;
+
+  r += m;
+  g += m;
+  b += m;
+
+  return Color{to_linear(r), to_linear(g), to_linear(b), to_linear(1.0f)};
+}
+
+static Color8 to_srgb(Color c) {
+  float r = to_srgb(c.r);
+  float g = to_srgb(c.g);
+  float b = to_srgb(c.b);
+  return {
+    (u8)(r*255),
+    (u8)(g*255),
+    (u8)(b*255),
+    (u8)(c.a*255),
+  };
+}
+
+static Color invert(Color c) {
+  return {
+    1.0f - c.r,
+    1.0f - c.g,
+    1.0f - c.b,
+    c.a
+  };
+}
+
+bool operator==(Color a, Color b) {
+  return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
 }
 
 #endif /* GRAPHICS_H */

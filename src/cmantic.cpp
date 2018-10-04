@@ -4,6 +4,7 @@
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
  * language-dependent autoindent
+ * use autoindent to figure out indentation
  * json language support, and auto formatting (requires language-dependent autoindent)
  * Optimize tokenization
  * project file
@@ -11,7 +12,6 @@
  * create new file
  * dp on empty ()
  * gd for multiple definitions with the same name
- * Need higher precision for colors when working in linear space
  * If a file is only 1 line long, the line will never be read
  * Code folding
  * always distinguish block selection on inner and outer?
@@ -299,8 +299,11 @@ static void util_free(UndoAction &a);
 struct BufferHighlight {
   Pos a;
   Pos b;
-  float invalpha; // starts at 0 and goes to 1 (so you can zero initialize)
+  float alpha; // 1 -> 0
 };
+static BufferHighlight buffer_highlight(Pos a, Pos b) {
+  return {a, b, 2.0f};
+}
 
 struct BufferRectIter {
   Pos p;
@@ -801,7 +804,7 @@ struct PoppedColor {
   void tick(float dt) {
     assert(speed);
     amount -= dt*speed*(max-min)*0.04f;
-    color = Color::blend(*base_color, *popped_color, clamp(amount, min, max));
+    color = blend(*base_color, *popped_color, clamp(amount, min, max));
   }
 };
 
@@ -814,7 +817,7 @@ struct RotatingColor {
 
   void tick(float dt) {
     hue = fmodf(hue + dt*speed*0.1f, 360.0f);
-    color = Color::to_linear(Color::from_hsl(hue, saturation, light));
+    color = to_linear(hsl_to_color8(hue, saturation, light));
   }
   void jump() {
     hue = fmodf(hue + 180.0f, 360.0f);
@@ -1037,27 +1040,27 @@ static void status_message_set(const char *fmt, ...) {
   G.bottom_pane = &G.status_message_pane;
 }
 
-static const Color COLOR_PINK = Color::to_linear({236, 64, 122, 255});
-static const Color COLOR_YELLOW = Color::to_linear({255, 235, 59, 255});
-static const Color COLOR_LIGHT_YELLOW = Color::to_linear({255, 240, 79, 255});
-static const Color COLOR_AMBER = Color::to_linear({255,193,7, 255});
-static const Color COLOR_DEEP_ORANGE = Color::to_linear({255,138,101, 255});
-static const Color COLOR_ORANGE = Color::to_linear({255,183,77, 255});
-static const Color COLOR_GREEN = Color::to_linear({129,199,132, 255});
-static const Color COLOR_LIGHT_GREEN = Color::to_linear({174,213,129, 255});
-static const Color COLOR_INDIGO = Color::to_linear({121,134,203, 255});
-static const Color COLOR_DEEP_PURPLE = Color::to_linear({149,117,205, 255});
-static const Color COLOR_RED = Color::to_linear({229,115,115, 255});
-static const Color COLOR_CYAN = Color::to_linear({77,208,225, 255});
-static const Color COLOR_LIGHT_BLUE = Color::to_linear({79,195,247, 255});
-static const Color COLOR_PURPLE = Color::to_linear({186,104,200, 255});
-static const Color COLOR_BLUEGREY = Color::to_linear({84, 110, 122, 255});
-static const Color COLOR_GREY = Color::to_linear({51, 51, 51, 255});
-static const Color COLOR_LIGHT_GREY = Color::to_linear({76, 76, 76, 255});
-static const Color COLOR_BLACK = Color::to_linear({25, 25, 25, 255});
-static const Color COLOR_WHITE = Color::to_linear({240, 240, 240, 255});
-static const Color COLOR_BLUE = Color::to_linear({79,195,247, 255});
-static const Color COLOR_DARK_BLUE = Color::to_linear({124, 173, 213, 255});
+static const Color COLOR_PINK = rgba8_to_linear_color(236, 64, 122, 255);
+static const Color COLOR_YELLOW = rgba8_to_linear_color(255, 235, 59, 255);
+static const Color COLOR_LIGHT_YELLOW = rgba8_to_linear_color(255, 240, 79, 255);
+static const Color COLOR_AMBER = rgba8_to_linear_color(255,193,7, 255);
+static const Color COLOR_DEEP_ORANGE = rgba8_to_linear_color(255,138,101, 255);
+static const Color COLOR_ORANGE = rgba8_to_linear_color(255,183,77, 255);
+static const Color COLOR_GREEN = rgba8_to_linear_color(129,199,132, 255);
+static const Color COLOR_LIGHT_GREEN = rgba8_to_linear_color(174,213,129, 255);
+static const Color COLOR_INDIGO = rgba8_to_linear_color(121,134,203, 255);
+static const Color COLOR_DEEP_PURPLE = rgba8_to_linear_color(149,117,205, 255);
+static const Color COLOR_RED = rgba8_to_linear_color(229,115,115, 255);
+static const Color COLOR_CYAN = rgba8_to_linear_color(77,208,225, 255);
+static const Color COLOR_LIGHT_BLUE = rgba8_to_linear_color(79,195,247, 255);
+static const Color COLOR_PURPLE = rgba8_to_linear_color(186,104,200, 255);
+static const Color COLOR_BLUEGREY = rgba8_to_linear_color(84, 110, 122, 255);
+static const Color COLOR_GREY = rgba8_to_linear_color(51, 51, 51, 255);
+static const Color COLOR_LIGHT_GREY = rgba8_to_linear_color(76, 76, 76, 255);
+static const Color COLOR_BLACK = rgba8_to_linear_color(25, 25, 25, 255);
+static const Color COLOR_WHITE = rgba8_to_linear_color(240, 240, 240, 255);
+static const Color COLOR_BLUE = rgba8_to_linear_color(79,195,247, 255);
+static const Color COLOR_DARK_BLUE = rgba8_to_linear_color(124, 173, 213, 255);
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
   #ifdef OS_WINDOWS
@@ -2089,8 +2092,7 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
     if (!a.toint(&ai))
       ai = 255;
 
-    Color c = {(u8)ri, (u8)gi, (u8)bi, (u8)ai};
-    c = Color::to_linear(c);
+    Color c = rgba8_to_linear_color(ri, gi, bi, ai);
 
     if      (key == "syntax_control")
       G.color_scheme.syntax_control = c;
@@ -3630,9 +3632,9 @@ static void do_update(float dt) {
   // update paste highlights
   for (BufferData *b : G.buffers) {
     for (int i = 0; i < b->highlights.size; ++i) {
-      b->highlights[i].invalpha += dt*0.03f;
+      b->highlights[i].alpha -= dt*0.06f;
 
-      if (b->highlights[i].invalpha > 1.0f)
+      if (b->highlights[i].alpha < 0.0f)
         b->highlights[i--] = b->highlights[--b->highlights.size];
     }
   }
@@ -3858,7 +3860,7 @@ bool BufferData::reload(BufferData *b) {
 void BufferData::highlight_range(Pos a, Pos b) {
   if (b < a)
     swap_range(*this, a,b);
-  highlights += BufferHighlight{a,b};
+  highlights += buffer_highlight(a,b);
 }
 
 // filename must be absolute
@@ -5160,18 +5162,18 @@ void TextCanvas::blend_textcolor(Range range, Color c) {
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
-      this->text_colors[a.y*this->w + x] = Color::blend(this->text_colors[a.y*this->w + x], c);
+      this->text_colors[a.y*this->w + x] = blend(this->text_colors[a.y*this->w + x], c);
     return;
   }
 
   int y = a.y;
   for (int x = a.x; x < w; ++x)
-    this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
+    this->text_colors[y*this->w + x] = blend(this->text_colors[y*this->w + x], c);
   for (++y; y < b.y; ++y)
     for (int x = 0; x < w; ++x)
-      this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
+      this->text_colors[y*this->w + x] = blend(this->text_colors[y*this->w + x], c);
   for (int x = 0; x < b.x; ++x)
-    this->text_colors[y*this->w + x] = Color::blend(this->text_colors[y*this->w + x], c);
+    this->text_colors[y*this->w + x] = blend(this->text_colors[y*this->w + x], c);
 }
 
 void TextCanvas::blend_textcolor_additive(Range range, Color c) {
@@ -5181,18 +5183,18 @@ void TextCanvas::blend_textcolor_additive(Range range, Color c) {
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
-      this->text_colors[a.y*this->w + x] = Color::blend_additive(this->text_colors[a.y*this->w + x], c);
+      this->text_colors[a.y*this->w + x] = blend_additive(this->text_colors[a.y*this->w + x], c);
     return;
   }
 
   int y = a.y;
   for (int x = a.x; x < w; ++x)
-    this->text_colors[y*this->w + x] = Color::blend_additive(this->text_colors[y*this->w + x], c);
+    this->text_colors[y*this->w + x] = blend_additive(this->text_colors[y*this->w + x], c);
   for (++y; y < b.y; ++y)
     for (int x = 0; x < w; ++x)
-      this->text_colors[y*this->w + x] = Color::blend_additive(this->text_colors[y*this->w + x], c);
+      this->text_colors[y*this->w + x] = blend_additive(this->text_colors[y*this->w + x], c);
   for (int x = 0; x < b.x; ++x)
-    this->text_colors[y*this->w + x] = Color::blend_additive(this->text_colors[y*this->w + x], c);
+    this->text_colors[y*this->w + x] = blend_additive(this->text_colors[y*this->w + x], c);
 }
 
 // fills a to b but only inside the bounds 
@@ -5498,7 +5500,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
       success &= b.data->getslice(t[0].r).toint(&ri);
       success &= b.data->getslice(t[1].r).toint(&gi);
       success &= b.data->getslice(t[2].r).toint(&bi);
-      Color color = {(u8)ri, (u8)gi, (u8)bi, 255};
+      Color color = rgb8_to_linear_color(ri, gi, bi);
 
       if (!success)
         break;
@@ -5511,8 +5513,7 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
       r.a = b.data->to_visual_pos(r.a);
       r.b = b.data->to_visual_pos(r.b);
 
-      color = Color::to_linear(color);
-      canvas.fill_textcolor(r, Color::invert(color));
+      canvas.fill_textcolor(r, invert(color));
       canvas.fill_background(r, color);
     }
   }
@@ -5716,8 +5717,8 @@ void Pane::render_edit() {
     for (BufferHighlight ph : d.highlights) {
       if (ph.b.y < buf_offset.y || ph.a.y > buf_y1)
         continue;
-      Color color = COLOR_LIGHT_YELLOW;
-      color.a = (u8)((1.0 - ph.invalpha)*255.0f);
+      Color color = COLOR_YELLOW;
+      color.a = clamp(ph.alpha, 0.0f, 1.0f);
       canvas.blend_textcolor(Range{d.to_visual_pos(ph.a), d.to_visual_pos(ph.b)}, color);
     }
 
@@ -5759,7 +5760,7 @@ void Pane::render_edit() {
     // draw marker
     for (Cursor c : b.cursors) {
       if (G.selected_pane == this)
-        // canvas.fill_background(Rect{buf2char(pos), {1, 1}}, Color::from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
+        // canvas.fill_background(Rect{buf2char(pos), {1, 1}}, from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
         canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
       else if (G.bottom_pane != this)
         canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.color_scheme.marker_inactive);
