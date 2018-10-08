@@ -6287,7 +6287,7 @@ int main(int, const char *[])
   #endif
 
   bool window_active = true;
-  for (uint loop_idx;; ++loop_idx) {
+  for (uint loop_idx = 0;; ++loop_idx) {
 
     static u32 ticks = SDL_GetTicks();
     const float dt = clamp((float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 0.3f, 3.0f);
@@ -6314,7 +6314,7 @@ int main(int, const char *[])
     do_render();
     TIMING_END(TIMING_RENDER);
 
-    do_pet_update_and_draw(dt);
+    // do_pet_update_and_draw(dt);
 
     render_quads();
     render_textured_quads(G.pet_texture);

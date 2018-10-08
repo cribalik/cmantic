@@ -622,7 +622,7 @@ static int graphics_text_init(const char *ttf_file, int default_font_size) {
   void main () {
     vec4 c = clamp(fcolor, 0.0, 1.0);
     float alpha = c.w * texture(tex, ftpos).x;
-    alpha = pow(alpha, 0.8);
+    alpha = pow(alpha, 0.73);
     color = vec4(to_srgb(c.xyz), alpha);
   }
 
