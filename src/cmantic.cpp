@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * visual jump to line
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
  * language-dependent autoindent
