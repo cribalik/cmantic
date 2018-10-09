@@ -926,6 +926,7 @@ static void push_square_quad(Rect r, Color c) {
 }
 
 static void render_quads() {
+  TIMING_BEGIN(TIMING_PANE_PUSH_QUADS);
   SDL_GetWindowSize(graphics_state.window, &graphics_state.window_width, &graphics_state.window_height);
   glViewport(0, 0, graphics_state.window_width, graphics_state.window_height);
 
@@ -944,15 +945,14 @@ static void render_quads() {
   glBufferData(GL_ARRAY_BUFFER, graphics_quad_state.num_vertices*sizeof(*graphics_quad_state.vertices), graphics_quad_state.vertices, GL_DYNAMIC_DRAW);
 
   //draw
-  TIMING_BEGIN(TIMING_PANE_PUSH_QUADS);
   glDrawArrays(GL_TRIANGLES, 0, graphics_quad_state.num_vertices);
-  TIMING_END(TIMING_PANE_PUSH_QUADS);
   glBindVertexArray(0);
 
   // clear
   graphics_quad_state.num_vertices = 0;
   gl_ok_or_die;
 
+  TIMING_END(TIMING_PANE_PUSH_QUADS);
 }
 
 static Color shadow_color = {0.0f, 0.0f, 0.0f, 0.314f};
