@@ -978,6 +978,28 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
       continue;
     }
 
+    // C++11 raw string
+    if (line.begins_with(x, "R\"")) {
+      t.token = TOKEN_STRING;
+      NEXT_CHAR(2);
+      TokenInfo iden = {};
+      if (!parse_identifier(line, x, iden))
+        continue;
+      log_warn("Identifier is {}\n", (Slice)iden.str);
+      String end_of_string = String::createf("){}\"", (Slice)iden.str);
+      log_warn("Looking for {}\n", end_of_string.slice);
+      while (!line.find(x, end_of_string.slice, &x)) {
+        ++y;
+        if (y == lines.size)
+          goto raw_string_done;
+        line = lines[y].slice;
+        x = 0;
+      }
+      raw_string_done:;
+      util_free(end_of_string);
+      goto token_done;
+    }
+
     // identifier
     if (parse_identifier(line, x, t))
       goto token_done;
