@@ -1,13 +1,13 @@
-syntax_control          124 173 213
-syntax_type             124 173 213
-syntax_specifier        124 173 213
-syntax_definition_keyword 236 64 122
-syntax_definition       129 199 132
-syntax_function         79 195 247
-syntax_macro            255 138 101
-syntax_constant         255 180 101
-syntax_number           255 180 101
-syntax_string           255 180 101
+syntax_control          #78dce8
+syntax_type             #ff6188
+syntax_specifier        #ff6188
+syntax_definition_keyword #a9dc76
+syntax_definition       #fc9867
+syntax_function         #fc9867
+syntax_macro            #ab9df2
+syntax_constant         #ffd866
+syntax_number           #ffd866
+syntax_string           #ffd866
 syntax_comment          84 110 122
 syntax_operator         250 250 250
 syntax_text             250 250 250
@@ -17,9 +17,9 @@ line_highlight_pop      95 95 95
 line_highlight_inactive 45 45 45
 marker_inactive         76 76 76
 search_term_text        240 240 240
-search_term_background  79 195 247
+search_term_background  #78dce8
 autocomplete_background 51 51 51
-autocomplete_highlight  149 117 205
+autocomplete_highlight  84 110 122
 menu_background         51 51 51
 menu_highlight          70 70 70
 background              40 40 40

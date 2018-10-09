@@ -535,6 +535,7 @@ struct TextCanvas {
   void resize(int w, int h);
   void init(int w, int h);
   bool _normalize_range(Pos &a, Pos &b);
+  Area _normalize_rect(Rect &r);
 };
 
 void util_free(TextCanvas &c) {
@@ -1057,27 +1058,27 @@ static void status_message_set(const char *fmt, ...) {
   G.bottom_pane = &G.status_message_pane;
 }
 
-static const Color COLOR_PINK = rgba8_to_linear_color(236, 64, 122, 255);
-static const Color COLOR_YELLOW = rgba8_to_linear_color(255, 235, 59, 255);
+static const Color COLOR_PINK         = rgba8_to_linear_color(236, 64, 122, 255);
+static const Color COLOR_YELLOW       = rgba8_to_linear_color(255, 235, 59, 255);
 static const Color COLOR_LIGHT_YELLOW = rgba8_to_linear_color(255, 240, 79, 255);
-static const Color COLOR_AMBER = rgba8_to_linear_color(255,193,7, 255);
-static const Color COLOR_DEEP_ORANGE = rgba8_to_linear_color(255,138,101, 255);
-static const Color COLOR_ORANGE = rgba8_to_linear_color(255,183,77, 255);
-static const Color COLOR_GREEN = rgba8_to_linear_color(129,199,132, 255);
-static const Color COLOR_LIGHT_GREEN = rgba8_to_linear_color(174,213,129, 255);
-static const Color COLOR_INDIGO = rgba8_to_linear_color(121,134,203, 255);
-static const Color COLOR_DEEP_PURPLE = rgba8_to_linear_color(149,117,205, 255);
-static const Color COLOR_RED = rgba8_to_linear_color(229,115,115, 255);
-static const Color COLOR_CYAN = rgba8_to_linear_color(77,208,225, 255);
-static const Color COLOR_LIGHT_BLUE = rgba8_to_linear_color(79,195,247, 255);
-static const Color COLOR_PURPLE = rgba8_to_linear_color(186,104,200, 255);
-static const Color COLOR_BLUEGREY = rgba8_to_linear_color(84, 110, 122, 255);
-static const Color COLOR_GREY = rgba8_to_linear_color(51, 51, 51, 255);
-static const Color COLOR_LIGHT_GREY = rgba8_to_linear_color(76, 76, 76, 255);
-static const Color COLOR_BLACK = rgba8_to_linear_color(25, 25, 25, 255);
-static const Color COLOR_WHITE = rgba8_to_linear_color(240, 240, 240, 255);
-static const Color COLOR_BLUE = rgba8_to_linear_color(79,195,247, 255);
-static const Color COLOR_DARK_BLUE = rgba8_to_linear_color(124, 173, 213, 255);
+static const Color COLOR_AMBER        = rgba8_to_linear_color(255,193,7, 255);
+static const Color COLOR_DEEP_ORANGE  = rgba8_to_linear_color(255,138,101, 255);
+static const Color COLOR_ORANGE       = rgba8_to_linear_color(255,183,77, 255);
+static const Color COLOR_GREEN        = rgba8_to_linear_color(129,199,132, 255);
+static const Color COLOR_LIGHT_GREEN  = rgba8_to_linear_color(174,213,129, 255);
+static const Color COLOR_INDIGO       = rgba8_to_linear_color(121,134,203, 255);
+static const Color COLOR_DEEP_PURPLE  = rgba8_to_linear_color(149,117,205, 255);
+static const Color COLOR_RED          = rgba8_to_linear_color(229,115,115, 255);
+static const Color COLOR_CYAN         = rgba8_to_linear_color(77,208,225, 255);
+static const Color COLOR_LIGHT_BLUE   = rgba8_to_linear_color(79,195,247, 255);
+static const Color COLOR_PURPLE       = rgba8_to_linear_color(186,104,200, 255);
+static const Color COLOR_BLUEGREY     = rgba8_to_linear_color(84, 110, 122, 255);
+static const Color COLOR_GREY         = rgba8_to_linear_color(51, 51, 51, 255);
+static const Color COLOR_LIGHT_GREY   = rgba8_to_linear_color(76, 76, 76, 255);
+static const Color COLOR_BLACK        = rgba8_to_linear_color(25, 25, 25, 255);
+static const Color COLOR_WHITE        = rgba8_to_linear_color(240, 240, 240, 255);
+static const Color COLOR_BLUE         = rgba8_to_linear_color(79,195,247, 255);
+static const Color COLOR_DARK_BLUE    = rgba8_to_linear_color(124, 173, 213, 255);
 
 static int file_open(FILE **f, const char *filename, const char *mode) {
   #ifdef OS_WINDOWS
@@ -2144,18 +2145,33 @@ static void read_colorscheme_file(const char *path, bool quiet = true) {
     if (!key.length)
       continue;
     int ri,gi,bi,ai;
-    Slice r = row.token(&x, ' ');
-    Slice g = row.token(&x, ' ');
-    Slice b = row.token(&x, ' ');
-    Slice a = row.token(&x, ' '); // optional
 
-    if (!r.toint(&ri) || !g.toint(&gi) || !b.toint(&bi)) {
-      if (!quiet)
-        status_message_set("Incorrect syntax in colorscheme file %s", path);
-      break;
-    }
-    if (!a.toint(&ai))
+    // hex
+    const int color_start = x;
+    Slice hex = row.token(&x, " ");
+    if (hex.length >= 7 && hex[0] == '#') {
+      if (!hex(1,3).toint_from_hex(&ri) || !hex(3,5).toint_from_hex(&gi) || !hex(5,7).toint_from_hex(&bi)) {
+        if (!quiet)
+          status_message_set("Incorrect syntax in colorscheme file %s", path);
+        break;
+      }
       ai = 255;
+    }
+    else {
+      x = color_start;
+      Slice r = row.token(&x, ' ');
+      Slice g = row.token(&x, ' ');
+      Slice b = row.token(&x, ' ');
+      Slice a = row.token(&x, ' '); // optional
+      // rgb
+      if (!r.toint(&ri) || !g.toint(&gi) || !b.toint(&bi)) {
+        if (!quiet)
+          status_message_set("Incorrect syntax in colorscheme file %s", path);
+        break;
+      }
+      if (!a.toint(&ai))
+        ai = 255;
+    }
 
     Color c = rgba8_to_linear_color(ri, gi, bi, ai);
 
@@ -2499,10 +2515,13 @@ static bool check_visual_start(BufferView &buffer) {
 }
 
 static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
+  const Slice comment = language_settings[buffer.data->language].line_comment;
+  if (!comment.length)
+    return;
+
   for (int y = y0; y <= y1; ++y) {
     int x  = buffer.data->begin_of_line(y);
     Pos a = {x, y};
-    const Slice comment = language_settings[buffer.data->language].line_comment;
     if (buffer.data->lines[y].begins_with(x, comment)) {
       Pos b = a;
       b.x += 2;
@@ -5318,19 +5337,9 @@ void TextCanvas::fill_textcolor(Range range, Color c) {
 
 // w,h: use -1 to say it goes to the end
 void TextCanvas::fill_textcolor(Rect r, Color c) {
-  r.x -= offset.x;
-  r.y -= offset.y;
-  if (r.w == -1)
-    r.w = this->w - r.x;
-  if (r.h == -1)
-    r.h = this->h - r.y;
-  r.w = at_most(r.w, this->w - r.x);
-  r.h = at_most(r.h, this->h - r.y);
-  if (r.w < 0 || r.h < 0)
-    return;
-
-  for (int y = r.y; y < r.y+r.h; ++y)
-  for (int x = r.x; x < r.x+r.w; ++x)
+  Area a = _normalize_rect(r);
+  for (int y = a.y0; y < a.y1; ++y)
+  for (int x = a.x0; x < a.x1; ++x)
     text_colors[y*this->w + x] = c;
 }
 
@@ -5357,22 +5366,25 @@ void TextCanvas::fill_background(Range range, Color c) {
     this->background_colors[y*this->w + x] = c;
 }
 
-// w,h: use -1 to say it goes to the end
-void TextCanvas::fill_background(Rect r, Color c) {
+Area TextCanvas::_normalize_rect(Rect &r) {
   r.x -= offset.x;
   r.y -= offset.y;
-  if (r.w == -1)
-    r.w = this->w - r.x;
-  if (r.h == -1)
-    r.h = this->h - r.y;
-  r.w = at_most(r.w, this->w - r.x);
-  r.h = at_most(r.h, this->h - r.y);
+  int x0 = r.x;
+  int x1 = r.w == -1 ? w : r.x+r.w;
+  int y0 = r.y;
+  int y1 = r.h == -1 ? h : r.y+r.h;
+  x0 = clamp(x0, 0, w);
+  x1 = clamp(x1, 0, w);
+  y0 = clamp(y0, 0, h);
+  y1 = clamp(y1, 0, h);
+  return Area{x0,y0,x1,y1};
+}
 
-  if (r.w < 0 || r.h < 0 || r.x > this->w || r.y > this->h)
-    return;
-
-  for (int y = r.y; y < r.y+r.h; ++y)
-  for (int x = r.x; x < r.x+r.w; ++x)
+// w,h: use -1 to say it goes to the end
+void TextCanvas::fill_background(Rect r, Color c) {
+  Area a = _normalize_rect(r);
+  for (int y = a.y0; y < a.y1; ++y)
+  for (int x = a.x0; x < a.x1; ++x)
     background_colors[y*this->w + x] = c;
 }
 
@@ -5575,30 +5587,45 @@ void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
   // we hack this here until we have language-specific syntax highlighting
   if (b.data->language == LANGUAGE_CMANTIC_COLORSCHEME) {
     t = b.data->gettoken(pos);
-    while (t + 4 < b.data->parser.tokens.end()) {
+    while (t < b.data->parser.tokens.end()) {
       if (t->token != TOKEN_IDENTIFIER) {
         ++t;
         continue;
       }
+      Range r = {t->a};
       ++t;
-      if (t[0].token != TOKEN_NUMBER || t[1].token != TOKEN_NUMBER || t[2].token != TOKEN_NUMBER)
-        continue;
 
-      bool success = true;
       int ri,gi,bi;
-      success &= b.data->getslice(t[0].r).toint(&ri);
-      success &= b.data->getslice(t[1].r).toint(&gi);
-      success &= b.data->getslice(t[2].r).toint(&bi);
-      Color color = rgb8_to_linear_color(ri, gi, bi);
 
-      if (!success)
-        break;
-
-      Range r = {t[-1].a};
-      while (t < b.data->parser.tokens.end() && t->token == TOKEN_NUMBER) {
-        r.b = t->b;
+      // hex
+      if (t < b.data->parser.tokens.end() && t[0].token == TOKEN_IDENTIFIER) {
+        Slice hex = b.data->getslice(t[0].r);
+        if (hex.length < 7 || hex[0] != '#')
+          continue;
+        bool success = true;
+        success &= hex(1,3).toint_from_hex(&ri);
+        success &= hex(3,5).toint_from_hex(&gi);
+        success &= hex(5,7).toint_from_hex(&bi);
+        if (!success)
+          continue;
         ++t;
       }
+      else if (t + 2 < b.data->parser.tokens.end() && t[0].token == TOKEN_NUMBER && t[1].token == TOKEN_NUMBER && t[2].token == TOKEN_NUMBER) {
+        bool success = true;
+        success &= b.data->getslice(t[0].r).toint(&ri);
+        success &= b.data->getslice(t[1].r).toint(&gi);
+        success &= b.data->getslice(t[2].r).toint(&bi);
+        if (!success)
+          continue;
+
+        while (t < b.data->parser.tokens.end() && t->token == TOKEN_NUMBER)
+          ++t;
+      }
+      else
+        continue;
+
+      Color color = rgb8_to_linear_color(ri, gi, bi);
+      r.b = t < b.data->parser.tokens.end() ? t->b : t[-1].b;
       r.a = b.data->to_visual_pos(r.a);
       r.b = b.data->to_visual_pos(r.b);
 

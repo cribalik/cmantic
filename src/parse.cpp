@@ -750,6 +750,64 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
   return {tokens, definitions, identifiers};
 }
 
+static ParseResult colorscheme_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t, "#", ""))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  return {tokens, definitions, identifiers};
+}
+
 static ParseResult julia_parse(const Array<StringBuffer> lines) {
   Array<TokenInfo> tokens = {};
   Array<String> identifiers = {};
@@ -1155,8 +1213,8 @@ LanguageSettings language_settings[] = {
   {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse, Slice::create("C/C++")}, // LANGUAGE_C
   {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse, Slice::create("Python")},  // LANGUAGE_PYTHON
   {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse, Slice::create("Julia")},  // LANGUAGE_JULIA
-  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},   Slice::create("#"),  bash_parse, Slice::create("Shell")},  // LANGUAGE_BASH
-  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
+  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse, Slice::create("Shell")},  // LANGUAGE_BASH
+  {StaticArray<Keyword>{},                                            {},                  colorscheme_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 

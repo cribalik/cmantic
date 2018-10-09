@@ -47,6 +47,19 @@ union Rect {
   };
 };
 
+union Area {
+  struct {
+    Pos a;
+    Pos b;
+  };
+  struct {
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+  };
+};
+
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned short u16;

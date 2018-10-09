@@ -737,6 +737,7 @@ struct Utf8Iter {
   int next(int i) const; \
   bool tofloat(double *result) const; \
   bool toint(int *result) const; \
+  bool toint_from_hex(int *result) const; \
   int from_visual_offset(int x, int tab_width) const; \
   int visual_offset(int x, int tab_width) const; \
   bool equals(const char *str, int n) const; \
@@ -771,6 +772,7 @@ struct Utf8Iter {
   int classname::next(int i) const {return Slice::next(chars, length, i);} \
   bool classname::tofloat(double *result) const {return Slice::tofloat(chars, length, result);} \
   bool classname::toint(int *result) const {return Slice::toint(chars, length, result);} \
+  bool classname::toint_from_hex(int *result) const {return Slice::toint_from_hex(chars, length, result);} \
   int classname::from_visual_offset(int x, int tab_width) const {return Slice::from_visual_offset(chars, length, x, tab_width);} \
   int classname::visual_offset(int x, int tab_width) const {return Slice::visual_offset(chars, length, x, tab_width);} \
   bool classname::equals(const char *str, int n) const {return Slice::equals(chars, length, str, n);} \
@@ -853,6 +855,21 @@ struct Slice {
     buf[length] = '\0';
     char *end;
     *result = strtol(buf, &end, 10);
+    return end != buf;
+  }
+
+  static bool toint_from_hex(const char *chars, int length, int *result) {
+    char buf[24];
+    while (chars && length && *chars == ' ')
+      ++chars, --length;
+
+    if (!length || length >= (int)sizeof(buf))
+      return false;
+
+    memcpy(buf, chars, length);
+    buf[length] = '\0';
+    char *end;
+    *result = strtol(buf, &end, 16);
     return end != buf;
   }
 
