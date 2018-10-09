@@ -533,7 +533,7 @@ struct TextCanvas {
   void fill(Utf8char c);
   void resize(int w, int h);
   void init(int w, int h);
-  void _normalize_range(Pos &a, Pos &b);
+  bool _normalize_range(Pos &a, Pos &b);
 };
 
 void util_free(TextCanvas &c) {
@@ -1580,6 +1580,7 @@ static Array<String> get_goto_definition_suggestions() {
   for (int i : matches)
     G.definition_positions += b.parser.definitions[i].a;
 
+  util_free(matches);
   return result;
 }
 
@@ -2282,6 +2283,7 @@ static void state_init() {
       sscanf(row.chars, "%i %i %i %i", &r.x, &r.y, &r.w, &r.h);
       G.pet_sprites += r;
     }
+    util_free(file);
   }
 
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
@@ -5234,7 +5236,7 @@ void TextCanvas:fit_range_to_bounds() {
 }
 #endif
 
-void TextCanvas::_normalize_range(Pos &a, Pos &b) {
+bool TextCanvas::_normalize_range(Pos &a, Pos &b) {
   a -= offset;
   b -= offset;
   a.x = clamp(a.x, 0, w-1);
@@ -5243,12 +5245,14 @@ void TextCanvas::_normalize_range(Pos &a, Pos &b) {
     a.y = 0, a.x = 0;
   if (b.y >= h)
     b.y = h-1, b.x = w-1;
+  return a.y < h && b.y >= 0 && a.x >= 0;
 }
 
 void TextCanvas::blend_textcolor(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
-  _normalize_range(a, b);
+  if (!_normalize_range(a, b))
+    return;
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
@@ -5269,7 +5273,8 @@ void TextCanvas::blend_textcolor(Range range, Color c) {
 void TextCanvas::blend_textcolor_additive(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
-  _normalize_range(a, b);
+  if (!_normalize_range(a, b))
+    return;
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
@@ -5291,7 +5296,8 @@ void TextCanvas::blend_textcolor_additive(Range range, Color c) {
 void TextCanvas::fill_textcolor(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
-  _normalize_range(a, b);
+  if (!_normalize_range(a, b))
+    return;
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
@@ -5331,7 +5337,8 @@ void TextCanvas::fill_textcolor(Rect r, Color c) {
 void TextCanvas::fill_background(Range range, Color c) {
   Pos a = range.a;
   Pos b = range.b;
-  _normalize_range(a, b);
+  if (!_normalize_range(a, b))
+    return;
 
   if (a.y == b.y) {
     for (int x = a.x; x < b.x; ++x)
@@ -5359,15 +5366,6 @@ void TextCanvas::fill_background(Rect r, Color c) {
     r.h = this->h - r.y;
   r.w = at_most(r.w, this->w - r.x);
   r.h = at_most(r.h, this->h - r.y);
-  if (r.x < 0) {
-    r.w += r.x;
-    r.x = 0;
-  }
-
-  if (r.y < 0) {
-    r.h += r.y;
-    r.y = 0;
-  }
 
   if (r.w < 0 || r.h < 0 || r.x > this->w || r.y > this->h)
     return;
