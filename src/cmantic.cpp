@@ -203,6 +203,7 @@ enum Mode {
   MODE_YANK,
   MODE_FILESEARCH,
   MODE_GOTO_DEFINITION,
+  MODE_GOTO_ALL_DEFINITIONS,
   MODE_CWD,
   MODE_PROMPT,
   MODE_REPLACE,
@@ -912,6 +913,18 @@ struct ColorScheme {
   Color git_blame;
 };
 
+#if 0
+struct DefinitionInProject {
+  Path filename;
+  Array<String> definitions;
+};
+static void util_free(DefinitionInProject &d) {
+  util_free(d.filename);
+  util_free(d.definitions);
+  d = {};
+}
+#endif
+
 struct State {
   /* @renderer rendering state */
   SDL_Window *window;
@@ -941,6 +954,8 @@ struct State {
   Pane *bottom_pane;
   Pane *selected_pane; // the pane that the marker currently is on, could be everything from editing pane, to menu pane, to filesearch pane
   Pane *editing_pane; // the pane that is currently being edited on, regardless if you happen to be in filesearch or menu
+  Array<BufferData*> buffers;
+  Array<String> project_definitions;
 
   Pane menu_pane;
   BufferData menu_buffer;
@@ -954,8 +969,6 @@ struct State {
   float activation_meter;
 
   String search_term;
-
-  Array<BufferData*> buffers;
 
   // instead of removing stuff on the spot, which can cause issues, we push them to these lists and delete them at the end of the frame
   Array<BufferData*> buffers_to_remove;
@@ -1587,6 +1600,27 @@ static Array<String> get_goto_definition_suggestions() {
   return result;
 }
 
+static Array<String> get_goto_all_definitions_suggestions() {
+  Array<String> result;
+  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.project_definitions, slice), true, &result);
+  return result;
+}
+
+static void mode_goto_all_definitions() {
+  mode_cleanup();
+  G.mode = MODE_GOTO_ALL_DEFINITIONS;
+  G.selected_pane = &G.menu_pane;
+
+  G.editing_pane->buffer.collapse_cursors();
+  G.goto_definition_begin_pos = G.editing_pane->buffer.cursors[0].pos;
+
+  G.bottom_pane = &G.menu_pane;
+  G.menu_pane.menu_init(Slice::create("goto def"), get_goto_all_definitions_suggestions);
+  G.menu_pane.update_suggestions();
+  if (G.definition_positions.size)
+    G.editing_pane->buffer.move_to(G.definition_positions[0]);
+}
+
 static void mode_goto_definition() {
   mode_cleanup();
   G.mode = MODE_GOTO_DEFINITION;
@@ -2128,9 +2162,34 @@ static void _filetree_fill(Path path) {
   util_free(files);
 }
 
+static bool lines_from_file(Slice filename, Array<StringBuffer> *result, const char **endline_string_result);
+static Language language_from_filename(Slice filename);
+
 static void filetree_init() {
   util_free(G.files);
   _filetree_fill(G.current_working_directory);
+
+  // parse tree
+  util_free(G.project_definitions);
+  int num_indexed = 0;
+  for (Path p : G.files) {
+    Language l = language_from_filename(p.string.slice);
+    if (l == LANGUAGE_NULL)
+      continue;
+
+    Array<StringBuffer> lines;
+    if (!lines_from_file(p.string.slice, &lines, 0))
+      continue;
+    ParseResult pr = parse(lines, l);
+    log_info("Number of definitions in {}: %i\n", p.string.slice, pr.definitions.size);
+    for (Range r : pr.definitions)
+      G.project_definitions += lines[r.a.y](r.a.x, r.b.x).copy();
+    pr.definitions = {};
+    util_free(pr);
+    util_free(lines);
+    ++num_indexed;
+  }
+  log_info("Indexed %i files, with %i definitions\n", num_indexed, G.project_definitions.size);
 }
 
 static void read_colorscheme_file(const char *path, bool quiet = true) {
@@ -2260,6 +2319,12 @@ static PerfCheckData my_perfcheck_data[] = {
 };
 STATIC_ASSERT(ARRAY_LEN(my_perfcheck_data) == NUM_TIMINGS, all_perfchecks_defined);
 
+static Path get_colorscheme_path() {
+  Path p = G.install_dir.copy();
+  p.push("assets/default.cmantic-colorscheme");
+  return p;
+}
+
 static void state_init() {
   srand((uint)time(NULL));
   rand(); rand(); rand();
@@ -2314,8 +2379,7 @@ static void state_init() {
   G.line_margin = 0;
   G.line_height = G.font_height + G.line_margin;
 
-  Path colorscheme_path = G.install_dir.copy();
-  colorscheme_path.push("assets/default.cmantic-colorscheme");
+  Path colorscheme_path = get_colorscheme_path();
   read_colorscheme_file(colorscheme_path.string.chars, true);
   util_free(colorscheme_path);
 
@@ -3118,6 +3182,42 @@ static void handle_input(Key key) {
 
     break;}
 
+  case MODE_GOTO_ALL_DEFINITIONS: {
+    if (key == KEY_ESCAPE) {
+      // G.editing_pane->buffer.move_to(G.goto_definition_begin_pos);
+      mode_normal();
+      break;
+    }
+
+    if (key == KEY_RETURN) {
+      #if 0
+      int opt = G.menu_pane.menu_get_selection_idx();
+      if (opt == -1) {
+        status_message_set("\"{}\": No such file", (Slice)G.menu_buffer[0].slice);
+        mode_normal();
+        break;
+      }
+
+      // G.editing_pane->add_subpane(buffer.data, def->a);
+      buffer.jumplist_push();
+      buffer.move_to(G.definition_positions[opt]);
+      buffer.jumplist_push();
+      #endif
+      mode_normal();
+      break;
+    }
+
+    handle_menu_insert(key);
+
+    // update selection
+    #if 0
+    int i = G.menu_pane.menu_get_selection_idx();
+    if (i != -1)
+      G.editing_pane->buffer.move_to(G.definition_positions[i]);
+    #endif
+
+    break;}
+
   case MODE_FILESEARCH:
     if (key == KEY_RETURN) {
       Slice *opt = G.menu_pane.menu_get_selection();
@@ -3307,6 +3407,10 @@ static void handle_input(Key key) {
     case KEY_ESCAPE:
       buffer.collapse_cursors();
       util_free(G.visual_start.cursors);
+      break;
+
+    case CONTROL('G'):
+      mode_goto_all_definitions();
       break;
 
     case CONTROL('g'):
@@ -3791,8 +3895,7 @@ static void do_update(float dt) {
 
   static u64 last_modified;
   if (update_idx%50 == 0) {
-    Path colorscheme_path = G.install_dir.copy();
-    colorscheme_path.push("assets/default.cmantic-colorscheme");
+    Path colorscheme_path = get_colorscheme_path();
     if (File::was_modified(colorscheme_path.string.chars, &last_modified))
       read_colorscheme_file(colorscheme_path.string.chars, true);
     util_free(colorscheme_path);
@@ -3981,33 +4084,31 @@ void BufferData::highlight_range(Pos a, Pos b) {
   highlights += buffer_highlight(a,b);
 }
 
-// filename must be absolute
-bool BufferData::from_file(Slice filename, BufferData *buffer) {
-  FILE* f = 0;
-  int num_lines = 0;
-  *buffer = {};
-  BufferData &b = *buffer;
-
-  // try to figure out the language
+Language language_from_filename(Slice filename) {
+  Language language = LANGUAGE_NULL;
   if (filename.ends_with(".cpp") || filename.ends_with(".h") || filename.ends_with(".hpp") || filename.ends_with(".c"))
-    b.language = LANGUAGE_C;
+    language = LANGUAGE_C;
   else if (filename.ends_with(".cs"))
-    b.language = LANGUAGE_CSHARP;
+    language = LANGUAGE_CSHARP;
   else if (filename.ends_with(".py"))
-    b.language = LANGUAGE_PYTHON;
+    language = LANGUAGE_PYTHON;
   else if (filename.ends_with(".jl"))
-    b.language = LANGUAGE_JULIA;
+    language = LANGUAGE_JULIA;
   else if (filename.ends_with(".sh"))
-    b.language = LANGUAGE_BASH;
+    language = LANGUAGE_BASH;
   else if (Path::name(filename) == "Makefile" || Path::name(filename) == "makefile")
-    b.language = LANGUAGE_BASH; // bash will have to do for makefiles
+    language = LANGUAGE_BASH; // bash will have to do for makefiles
   else if (filename.ends_with(".cmantic-colorscheme"))
-    b.language = LANGUAGE_CMANTIC_COLORSCHEME;
+    language = LANGUAGE_CMANTIC_COLORSCHEME;
+  return language;
+}
 
-  b.endline_string = ENDLINE_UNIX;
+static bool lines_from_file(Slice filename, Array<StringBuffer> *result, const char **endline_string_result) {
+  Array<StringBuffer> lines = {};
+  int num_lines;
 
-  b.filename = filename.copy();
-  if (file_open(&f, b.filename.chars, "rb"))
+  FILE* f = 0;
+  if (file_open(&f, filename.chars, "rb"))
     goto err;
 
   // get line count
@@ -4020,8 +4121,8 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
 
   // read content
   if (num_lines > 0) {
-    b.lines.resize(num_lines+1);
-    b.lines.zero();
+    lines.resize(num_lines+1);
+    lines.zero();
 
     char c = 0;
     for (int i = 0; i <= num_lines; ++i) {
@@ -4034,18 +4135,43 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
         }
         if (c == '\r') {
           c = (char)fgetc(f);
-          b.endline_string = ENDLINE_WINDOWS;
+          if (endline_string_result)
+            *endline_string_result = ENDLINE_WINDOWS;
         }
         if (c == '\n')
           break;
-        b[i] += c;
+        lines[i] += c;
       }
     }
     last_line:;
     assert(feof(f));
   } else {
-    b.lines += {};
+    lines += {};
   }
+
+  *result = lines;
+  fclose(f);
+  return true;
+
+  err:
+  util_free(lines);
+  if (f)
+    fclose(f);
+  return false;
+}
+
+// filename must be absolute
+bool BufferData::from_file(Slice filename, BufferData *buffer) {
+  *buffer = {};
+  BufferData &b = *buffer;
+
+  b.language = language_from_filename(filename);
+
+  b.endline_string = ENDLINE_UNIX;
+
+  b.filename = filename.copy();
+  if (!lines_from_file(filename, &b.lines, &b.endline_string))
+    goto err;
 
   // token type
   b.parse();
@@ -4053,7 +4179,6 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
   // guess tab type
   b.guess_tab_type();
 
-  fclose(f);
   return true;
 
   err:
@@ -4061,8 +4186,6 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
     util_free(*buffer);
     free(buffer);
   }
-  if (f)
-    fclose(f);
   return false;
 }
 
