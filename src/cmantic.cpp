@@ -936,6 +936,7 @@ struct State {
 
   /* editor state */
   Path current_working_directory;
+  Path install_dir;
   Array<Pane*> editing_panes;
   Pane *bottom_pane;
   Pane *selected_pane; // the pane that the marker currently is on, could be everything from editing pane, to menu pane, to filesearch pane
@@ -2269,6 +2270,7 @@ static void state_init() {
 
   if (!File::cwd(&G.current_working_directory))
     log_err("Failed to find current working directory, something is very wrong\n"), exit(1);
+  G.install_dir = G.current_working_directory.copy();
   G.ttf_file = G.current_working_directory.copy();
   G.ttf_file.push("assets/font.ttf");
 
@@ -2312,9 +2314,10 @@ static void state_init() {
   G.line_margin = 0;
   G.line_height = G.font_height + G.line_margin;
 
-  String path = String::createf("%s/.config/cmantic/colorscheme.cmantic-colorscheme", getenv("HOME"));
-  read_colorscheme_file(path.chars, true);
-  util_free(path);
+  Path colorscheme_path = G.install_dir.copy();
+  colorscheme_path.push("assets/default.cmantic-colorscheme");
+  read_colorscheme_file(colorscheme_path.string.chars, true);
+  util_free(colorscheme_path);
 
   keyword_colors[KEYWORD_NONE]        = 0;
   keyword_colors[KEYWORD_CONTROL]     = &G.color_scheme.syntax_control;
@@ -3788,10 +3791,11 @@ static void do_update(float dt) {
 
   static u64 last_modified;
   if (update_idx%50 == 0) {
-    String path = String::createf("%s/.config/cmantic/colorscheme.cmantic-colorscheme", getenv("HOME"));
-    if (File::was_modified(path.chars, &last_modified))
-      read_colorscheme_file(path.chars, true);
-    util_free(path);
+    Path colorscheme_path = G.install_dir.copy();
+    colorscheme_path.push("assets/default.cmantic-colorscheme");
+    if (File::was_modified(colorscheme_path.string.chars, &last_modified))
+      read_colorscheme_file(colorscheme_path.string.chars, true);
+    util_free(colorscheme_path);
   }
 
   G.activation_meter = at_least(G.activation_meter - dt / 500.0f, 0.0f);
@@ -3817,6 +3821,7 @@ static void do_render() {
   }
   G.bottom_pane->bounds = {0, G.win_height - G.bottom_pane->bounds.h, G.win_width, G.bottom_pane->bounds.h};
 
+  #if 1
   TIMING_BEGIN(TIMING_PANE_RENDER);
   for (Pane *p : G.editing_panes) {
     if (!p->parent)
@@ -3825,6 +3830,7 @@ static void do_render() {
 
   G.bottom_pane->render();
   TIMING_END(TIMING_PANE_RENDER);
+  #endif
 }
 
 Pos BufferData::to_visual_pos(Pos p) {
@@ -3983,17 +3989,18 @@ bool BufferData::from_file(Slice filename, BufferData *buffer) {
   BufferData &b = *buffer;
 
   // try to figure out the language
-  if (filename.ends_with(".cpp") || filename.ends_with(".h") || filename.ends_with(".hpp") || filename.ends_with(".c") || filename.ends_with(".cs"))
+  if (filename.ends_with(".cpp") || filename.ends_with(".h") || filename.ends_with(".hpp") || filename.ends_with(".c"))
     b.language = LANGUAGE_C;
+  else if (filename.ends_with(".cs"))
+    b.language = LANGUAGE_CSHARP;
   else if (filename.ends_with(".py"))
     b.language = LANGUAGE_PYTHON;
   else if (filename.ends_with(".jl"))
     b.language = LANGUAGE_JULIA;
   else if (filename.ends_with(".sh"))
     b.language = LANGUAGE_BASH;
-  // bash will have to do for makefiles
   else if (Path::name(filename) == "Makefile" || Path::name(filename) == "makefile")
-    b.language = LANGUAGE_BASH;
+    b.language = LANGUAGE_BASH; // bash will have to do for makefiles
   else if (filename.ends_with(".cmantic-colorscheme"))
     b.language = LANGUAGE_CMANTIC_COLORSCHEME;
 
@@ -6237,7 +6244,7 @@ static void handle_pending_removes() {
       // reset any panes that were using this buffer
       for (int k = 0; k < G.editing_panes.size; ++k)
         if (G.editing_panes[k]->buffer.data == b)
-          Pane::init_edit(*G.editing_panes[k], &G.null_buffer, &G.color_scheme.background, &G.color_scheme.syntax_text, &G.active_highlight_background_color.color, &G.color_scheme.line_highlight_inactive, true);
+          G.editing_panes[k]->switch_buffer(&G.null_buffer);
     }
     G.buffers_to_remove.size = 0;
   }

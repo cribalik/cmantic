@@ -1,6 +1,6 @@
 syntax_control          #78dce8
 syntax_type             #ff6188
-syntax_specifier        #ff6188
+syntax_specifier        #78dce8
 syntax_definition_keyword #a9dc76
 syntax_definition       #fc9867
 syntax_function         #fc9867
@@ -25,4 +25,4 @@ menu_highlight          70 70 70
 background              40 40 40
 gutter_background       40 40 40
 git_blame               40 138 101
-shadow_color            0 0 0 60
+shadow_color            0 0 0 150

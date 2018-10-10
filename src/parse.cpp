@@ -110,6 +110,135 @@ static Keyword cpp_keywords[] = {
   {"noexcept", KEYWORD_SPECIFIER},
   {"public", KEYWORD_SPECIFIER},
   {"private", KEYWORD_SPECIFIER},
+  {"protected", KEYWORD_SPECIFIER},
+  {"override", KEYWORD_SPECIFIER},
+  {"virtual", KEYWORD_SPECIFIER},
+  {"abstract", KEYWORD_SPECIFIER},
+  {"delete", KEYWORD_SPECIFIER},
+  {"new", KEYWORD_SPECIFIER},
+  {"auto", KEYWORD_SPECIFIER},
+
+  // declarations
+
+  {"struct", KEYWORD_DEFINITION},
+  {"class", KEYWORD_DEFINITION},
+  {"union", KEYWORD_DEFINITION},
+  {"enum", KEYWORD_DEFINITION},
+  {"typedef", KEYWORD_DEFINITION},
+  {"template", KEYWORD_DEFINITION},
+  {"operator", KEYWORD_DEFINITION},
+  {"namespace", KEYWORD_DEFINITION},
+
+  // macro
+
+  {"#include", KEYWORD_MACRO},
+  {"#define", KEYWORD_MACRO},
+  {"#undef", KEYWORD_MACRO},
+  {"#ifdef", KEYWORD_MACRO},
+  {"#ifndef", KEYWORD_MACRO},
+  {"#endif", KEYWORD_MACRO},
+  {"#elif", KEYWORD_MACRO},
+  {"#else", KEYWORD_MACRO},
+  {"#if", KEYWORD_MACRO},
+  {"#error", KEYWORD_MACRO},
+
+  // flow control
+
+  {"switch", KEYWORD_CONTROL},
+  {"case", KEYWORD_CONTROL},
+  {"if", KEYWORD_CONTROL},
+  {"else", KEYWORD_CONTROL},
+  {"for", KEYWORD_CONTROL},
+  {"while", KEYWORD_CONTROL},
+  {"do", KEYWORD_CONTROL},
+  {"return", KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break", KEYWORD_CONTROL},
+  {"goto", KEYWORD_CONTROL},
+  {"yield", KEYWORD_CONTROL},
+  {"default", KEYWORD_CONTROL},
+};
+
+static Keyword csharp_keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"NULL", KEYWORD_CONSTANT},
+  {"null", KEYWORD_CONSTANT},
+  {"this", KEYWORD_CONSTANT},
+
+  // types
+
+  {"char", KEYWORD_TYPE},
+  {"short", KEYWORD_TYPE},
+  {"int", KEYWORD_TYPE},
+  {"long", KEYWORD_TYPE},
+  {"float", KEYWORD_TYPE},
+  {"double", KEYWORD_TYPE},
+  {"unsigned", KEYWORD_TYPE},
+  {"void", KEYWORD_TYPE},
+  {"bool", KEYWORD_TYPE},
+  {"uint64_t", KEYWORD_TYPE},
+  {"uint32_t", KEYWORD_TYPE},
+  {"uint16_t", KEYWORD_TYPE},
+  {"uint8_t", KEYWORD_TYPE},
+  {"int64_t", KEYWORD_TYPE},
+  {"int32_t", KEYWORD_TYPE},
+  {"int16_t", KEYWORD_TYPE},
+  {"int8_t", KEYWORD_TYPE},
+  {"u64", KEYWORD_TYPE},
+  {"u32", KEYWORD_TYPE},
+  {"u16", KEYWORD_TYPE},
+  {"u8", KEYWORD_TYPE},
+  {"i64", KEYWORD_TYPE},
+  {"i32", KEYWORD_TYPE},
+  {"i16", KEYWORD_TYPE},
+  {"i8", KEYWORD_TYPE},
+  {"va_list", KEYWORD_TYPE},
+  {"IEnumerator", KEYWORD_TYPE},
+  {"byte", KEYWORD_TYPE},
+
+  // function
+
+  #if 0
+  {"typeof", KEYWORD_FUNCTION},
+  {"sizeof", KEYWORD_FUNCTION},
+  {"printf", KEYWORD_FUNCTION},
+  {"puts", KEYWORD_FUNCTION},
+  {"strcmp", KEYWORD_FUNCTION},
+  {"strlen", KEYWORD_FUNCTION},
+  {"fprintf", KEYWORD_FUNCTION},
+  {"malloc", KEYWORD_FUNCTION},
+  {"free", KEYWORD_FUNCTION},
+  {"new", KEYWORD_FUNCTION},
+  {"delete", KEYWORD_FUNCTION},
+  {"fflush", KEYWORD_FUNCTION},
+  {"va_start", KEYWORD_FUNCTION},
+  {"vfprintf", KEYWORD_FUNCTION},
+  {"va_end", KEYWORD_FUNCTION},
+  {"abort", KEYWORD_FUNCTION},
+  {"exit", KEYWORD_FUNCTION},
+  {"min", KEYWORD_FUNCTION},
+  {"max", KEYWORD_FUNCTION},
+  {"memcmp", KEYWORD_FUNCTION},
+  {"putchar", KEYWORD_FUNCTION},
+  {"putc", KEYWORD_FUNCTION},
+  {"fputc", KEYWORD_FUNCTION},
+  {"getchar", KEYWORD_FUNCTION},
+  {"swap", KEYWORD_FUNCTION},
+  #endif
+
+  // specifiers
+
+  {"static", KEYWORD_SPECIFIER},
+  {"const", KEYWORD_SPECIFIER},
+  {"extern", KEYWORD_SPECIFIER},
+  {"nothrow", KEYWORD_SPECIFIER},
+  {"noexcept", KEYWORD_SPECIFIER},
+  {"public", KEYWORD_SPECIFIER},
+  {"private", KEYWORD_SPECIFIER},
   {"in", KEYWORD_SPECIFIER},
   {"delegate", KEYWORD_SPECIFIER},
   {"protected", KEYWORD_SPECIFIER},
@@ -118,10 +247,12 @@ static Keyword cpp_keywords[] = {
   {"abstract", KEYWORD_SPECIFIER},
   {"delete", KEYWORD_SPECIFIER},
   {"new", KEYWORD_SPECIFIER},
+  {"using", KEYWORD_SPECIFIER},
 
   // declarations
 
   {"struct", KEYWORD_DEFINITION},
+  {"interface", KEYWORD_DEFINITION},
   {"class", KEYWORD_DEFINITION},
   {"union", KEYWORD_DEFINITION},
   {"enum", KEYWORD_DEFINITION},
@@ -394,16 +525,6 @@ static Keyword bash_keywords[] = {
   {"return", KEYWORD_CONTROL},
   {"continue", KEYWORD_CONTROL},
   {"break", KEYWORD_CONTROL},
-};
-
-enum Language {
-  LANGUAGE_NULL,
-  LANGUAGE_C,
-  LANGUAGE_PYTHON,
-  LANGUAGE_JULIA,
-  LANGUAGE_BASH,
-  LANGUAGE_CMANTIC_COLORSCHEME,
-  NUM_LANGUAGES
 };
 
 // MUST BE REVERSE SIZE ORDER
@@ -1201,6 +1322,212 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
   return {tokens, definitions, identifiers};
 }
 
+static ParseResult csharp_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    #define NEXT_CHAR(n) (x += n, c = line[x])
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
+
+    // C++11 raw string
+    if (line.begins_with(x, "R\"")) {
+      t.token = TOKEN_STRING;
+      NEXT_CHAR(2);
+      TokenInfo iden = {};
+      if (!parse_identifier(line, x, iden))
+        continue;
+      log_warn("Identifier is {}\n", (Slice)iden.str);
+      String end_of_string = String::createf("){}\"", (Slice)iden.str);
+      log_warn("Looking for {}\n", end_of_string.slice);
+      while (!line.find(x, end_of_string.slice, &x)) {
+        ++y;
+        if (y == lines.size)
+          goto raw_string_done;
+        line = lines[y].slice;
+        x = 0;
+      }
+      raw_string_done:;
+      util_free(end_of_string);
+      goto token_done;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t))
+      goto token_done;
+
+    // block comment
+    if (line.begins_with(x, "/*")) {
+      t.token = TOKEN_BLOCK_COMMENT;
+      NEXT_CHAR(2);
+      // goto matching end block
+      for (;;) {
+        // EOF
+        if (y >= lines.size)
+          goto token_done;
+        // EOL
+        if (x >= line.length) {
+          ++y;
+          if (y == lines.size)
+            break;
+          line = lines[y].slice;
+          x = 0;
+          continue;
+        }
+        // End block
+        if (line.begins_with(x, "*/")) {
+          NEXT_CHAR(2);
+          break;
+        }
+        NEXT_CHAR(1);
+      }
+      goto token_done;
+    }
+
+    // line comment
+    if (line.begins_with(x, "//")) {
+      t.token = TOKEN_LINE_COMMENT;
+      x = line.length;
+      goto token_done;
+    }
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // string
+    if (parse_string(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(cpp_operators); ++i) {
+      if (line.begins_with(x, cpp_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(cpp_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+      
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  // find definitions
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo ti = tokens[i];
+    switch (ti.token) {
+      case TOKEN_IDENTIFIER: {
+        if (i+1 < tokens.size && ti.str == "#define") {
+          definitions += tokens[i+1].r;
+          goto token_def_done;
+        }
+
+        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace" || ti.str == "interface") &&
+            tokens[i+1].token == TOKEN_IDENTIFIER &&
+            tokens[i+2].token == '{') {
+          definitions += tokens[i+1].r;
+          goto token_def_done;
+        }
+
+        // check for function definition
+        // TODO: only do this when not inside function scope
+        {
+          // is it a keyword, then ignore (things like else if (..) is not a definition)
+          for (Keyword keyword : csharp_keywords)
+            if (ti.str == keyword.name && keyword.type != KEYWORD_TYPE)
+              goto token_def_done;
+
+          {
+            int j = i;
+            // skip pointer and references
+            for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
+              if (tokens[j].str == "*" || tokens[j].str == "&")
+                continue;
+              goto token_def_done;
+            }
+
+            if (j+1 < tokens.size &&
+                tokens[j].token == TOKEN_IDENTIFIER &&
+                tokens[j+1].token == '(') {
+              definitions += {tokens[j].a, tokens[j].b};
+            }
+            else if (j+3 < tokens.size &&
+                     tokens[j].token == TOKEN_IDENTIFIER &&
+                     tokens[j+1].token == TOKEN_OPERATOR &&
+                     tokens[j+1].str == "::" &&
+                     tokens[j+2].token == TOKEN_IDENTIFIER &&
+                     tokens[j+3].token == '(') {
+              definitions += {tokens[j].a, tokens[j+2].b};
+            }
+          }
+        }
+
+        // if preprocessor command, jump to next line
+        token_def_done:
+        if (ti.token == TOKEN_IDENTIFIER && ti.str[0] == '#') {
+          int prev_y = ti.a.y;
+          while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
+            ++i;
+        }
+        break;}
+      default:
+        break;
+    }
+  }
+  return {tokens, definitions, identifiers};
+}
+
+enum Language {
+  LANGUAGE_NULL,
+  LANGUAGE_C,
+  LANGUAGE_CSHARP,
+  LANGUAGE_PYTHON,
+  LANGUAGE_JULIA,
+  LANGUAGE_BASH,
+  LANGUAGE_CMANTIC_COLORSCHEME,
+  NUM_LANGUAGES
+};
+
 typedef ParseResult (*ParseFun)(const Array<StringBuffer> lines);
 struct LanguageSettings {
   StaticArray<Keyword> keywords;
@@ -1211,6 +1538,7 @@ struct LanguageSettings {
 LanguageSettings language_settings[] = {
   {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse, Slice::create("")},  // LANGUAGE_NULL
   {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse, Slice::create("C/C++")}, // LANGUAGE_C
+  {StaticArray<Keyword>{csharp_keywords, ARRAY_LEN(csharp_keywords)}, Slice::create("//"), csharp_parse, Slice::create("C#")}, // LANGUAGE_CSHARP
   {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse, Slice::create("Python")},  // LANGUAGE_PYTHON
   {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse, Slice::create("Julia")},  // LANGUAGE_JULIA
   {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse, Slice::create("Shell")},  // LANGUAGE_BASH
