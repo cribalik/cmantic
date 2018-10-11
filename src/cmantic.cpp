@@ -2181,7 +2181,6 @@ static void filetree_init() {
     if (!lines_from_file(p.string.slice, &lines, 0))
       continue;
     ParseResult pr = parse(lines, l);
-    log_info("Number of definitions in {}: %i\n", p.string.slice, pr.definitions.size);
     for (Range r : pr.definitions)
       G.project_definitions += lines[r.a.y](r.a.x, r.b.x).copy();
     pr.definitions = {};
