@@ -234,6 +234,7 @@ static Keyword csharp_keywords[] = {
 
   {"static", KEYWORD_SPECIFIER},
   {"const", KEYWORD_SPECIFIER},
+  {"var", KEYWORD_SPECIFIER},
   {"extern", KEYWORD_SPECIFIER},
   {"nothrow", KEYWORD_SPECIFIER},
   {"noexcept", KEYWORD_SPECIFIER},
