@@ -1228,7 +1228,28 @@ static ParseResult go_parse(const Array<StringBuffer> lines) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER:
-        if (i+1 < tokens.size && (ti.str == "func" || ti.str == "type")) {
+        if (i+1 < tokens.size && ti.str == "func") {
+          if (tokens[i+1].token == TOKEN_IDENTIFIER) {
+            definitions += tokens[i+1].r;
+            break;
+          }
+
+          // parse methods
+          else if (tokens[i+1].str == "(") {
+            ++i;
+            for (int depth = 0; i < tokens.size; ++i) {
+              if (tokens[i].str == "(") ++depth;
+              if (tokens[i].str == ")") --depth;
+              if (depth == 0) break;
+            }
+            if (i+1 < tokens.size && tokens[i+1].token == TOKEN_IDENTIFIER) {
+              definitions += tokens[i+1].r;
+              break;
+            }
+          }
+        }
+
+        else if (i+1 < tokens.size && ti.str == "type" && tokens[i+1].token == TOKEN_IDENTIFIER) {
           definitions += tokens[i+1].r;
           break;
         }
