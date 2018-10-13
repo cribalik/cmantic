@@ -25,4 +25,4 @@ menu_highlight          70 70 70
 background              40 40 40
 gutter_background       40 40 40
 git_blame               40 138 101
-shadow_color            0 0 0 150
+shadow_color            0 0 0 120

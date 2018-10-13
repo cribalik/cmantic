@@ -28,14 +28,23 @@ static void util_free(StringCache<N> &s) {
 	s.num = 0;
 }
 
-struct BlameData {int line; char *hash, *author, *summary;};
+struct BlameData {
+	int line;
+	char *hash;
+	char *author;
+	char *summary;
+};
 
 // TODO: we might be able to optimize this by storing only the unique commits, and having references to them
 static bool git_parse_blame(String output, Array<BlameData> *result) {
-	StringCache<64> hash_cache = {};
-	StringCache<64> author_cache = {};
-	StringCache<64> summary_cache = {};
-	struct Data {String hash, author, summary;};
+	// StringCache<64> hash_cache = {};
+	// StringCache<64> author_cache = {};
+	// StringCache<64> summary_cache = {};
+	struct Data {
+		String hash;
+		String author;
+		String summary;
+	};
 	Array<Data> mem = {};
 
 	*result = {};
@@ -76,20 +85,25 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 		Slice key = row.token(&col, ' ');
 		if (key.length == 40) {
 			if (key != hash) {
-				// if we've seen the key before, it should be in mem
-				Data *d;
-				ARRAY_FIND(mem, &d, d->hash == key);
-				if (!d) {
-					mem += Data{
-						hash_cache.get(hash(0, 8)),
-						author_cache.get(author),
-						summary_cache.get(summary),
-					};
-					d = &mem.last();
+				// if we've seen the hash before, it should be in mem
+				if (hash.length) {
+					Data *d;
+					ARRAY_FIND(mem, &d, d->hash == hash);
+					if (!d) {
+						mem += Data{
+							hash.copy(),
+							author.copy(),
+							summary.copy(),
+							// hash_cache.get(hash(0, 8)),
+							// author_cache.get(author),
+							// summary_cache.get(summary),
+						};
+						d = &mem.last();
+					}
+					*result += BlameData{current_line, d->hash.chars, d->author.chars, d->summary.chars};
 				}
-				last_hash = hash;
-				*result += BlameData{current_line, d->hash.chars, d->author.chars, d->summary.chars};
 				current_line = line;
+				last_hash = hash;
 				hash = key;
 			}
 			++line;
@@ -106,12 +120,20 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 			summary = row(col, -1);
 	}
 	if (hash != last_hash)
-		*result += BlameData{current_line, hash_cache.get(hash(0, 8)).chars, author_cache.get(author).chars, summary_cache.get(summary).chars};
+		*result += BlameData{
+			current_line,
+			hash.copy().chars,
+			author.copy().chars,
+			summary.copy().chars,
+			// hash_cache.get(hash(0, 8)).chars,
+			// author_cache.get(author).chars,
+			// summary_cache.get(summary).chars
+		};
 
 	#if 0
-	printf("%i %i %i\n", hash_cache.num_misses, hash_cache.num_hits, hash_cache.num_bytes_alloced);
-	printf("%i %i %i\n", author_cache.num_misses, author_cache.num_hits, author_cache.num_bytes_alloced);
-	printf("%i %i %i\n", summary_cache.num_misses, summary_cache.num_hits, summary_cache.num_bytes_alloced);
+	// printf("%i %i %i\n", hash_cache.num_misses, hash_cache.num_hits, hash_cache.num_bytes_alloced);
+	// printf("%i %i %i\n", author_cache.num_misses, author_cache.num_hits, author_cache.num_bytes_alloced);
+	// printf("%i %i %i\n", summary_cache.num_misses, summary_cache.num_hits, summary_cache.num_bytes_alloced);
 	printf("%i\n", result->size);
 	#endif
 	mem.free_shallow();
@@ -119,8 +141,8 @@ static bool git_parse_blame(String output, Array<BlameData> *result) {
 
 	err:
 	mem.free_shallow();
-	util_free(hash_cache);
-	util_free(author_cache);
-	util_free(summary_cache);
+	// util_free(hash_cache);
+	// util_free(author_cache);
+	// util_free(summary_cache);
 	return false;
 }

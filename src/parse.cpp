@@ -614,6 +614,14 @@ static Keyword bash_keywords[] = {
   {"break", KEYWORD_CONTROL},
 };
 
+template<int N>
+static bool is_keyword(Slice str, Keyword (&keywords)[N]) {
+  for (int i = 0; i < N; ++i)
+    if (str == keywords[i].name && keywords[i].type != KEYWORD_TYPE)
+      return true;
+  return false;
+}
+
 // MUST BE REVERSE SIZE ORDER
 static const Slice cpp_operators[] = {
   {(char*)"===", 3},
@@ -1514,9 +1522,9 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
           goto token_def_done;
         }
 
-        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace") &&
-            tokens[i+1].token == TOKEN_IDENTIFIER &&
-            tokens[i+2].token == '{') {
+        if (i+2 < tokens.size &&
+            (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace") &&
+            tokens[i+1].token == TOKEN_IDENTIFIER) {
           definitions += tokens[i+1].r;
           goto token_def_done;
         }
@@ -1525,14 +1533,26 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
         // TODO: only do this when not inside function scope
         {
           // is it a keyword, then ignore (things like else if (..) is not a definition)
-          for (Keyword keyword : cpp_keywords)
-            if (ti.str == keyword.name && keyword.type != KEYWORD_TYPE)
-              goto token_def_done;
+          if (is_keyword(ti.str, cpp_keywords))
+            goto token_def_done;
 
           {
-            int j = i;
+            int j = i+1;
+            // since we assume the current identifier is the type, we must check for templates here
+            if (j < tokens.size && tokens[j].str == "<") {
+              ++j;
+              for (int depth = 1; j < tokens.size && depth; ++j) {
+                // this isn't bulletproof, but we want something to keep us from parsing the rest of the file
+                // every time we encounter an expression like `x < 3`
+                if (tokens[j].token != TOKEN_IDENTIFIER && tokens[j].str != "," && tokens[j].str != "<" && tokens[j].str != ">")
+                  goto token_def_done;
+                if (tokens[j].str == "<") ++depth;
+                if (tokens[j].str == ">") --depth;
+              }
+            }
+
             // skip pointer and references
-            for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
+            for (; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
               if (tokens[j].str == "*" || tokens[j].str == "&")
                 continue;
               goto token_def_done;
@@ -1719,15 +1739,26 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
         // check for function definition
         // TODO: only do this when not inside function scope
         {
-          // is it a keyword, then ignore (things like else if (..) is not a definition)
-          for (Keyword keyword : csharp_keywords)
-            if (ti.str == keyword.name && keyword.type != KEYWORD_TYPE)
-              goto token_def_done;
+          if (is_keyword(ti.str, csharp_keywords))
+            goto token_def_done;
 
           {
-            int j = i;
+            int j = i+1;
+            // since we assume the current identifier is the type, we must check for templates here
+            if (j < tokens.size && tokens[j].str == "<") {
+              ++j;
+              for (int depth = 1; j < tokens.size && depth; ++j) {
+                // this isn't bulletproof, but we want something to keep us from parsing the rest of the file
+                // every time we encounter an expression like `x < 3`
+                if (tokens[j].token != TOKEN_IDENTIFIER && tokens[j].str != "," && tokens[j].str != "<" && tokens[j].str != ">")
+                  goto token_def_done;
+                if (tokens[j].str == "<") ++depth;
+                if (tokens[j].str == ">") --depth;
+              }
+            }
+
             // skip pointer and references
-            for (++j; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
+            for (; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
               if (tokens[j].str == "*" || tokens[j].str == "&")
                 continue;
               goto token_def_done;

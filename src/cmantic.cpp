@@ -5989,7 +5989,7 @@ void Pane::render_edit() {
         Pos p = d.to_visual_pos({d.lines[y].length, y});
         p.x = at_least(p.x+2, 30);
         msg.length = 0;
-        msg.appendf("%s - %s - %s", bd.hash, bd.author, bd.summary);
+        msg.appendf("{} - %s - %s", Slice::create(bd.hash, 8), bd.author, bd.summary);
         canvas.render_str(p, &G.color_scheme.git_blame, NULL, p.x, -1, msg.slice);
       }
       util_free(msg);
