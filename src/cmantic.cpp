@@ -4099,6 +4099,8 @@ Language language_from_filename(Slice filename) {
     language = LANGUAGE_BASH; // bash will have to do for makefiles
   else if (filename.ends_with(".cmantic-colorscheme"))
     language = LANGUAGE_CMANTIC_COLORSCHEME;
+  else if (filename.ends_with(".go"))
+    language = LANGUAGE_GOLANG;
   return language;
 }
 

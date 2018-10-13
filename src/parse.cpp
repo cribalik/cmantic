@@ -472,6 +472,89 @@ static Keyword julia_keywords[] = {
   {"elseif", KEYWORD_CONTROL},
 };
 
+static Keyword go_keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"nil", KEYWORD_CONSTANT},
+
+  // types
+
+  {"int",        KEYWORD_TYPE},
+  {"int8",       KEYWORD_TYPE},
+  {"int16",      KEYWORD_TYPE},
+  {"int32",      KEYWORD_TYPE},
+  {"int64",      KEYWORD_TYPE},
+  {"uint",       KEYWORD_TYPE},
+  {"uint8",      KEYWORD_TYPE},
+  {"uint16",     KEYWORD_TYPE},
+  {"uint32",     KEYWORD_TYPE},
+  {"uint64",     KEYWORD_TYPE},
+  {"byte",       KEYWORD_TYPE},
+  {"rune",       KEYWORD_TYPE},
+  {"float32",    KEYWORD_TYPE},
+  {"float64",    KEYWORD_TYPE},
+  {"complex64",  KEYWORD_TYPE},
+  {"complex128", KEYWORD_TYPE},
+
+  // specifiers
+
+  {"extern",    KEYWORD_SPECIFIER},
+  {"nothrow",   KEYWORD_SPECIFIER},
+  {"noexcept",  KEYWORD_SPECIFIER},
+  {"public",    KEYWORD_SPECIFIER},
+  {"private",   KEYWORD_SPECIFIER},
+  {"delegate",  KEYWORD_SPECIFIER},
+  {"protected", KEYWORD_SPECIFIER},
+  {"override",  KEYWORD_SPECIFIER},
+  {"virtual",   KEYWORD_SPECIFIER},
+  {"abstract",  KEYWORD_SPECIFIER},
+  {"global",    KEYWORD_SPECIFIER},
+  {"mutable",   KEYWORD_SPECIFIER},
+
+  // declarations
+
+  {"const",     KEYWORD_DEFINITION},
+  {"func",      KEYWORD_DEFINITION},
+  {"struct",    KEYWORD_DEFINITION},
+  {"immutable", KEYWORD_DEFINITION},
+  {"using",     KEYWORD_DEFINITION},
+  {"export",    KEYWORD_DEFINITION},
+  {"import",    KEYWORD_DEFINITION},
+  {"as",        KEYWORD_DEFINITION},
+  {"package",   KEYWORD_DEFINITION},
+  {"var",       KEYWORD_DEFINITION},
+
+  // macro
+
+  // flow control
+
+  {"in",       KEYWORD_CONTROL},
+  {"switch",   KEYWORD_CONTROL},
+  {"case",     KEYWORD_CONTROL},
+  {"if",       KEYWORD_CONTROL},
+  {"else",     KEYWORD_CONTROL},
+  {"elif",     KEYWORD_CONTROL},
+  {"for",      KEYWORD_CONTROL},
+  {"while",    KEYWORD_CONTROL},
+  {"return",   KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break",    KEYWORD_CONTROL},
+  {"goto",     KEYWORD_CONTROL},
+  {"yield",    KEYWORD_CONTROL},
+  {"do",       KEYWORD_CONTROL},
+  {"default",  KEYWORD_CONTROL},
+  {"and",      KEYWORD_CONTROL},
+  {"or",       KEYWORD_CONTROL},
+  {"with",     KEYWORD_CONTROL},
+  {"try",      KEYWORD_CONTROL},
+  {"except",   KEYWORD_CONTROL},
+  {"end",      KEYWORD_CONTROL},
+  {"elseif",   KEYWORD_CONTROL},
+};
+
 static Keyword bash_keywords[] = {
 
   // constants
@@ -582,6 +665,32 @@ static const Slice python_operators[] = {
 };
 
 static const Slice julia_operators[] = {
+  {(char*)"===", 3},
+  {(char*)"!==", 3},
+  {(char*)"<<=", 3},
+  {(char*)">>=", 3},
+  {(char*)"||", 2},
+  {(char*)"&&", 2},
+  {(char*)"==", 2},
+  {(char*)"!=", 2},
+  {(char*)"<<", 2},
+  {(char*)">>", 2},
+  {(char*)"++", 2},
+  {(char*)"::", 2},
+  {(char*)"--", 2},
+  {(char*)"+", 1},
+  {(char*)"-", 1},
+  {(char*)"*", 1},
+  {(char*)"/", 1},
+  {(char*)"&", 1},
+  {(char*)"%", 1},
+  {(char*)"=", 1},
+  {(char*)":", 1},
+  {(char*)"<", 1},
+  {(char*)">", 1},
+};
+
+static const Slice go_operators[] = {
   {(char*)"===", 3},
   {(char*)"!==", 3},
   {(char*)"<<=", 3},
@@ -1021,6 +1130,119 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
         if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct" || ti.str == "const" || ti.str == "immutable")) {
           definitions += tokens[i+1].r;
           break;
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+  return {tokens, definitions, identifiers};
+}
+
+static ParseResult go_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
+
+    // line comment
+    // line comment
+    if (line.begins_with(x, "//")) {
+      t.token = TOKEN_LINE_COMMENT;
+      x = line.length;
+      goto token_done;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t, "@", ""))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // string
+    if (parse_string(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(go_operators); ++i) {
+      if (line.begins_with(x, go_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(go_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  // find definitions
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo ti = tokens[i];
+    switch (ti.token) {
+      case TOKEN_IDENTIFIER:
+        if (i+1 < tokens.size && (ti.str == "func" || ti.str == "struct")) {
+          definitions += tokens[i+1].r;
+          break;
+        }
+        // const
+        else if (i+1 < tokens.size && tokens[i+1].token == TOKEN_IDENTIFIER && ti.str == "const") {
+          definitions += tokens[i+1].r;
+          break;
+        }
+        // const ( <const list> )
+        else if (i+1 < tokens.size && ti.str == "const" && tokens[i+1].str == "(") {
+          for (i += 2; i < tokens.size; ++i) {
+            if (tokens[i].str == ")")
+              break;
+            // identifier =
+            if (i+1 < tokens.size && tokens[i].token == TOKEN_IDENTIFIER && tokens[i+1].str == "=")
+              definitions += tokens[i].r;
+          }
         }
         break;
 
@@ -1526,6 +1748,7 @@ enum Language {
   LANGUAGE_JULIA,
   LANGUAGE_BASH,
   LANGUAGE_CMANTIC_COLORSCHEME,
+  LANGUAGE_GOLANG,
   NUM_LANGUAGES
 };
 
@@ -1544,6 +1767,7 @@ LanguageSettings language_settings[] = {
   {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse, Slice::create("Julia")},  // LANGUAGE_JULIA
   {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse, Slice::create("Shell")},  // LANGUAGE_BASH
   {StaticArray<Keyword>{},                                            {},                  colorscheme_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
+  {StaticArray<Keyword>{go_keywords, ARRAY_LEN(go_keywords)},         Slice::create("//"),  go_parse, Slice::create("Go")},  // LANGUAGE_GOLANG
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 
