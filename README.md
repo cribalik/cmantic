@@ -16,7 +16,7 @@ Cross-platform text editor mainly for C/C++, with features like fuzzy autocomple
 
 
 ## Run tutorial
-
-run `./cmantic`
-Hit Ctrl+P and type 'tutorial'
-Hit Enter
+ 
+ 1. run `./cmantic`
+ 2. Hit Ctrl+P and type 'tutorial'
+ 3. Hit Enter
