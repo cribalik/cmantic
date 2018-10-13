@@ -1226,14 +1226,14 @@ static void menu_option_closeall() {
 #define yield_break do {step = {}; return;} while(0)
 
 static void mode_prompt(Slice msg, void (*callback)(void), PromptType type);
-static void mode_normal();
+static void mode_normal(bool force_set_message = false);
 static void menu_option_set_build_command() {
   COROUTINE_BEGIN;
 
   mode_prompt(Slice::create("Build command"), menu_option_set_build_command, PROMPT_STRING);
   yield(check_prompt_result);
   if (!G.prompt_success) {
-    mode_normal();
+    mode_normal(true);
     yield_break;
   }
   
@@ -1259,7 +1259,7 @@ static void menu_option_set_indent() {
   mode_prompt(Slice::create("Set indent"), menu_option_set_indent, PROMPT_INT);
   yield(check_prompt_result);
   if (!G.prompt_success) {
-    mode_normal();
+    mode_normal(true);
     yield_break;
   }
   
@@ -1279,6 +1279,7 @@ static void menu_option_blame() {
   COROUTINE_BEGIN;
 
   if (!G.editing_pane->buffer.data->is_bound_to_file()) {
+    status_message_set("This is not a file");
     mode_normal();
     yield_break;
   }
@@ -1689,7 +1690,7 @@ static void mode_delete() {
   status_message_set("delete");
 }
 
-static void mode_normal() {
+static void mode_normal(bool force_set_message) {
   mode_cleanup();
   if (G.mode == MODE_INSERT)
     G.default_marker_background_color.jump();
@@ -1698,7 +1699,7 @@ static void mode_normal() {
   G.bottom_pane = &G.status_message_pane;
   G.selected_pane = G.editing_pane;
 
-  if (!G.status_message_was_set)
+  if (!G.status_message_was_set || force_set_message)
     status_message_set("normal");
   G.status_message_was_set = false;
 }
@@ -1841,7 +1842,7 @@ static bool insert_default(Pane &p, Key key) {
 
   /* TODO: should not set `modified` if we just enter and exit insert mode */
   if (key == KEY_ESCAPE) {
-    mode_normal();
+    mode_normal(true);
     return false;
   }
 
@@ -2581,6 +2582,9 @@ static bool check_visual_start(BufferView &buffer) {
 }
 
 static void toggle_comment(BufferView &buffer, int y0, int y1, int cursor_idx) {
+  if (!buffer.data->language)
+    return;
+
   const Slice comment = language_settings[buffer.data->language].line_comment;
   if (!comment.length)
     return;
@@ -2649,7 +2653,7 @@ static void do_build() {
     }
   }
 
-  mode_normal();
+  mode_normal(true);
   COROUTINE_END;
 }
 
@@ -2664,7 +2668,7 @@ static void do_visual_jump() {
   mode_prompt(Slice::create("jump"), do_visual_jump, PROMPT_KEY);
   yield(wait_for_initial_key);
   if (!G.prompt_success) {
-    mode_normal();
+    mode_normal(true);
     yield_break;
   }
 
@@ -2714,7 +2718,7 @@ static void do_visual_jump() {
   util_free(G.visual_jump_positions);
   G.current_visual_jump_pane = 0;
 
-  mode_normal();
+  mode_normal(true);
   COROUTINE_END;
 }
 
@@ -3112,7 +3116,7 @@ static void handle_input(Key key) {
         break;}
     }
     G.goto_line_number = 0;
-    mode_normal();
+    mode_normal(true);
     break;
 
   case MODE_COUNT:
@@ -3121,7 +3125,7 @@ static void handle_input(Key key) {
   case MODE_MENU:
     if (key == KEY_RETURN) {
       if (G.menu_buffer.isempty()) {
-        mode_normal();
+        mode_normal(true);
         break;
       }
 
@@ -3142,9 +3146,9 @@ static void handle_input(Key key) {
         mode_normal();
     }
     else if (key == KEY_ESCAPE)
-      mode_normal();
+      mode_normal(true);
     else if (key == KEY_BACKSPACE && G.menu_buffer[0].length == 0)
-      mode_normal();
+      mode_normal(true);
     else
       handle_menu_insert(key);
     break;
@@ -3152,7 +3156,7 @@ static void handle_input(Key key) {
   case MODE_GOTO_DEFINITION: {
     if (key == KEY_ESCAPE) {
       G.editing_pane->buffer.move_to(G.goto_definition_begin_pos);
-      mode_normal();
+      mode_normal(true);
       break;
     }
 
@@ -3168,7 +3172,7 @@ static void handle_input(Key key) {
       buffer.jumplist_push();
       buffer.move_to(G.definition_positions[opt]);
       buffer.jumplist_push();
-      mode_normal();
+      mode_normal(true);
       break;
     }
 
@@ -3184,7 +3188,7 @@ static void handle_input(Key key) {
   case MODE_GOTO_ALL_DEFINITIONS: {
     if (key == KEY_ESCAPE) {
       // G.editing_pane->buffer.move_to(G.goto_definition_begin_pos);
-      mode_normal();
+      mode_normal(true);
       break;
     }
 
@@ -3202,7 +3206,7 @@ static void handle_input(Key key) {
       buffer.move_to(G.definition_positions[opt]);
       buffer.jumplist_push();
       #endif
-      mode_normal();
+      mode_normal(true);
       break;
     }
 
@@ -3275,7 +3279,7 @@ static void handle_input(Key key) {
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
       if (!G.menu_buffer.lines[0].length) {
         util_free(G.search_term);
-        mode_normal();
+        mode_normal(true);
       }
       else {
         buffer.jumplist_push();
@@ -3287,7 +3291,7 @@ static void handle_input(Key key) {
         }
         else {
           buffer.jumplist_push();
-          mode_normal();
+          mode_normal(true);
         }
       }
     }
@@ -3307,7 +3311,7 @@ static void handle_input(Key key) {
     do_delete_movement(key);
     do_paste();
     buffer.action_end();
-    mode_normal();
+    mode_normal(true);
     break;}
 
   case MODE_YANK: {
@@ -3374,7 +3378,7 @@ static void handle_input(Key key) {
 
       case KEY_ESCAPE:
         buffer.remove_trailing_whitespace();
-        mode_normal();
+        mode_normal(true);
         break;
 
       case CONTROL('j'): {
@@ -5665,7 +5669,12 @@ void Pane::render_as_dropdown() {
 void Pane::render_syntax_highlight(TextCanvas &canvas, int y1) {
   #define render_highlight(color) canvas.fill_textcolor(Range{b.data->to_visual_pos(t->a), b.data->to_visual_pos(t->b)}, color)
 
+
   BufferView &b = this->buffer;
+
+  if (!b.data->language)
+    return;
+
   // syntax @highlighting
   int y0 = canvas.offset.y;
   const Pos pos = {0, canvas.offset.y};

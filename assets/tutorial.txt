@@ -5,7 +5,7 @@
 
 
 
-            Welcome to cmantic!
+    Welcome to cmantic!
 
 
             Before we start, please press '+' and '-' to make the font bigger or smaller.

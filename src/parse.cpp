@@ -649,6 +649,32 @@ static const Slice cpp_operators[] = {
   {(char*)">", 1},
 };
 
+static const Slice text_operators[] = {
+  {(char*)"===", 3},
+  {(char*)"!==", 3},
+  {(char*)"<<=", 3},
+  {(char*)">>=", 3},
+  {(char*)"||", 2},
+  {(char*)"&&", 2},
+  {(char*)"==", 2},
+  {(char*)"!=", 2},
+  {(char*)"<<", 2},
+  {(char*)">>", 2},
+  {(char*)"++", 2},
+  {(char*)"::", 2},
+  {(char*)"--", 2},
+  {(char*)"+", 1},
+  {(char*)"-", 1},
+  {(char*)"*", 1},
+  {(char*)"/", 1},
+  {(char*)"&", 1},
+  {(char*)"%", 1},
+  {(char*)"=", 1},
+  {(char*)":", 1},
+  {(char*)"<", 1},
+  {(char*)">", 1},
+};
+
 static const Slice python_operators[] = {
   {(char*)"===", 3},
   {(char*)"!==", 3},
@@ -1382,6 +1408,76 @@ static ParseResult bash_parse(const Array<StringBuffer> lines) {
   return {tokens, definitions, identifiers};
 }
 
+static ParseResult textfile_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t, "0123456789", "-+"))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(text_operators); ++i) {
+      if (line.begins_with(x, text_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(text_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  return {tokens, {}, identifiers};
+}
+
 static ParseResult cpp_parse(const Array<StringBuffer> lines) {
   Array<TokenInfo> tokens = {};
   Array<String> identifiers = {};
@@ -1815,14 +1911,14 @@ struct LanguageSettings {
   Slice name;
 };
 LanguageSettings language_settings[] = {
-  {StaticArray<Keyword>{},                                            Slice::create("#"),  python_parse, Slice::create("")},  // LANGUAGE_NULL
-  {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse, Slice::create("C/C++")}, // LANGUAGE_C
-  {StaticArray<Keyword>{csharp_keywords, ARRAY_LEN(csharp_keywords)}, Slice::create("//"), csharp_parse, Slice::create("C#")}, // LANGUAGE_CSHARP
-  {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse, Slice::create("Python")},  // LANGUAGE_PYTHON
-  {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse, Slice::create("Julia")},  // LANGUAGE_JULIA
-  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse, Slice::create("Shell")},  // LANGUAGE_BASH
+  {StaticArray<Keyword>{},                                            {},                  textfile_parse,    Slice::create("")},  // LANGUAGE_NULL
+  {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse,         Slice::create("C/C++")}, // LANGUAGE_C
+  {StaticArray<Keyword>{csharp_keywords, ARRAY_LEN(csharp_keywords)}, Slice::create("//"), csharp_parse,      Slice::create("C#")}, // LANGUAGE_CSHARP
+  {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse,      Slice::create("Python")},  // LANGUAGE_PYTHON
+  {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse,       Slice::create("Julia")},  // LANGUAGE_JULIA
+  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse,        Slice::create("Shell")},  // LANGUAGE_BASH
   {StaticArray<Keyword>{},                                            {},                  colorscheme_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
-  {StaticArray<Keyword>{go_keywords, ARRAY_LEN(go_keywords)},         Slice::create("//"),  go_parse, Slice::create("Go")},  // LANGUAGE_GOLANG
+  {StaticArray<Keyword>{go_keywords, ARRAY_LEN(go_keywords)},         Slice::create("//"), go_parse,          Slice::create("Go")},  // LANGUAGE_GOLANG
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 
