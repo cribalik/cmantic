@@ -498,6 +498,7 @@ static Keyword go_keywords[] = {
   {"float64",    KEYWORD_TYPE},
   {"complex64",  KEYWORD_TYPE},
   {"complex128", KEYWORD_TYPE},
+  {"error",      KEYWORD_TYPE},
 
   // specifiers
 
@@ -517,6 +518,7 @@ static Keyword go_keywords[] = {
   // declarations
 
   {"const",     KEYWORD_DEFINITION},
+  {"type",      KEYWORD_DEFINITION},
   {"func",      KEYWORD_DEFINITION},
   {"struct",    KEYWORD_DEFINITION},
   {"immutable", KEYWORD_DEFINITION},
@@ -532,6 +534,7 @@ static Keyword go_keywords[] = {
   // flow control
 
   {"in",       KEYWORD_CONTROL},
+  {"defer",    KEYWORD_CONTROL},
   {"switch",   KEYWORD_CONTROL},
   {"case",     KEYWORD_CONTROL},
   {"if",       KEYWORD_CONTROL},
@@ -1225,7 +1228,7 @@ static ParseResult go_parse(const Array<StringBuffer> lines) {
     TokenInfo ti = tokens[i];
     switch (ti.token) {
       case TOKEN_IDENTIFIER:
-        if (i+1 < tokens.size && (ti.str == "func" || ti.str == "struct")) {
+        if (i+1 < tokens.size && (ti.str == "func" || ti.str == "type")) {
           definitions += tokens[i+1].r;
           break;
         }
