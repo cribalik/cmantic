@@ -803,6 +803,13 @@ static bool is_identifier_tail(Utf8char c) {
   return c.is_ansi() && is_identifier_tail(c.ansi());
 }
 
+struct Range {
+  Pos a;
+  Pos b;
+  bool contains(Pos p) {return p >= a && p < b;}
+};
+static void util_free(Range) {}
+
 struct TokenInfo {
   Token token;
   union {
@@ -822,6 +829,12 @@ struct ParseResult {
   Array<Range> definitions;
   Array<String> identifiers;
 };
+
+static void util_free(ParseResult &p) {
+  util_free(p.tokens);
+  util_free(p.definitions);
+  util_free(p.identifiers);
+}
 
 #define NEXT_CHAR(n) (x += n, c = line[x])
 

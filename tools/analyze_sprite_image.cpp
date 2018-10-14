@@ -1,3 +1,4 @@
+#define UTIL_IMPL
 #include "../src/util.hpp"
 #define STB_IMAGE_IMPLEMENTATION
 #include "../3party/stb_image.h"

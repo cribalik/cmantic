@@ -1,3 +1,4 @@
+#define UTIL_IMPL
 #include "../src/util.hpp"
 
 int main(int argc, char const *argv[])

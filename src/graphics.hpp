@@ -34,6 +34,10 @@ struct Pos {
   Pos operator-(Pos p) {return Pos{x-p.x, y-p.y};}
 };
 
+static Pos operator+(Pos a, Pos b) {
+  return {a.x+b.x, a.y+b.y};
+}
+
 union Rect {
   struct {
     Pos p;
@@ -92,6 +96,8 @@ static Color  blend_additive(Color back, Color front, float alpha);
 static Color8 to_srgb(Color c);
 static Color  invert(Color c);
 static bool   operator==(Color, Color);
+static Color rgb8_to_linear_color(int r, int g, int b);
+static Color rgba8_to_linear_color(int r, int g, int b, int a);
 
 struct Color8 {
   u8 r;
@@ -101,6 +107,62 @@ struct Color8 {
 };
 static Color  to_linear(Color8);
 static bool   operator==(Color8, Color8);
+
+static const Color COLOR_PINK         = rgba8_to_linear_color(236, 64, 122, 255);
+static const Color COLOR_YELLOW       = rgba8_to_linear_color(255, 235, 59, 255);
+static const Color COLOR_LIGHT_YELLOW = rgba8_to_linear_color(255, 240, 79, 255);
+static const Color COLOR_AMBER        = rgba8_to_linear_color(255,193,7, 255);
+static const Color COLOR_DEEP_ORANGE  = rgba8_to_linear_color(255,138,101, 255);
+static const Color COLOR_ORANGE       = rgba8_to_linear_color(255,183,77, 255);
+static const Color COLOR_GREEN        = rgba8_to_linear_color(129,199,132, 255);
+static const Color COLOR_LIGHT_GREEN  = rgba8_to_linear_color(174,213,129, 255);
+static const Color COLOR_INDIGO       = rgba8_to_linear_color(121,134,203, 255);
+static const Color COLOR_DEEP_PURPLE  = rgba8_to_linear_color(149,117,205, 255);
+static const Color COLOR_RED          = rgba8_to_linear_color(229,115,115, 255);
+static const Color COLOR_CYAN         = rgba8_to_linear_color(77,208,225, 255);
+static const Color COLOR_LIGHT_BLUE   = rgba8_to_linear_color(79,195,247, 255);
+static const Color COLOR_PURPLE       = rgba8_to_linear_color(186,104,200, 255);
+static const Color COLOR_BLUEGREY     = rgba8_to_linear_color(84, 110, 122, 255);
+static const Color COLOR_GREY         = rgba8_to_linear_color(51, 51, 51, 255);
+static const Color COLOR_LIGHT_GREY   = rgba8_to_linear_color(76, 76, 76, 255);
+static const Color COLOR_BLACK        = rgba8_to_linear_color(25, 25, 25, 255);
+static const Color COLOR_WHITE        = rgba8_to_linear_color(240, 240, 240, 255);
+static const Color COLOR_BLUE         = rgba8_to_linear_color(79,195,247, 255);
+static const Color COLOR_DARK_BLUE    = rgba8_to_linear_color(124, 173, 213, 255);
+
+struct PoppedColor {
+  const Color *base_color;
+  const Color *popped_color;
+  float speed;
+  float cooldown;
+  float min;
+  float max;
+  float amount; // 0
+  Color color;
+
+  void reset() {amount = max + cooldown*speed*(max-min);}
+  void tick(float dt) {
+    assert(speed);
+    amount -= dt*speed*(max-min)*0.04f;
+    color = blend(*base_color, *popped_color, clamp(amount, min, max));
+  }
+};
+
+struct RotatingColor {
+  float speed;
+  float saturation;
+  float light;
+  float hue; // 0
+  Color color;
+
+  void tick(float dt) {
+    hue = fmodf(hue + dt*speed*0.1f, 360.0f);
+    color = hsl_to_linear_color(hue, saturation, light);
+  }
+  void jump() {
+    hue = fmodf(hue + 180.0f, 360.0f);
+  }
+};
 
 /**************
  *    TEXT    *
@@ -112,6 +174,7 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
 static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color, int font_size = 0);
 static void push_textf(int pos_x, int pos_y, bool center, Color color, const char *fmt, ...);
 static void render_text();
+static int get_text_offset_y(int font_height);
 
 /**************
  *    QUAD    *
@@ -794,6 +857,10 @@ static void render_text() {
   // clear
   gl_ok_or_die;
   TIMING_END(TIMING_PANE_PUSH_TEXT_QUADS);
+}
+
+static int get_text_offset_y(int font_height) {
+  return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
 }
 
 static GLuint graphics_compile_shader_from_file(const char* vertex_filename, const char* fragment_filename) {
