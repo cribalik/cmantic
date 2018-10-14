@@ -345,6 +345,16 @@ struct BufferView {
 };
 static void util_free(BufferView &b);
 
+struct Location {
+  BufferData *buffer;
+  Array<Pos> cursors;
+};
+
+void util_free(Location &l) {
+  util_free(l.cursors);
+  l.buffer = 0;
+}
+
 Language language_from_filename(Slice filename);
 
 #endif /* BUFFER_HEADER */
@@ -458,6 +468,14 @@ static void name(BufferData *buffer, Pos a, Pos b) { \
 
 UPDATE_CURSORS(move_cursors_on_insert, move_on_insert)
 UPDATE_CURSORS(move_cursors_on_delete, move_on_delete)
+
+TokenInfo* BufferData::find_start_of_identifier(Pos pos) {
+  advance_r(pos);
+  TokenInfo *t = gettoken(pos);
+  if (t == parser.tokens.end() || t->token != TOKEN_IDENTIFIER || !t->r.contains(pos))
+    return 0;
+  return t;
+}
 
 void BufferData::remove_range(Array<Cursor> &cursors, Pos a, Pos b, int cursor_idx, bool re_parse) {
   // log_info("before: (%i %i) (%i %i)\n", a.x, a.y, b.x, b.y);

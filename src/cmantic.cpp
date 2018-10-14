@@ -60,16 +60,6 @@
 #define UTIL_IMPL
 #include "util.hpp"
 
-struct Location {
-  BufferData *buffer;
-  Array<Pos> cursors;
-};
-
-void util_free(Location &l) {
-  util_free(l.cursors);
-  l.buffer = 0;
-}
-
 typedef int Key;
 enum SpecialKey {
   KEY_NONE = 0,
@@ -264,6 +254,82 @@ static char visual_jump_highlight_keys[] = {'a', 's', 'd', 'f', 'h', 'j', 'k', '
 #define PANE_IMPL
 #include "pane.hpp"
 
+static void state_init();
+static void do_update(float dt);
+static void do_render();
+static Key get_input(bool *window_active);
+static void test();
+static void test_update();
+static void handle_pending_removes();
+static void handle_input(Key key);
+
+#ifdef OS_WINDOWS
+int wmain(int, const wchar_t *[], wchar_t *[])
+#else
+int main(int, const char *[])
+#endif
+{
+  util_init();
+  state_init();
+
+  #ifdef DEBUG
+  test();
+  #endif
+
+  bool window_active = true;
+  for (uint loop_idx = 0;; ++loop_idx) {
+
+    static u32 ticks = SDL_GetTicks();
+    const float dt = clamp((float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 0.3f, 3.0f);
+    ticks = SDL_GetTicks();
+
+    Key key = get_input(&window_active);
+    if (!window_active)
+      continue;
+
+    TIMING_BEGIN(TIMING_MAIN_LOOP);
+
+    if (key)
+      handle_input(key);
+
+    #ifdef DEBUG
+    test_update();
+    #endif
+
+    TIMING_BEGIN(TIMING_UPDATE);
+    do_update(dt);
+    TIMING_END(TIMING_UPDATE);
+
+    TIMING_BEGIN(TIMING_RENDER);
+    do_render();
+    TIMING_END(TIMING_RENDER);
+
+    // do_pet_update_and_draw(dt);
+
+    render_quads();
+    render_textured_quads(G.pet_texture);
+    render_text();
+
+    handle_pending_removes();
+
+    SDL_GL_SwapWindow(G.window);
+
+    G.flags.cursor_dirty = false;
+
+    // reset performance timers
+    TIMING_END(TIMING_MAIN_LOOP);
+    #ifdef DEBUG
+      if (loop_idx%100 == 0)
+        print_perf_info();
+      update_perf_info();
+    #endif
+  }
+}
+
+// Coroutine stuff
+#define yield(name) do {step = name; return;} while(0); name:
+#define yield_break do {step = {}; return;} while(0)
+
 static void status_message_set(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -339,14 +405,6 @@ void editor_exit(int exitcode) {
   exit(exitcode);
 }
 
-TokenInfo* BufferData::find_start_of_identifier(Pos pos) {
-  advance_r(pos);
-  TokenInfo *t = gettoken(pos);
-  if (t == parser.tokens.end() || t->token != TOKEN_IDENTIFIER || !t->r.contains(pos))
-    return 0;
-  return t;
-}
-
 static bool dropdown_autocomplete_or_insert_tab(Pane &p) {
   BufferView &b = p.buffer;
   if (G.dropdown_buffer.isempty()) {
@@ -370,6 +428,170 @@ static bool dropdown_autocomplete_or_insert_tab(Pane &p) {
 }
 
 #define CONTROL(c) ((c)|KEY_CONTROL)
+
+static void _filetree_fill(Path path) {
+  Array<Path> files = {};
+  if (!File::list_files(path, &files))
+    goto err;
+
+  for (Path f : files) {
+    if (File::filetype(f) == FILETYPE_DIR)
+      _filetree_fill(f);
+    else {
+      G.files += f.copy();
+    }
+  }
+
+  err:
+  util_free(files);
+}
+
+static bool lines_from_file(Slice filename, Array<StringBuffer> *result, const char **endline_string_result);
+
+static void filetree_init() {
+  util_free(G.files);
+  _filetree_fill(G.current_working_directory);
+
+  // parse tree
+  util_free(G.project_definitions);
+  int num_indexed = 0;
+  for (Path p : G.files) {
+    Language l = language_from_filename(p.string.slice);
+    if (l == LANGUAGE_NULL)
+      continue;
+
+    Array<StringBuffer> lines;
+    if (!lines_from_file(p.string.slice, &lines, 0))
+      continue;
+    ParseResult pr = parse(lines, l);
+    for (Range r : pr.definitions)
+      G.project_definitions += lines[r.a.y](r.a.x, r.b.x).copy();
+    pr.definitions = {};
+    util_free(pr);
+    util_free(lines);
+    ++num_indexed;
+  }
+  log_info("Indexed %i files, with %i definitions\n", num_indexed, G.project_definitions.size);
+}
+
+static void read_colorscheme_file(const char *path, bool quiet = true) {
+  String file;
+  if (!File::get_contents(path, &file)) {
+    log_warn("Failed to open colorscheme file %s\n", path);
+    return;
+  }
+  int y = 0;
+  for (Slice row; row = file.token(&y, '\n'), row.length;) {
+    int x = 0;
+    Slice key = row.token(&x, ' ');
+    if (!key.length)
+      continue;
+    int ri,gi,bi,ai;
+
+    // hex
+    const int color_start = x;
+    Slice hex = row.token(&x, " ");
+    if (hex.length >= 7 && hex[0] == '#') {
+      if (!hex(1,3).toint_from_hex(&ri) || !hex(3,5).toint_from_hex(&gi) || !hex(5,7).toint_from_hex(&bi)) {
+        if (!quiet)
+          status_message_set("Incorrect syntax in colorscheme file %s", path);
+        break;
+      }
+      ai = 255;
+    }
+    else {
+      x = color_start;
+      Slice r = row.token(&x, ' ');
+      Slice g = row.token(&x, ' ');
+      Slice b = row.token(&x, ' ');
+      Slice a = row.token(&x, ' '); // optional
+      // rgb
+      if (!r.toint(&ri) || !g.toint(&gi) || !b.toint(&bi)) {
+        if (!quiet)
+          status_message_set("Incorrect syntax in colorscheme file %s", path);
+        break;
+      }
+      if (!a.toint(&ai))
+        ai = 255;
+    }
+
+    Color c = rgba8_to_linear_color(ri, gi, bi, ai);
+
+    if      (key == "syntax_control")
+      G.color_scheme.syntax_control = c;
+    else if (key == "syntax_type")
+      G.color_scheme.syntax_type = c;
+    else if (key == "syntax_specifier")
+      G.color_scheme.syntax_specifier = c;
+    else if (key == "syntax_definition_keyword")
+      G.color_scheme.syntax_definition_keyword = c;
+    else if (key == "syntax_definition")
+      G.color_scheme.syntax_definition = c;
+    else if (key == "syntax_function")
+      G.color_scheme.syntax_function = c;
+    else if (key == "syntax_macro")
+      G.color_scheme.syntax_macro = c;
+    else if (key == "syntax_constant")
+      G.color_scheme.syntax_constant = c;
+    else if (key == "syntax_number")
+      G.color_scheme.syntax_number = c;
+    else if (key == "syntax_string")
+      G.color_scheme.syntax_string = c;
+    else if (key == "syntax_comment")
+      G.color_scheme.syntax_comment = c;
+    else if (key == "syntax_operator")
+      G.color_scheme.syntax_operator = c;
+    else if (key == "syntax_text")
+      G.color_scheme.syntax_text = c;
+    else if (key == "gutter_text")
+      G.color_scheme.gutter_text = c;
+    else if (key == "gutter_background")
+      G.color_scheme.gutter_background = c;
+    else if (key == "line_highlight")
+      G.color_scheme.line_highlight = c;
+    else if (key == "line_highlight_inactive")
+      G.color_scheme.line_highlight_inactive = c;
+    else if (key == "line_highlight_pop")
+      G.color_scheme.line_highlight_pop = c;
+    else if (key == "marker_inactive")
+      G.color_scheme.marker_inactive = c;
+    else if (key == "search_term_text")
+      G.color_scheme.search_term_text = c;
+    else if (key == "search_term_background")
+      G.color_scheme.search_term_background = c;
+    else if (key == "autocomplete_background")
+      G.color_scheme.autocomplete_background = c;
+    else if (key == "autocomplete_highlight")
+      G.color_scheme.autocomplete_highlight = c;
+    else if (key == "menu_background")
+      G.color_scheme.menu_background = c;
+    else if (key == "menu_highlight")
+      G.color_scheme.menu_highlight = c;
+    else if (key == "background")
+      G.color_scheme.background = c;
+    else if (key == "git_blame")
+      G.color_scheme.git_blame = c;
+    // some special colors
+    else if (key == "shadow_color") {
+      shadow_color = shadow_color2 = c;
+      shadow_color2.a = 0;
+    }
+    else {
+      if (!quiet)
+        status_message_set("Unknown color %s in colorscheme file %s\n", key, path);
+      break;
+    }
+  }
+  util_free(file);
+  if (!quiet)
+    status_message_set("Updated color scheme");
+}
+
+static Path get_colorscheme_path() {
+  Path p = G.install_dir.copy();
+  p.push("assets/default.cmantic-colorscheme");
+  return p;
+}
 
 static void move_to_left_brace(const BufferView &buffer, char leftbrace, char rightbrace, Pos *pos) {
   Pos p = *pos;
@@ -633,247 +855,6 @@ static bool movement_default(BufferView &buffer, int key) {
   return true;
 }
 
-static void _filetree_fill(Path path) {
-  Array<Path> files = {};
-  if (!File::list_files(path, &files))
-    goto err;
-
-  for (Path f : files) {
-    if (File::filetype(f) == FILETYPE_DIR)
-      _filetree_fill(f);
-    else {
-      G.files += f.copy();
-    }
-  }
-
-  err:
-  util_free(files);
-}
-
-static bool lines_from_file(Slice filename, Array<StringBuffer> *result, const char **endline_string_result);
-
-static void filetree_init() {
-  util_free(G.files);
-  _filetree_fill(G.current_working_directory);
-
-  // parse tree
-  util_free(G.project_definitions);
-  int num_indexed = 0;
-  for (Path p : G.files) {
-    Language l = language_from_filename(p.string.slice);
-    if (l == LANGUAGE_NULL)
-      continue;
-
-    Array<StringBuffer> lines;
-    if (!lines_from_file(p.string.slice, &lines, 0))
-      continue;
-    ParseResult pr = parse(lines, l);
-    for (Range r : pr.definitions)
-      G.project_definitions += lines[r.a.y](r.a.x, r.b.x).copy();
-    pr.definitions = {};
-    util_free(pr);
-    util_free(lines);
-    ++num_indexed;
-  }
-  log_info("Indexed %i files, with %i definitions\n", num_indexed, G.project_definitions.size);
-}
-
-static void read_colorscheme_file(const char *path, bool quiet = true) {
-  String file;
-  if (!File::get_contents(path, &file)) {
-    log_warn("Failed to open colorscheme file %s\n", path);
-    return;
-  }
-  int y = 0;
-  for (Slice row; row = file.token(&y, '\n'), row.length;) {
-    int x = 0;
-    Slice key = row.token(&x, ' ');
-    if (!key.length)
-      continue;
-    int ri,gi,bi,ai;
-
-    // hex
-    const int color_start = x;
-    Slice hex = row.token(&x, " ");
-    if (hex.length >= 7 && hex[0] == '#') {
-      if (!hex(1,3).toint_from_hex(&ri) || !hex(3,5).toint_from_hex(&gi) || !hex(5,7).toint_from_hex(&bi)) {
-        if (!quiet)
-          status_message_set("Incorrect syntax in colorscheme file %s", path);
-        break;
-      }
-      ai = 255;
-    }
-    else {
-      x = color_start;
-      Slice r = row.token(&x, ' ');
-      Slice g = row.token(&x, ' ');
-      Slice b = row.token(&x, ' ');
-      Slice a = row.token(&x, ' '); // optional
-      // rgb
-      if (!r.toint(&ri) || !g.toint(&gi) || !b.toint(&bi)) {
-        if (!quiet)
-          status_message_set("Incorrect syntax in colorscheme file %s", path);
-        break;
-      }
-      if (!a.toint(&ai))
-        ai = 255;
-    }
-
-    Color c = rgba8_to_linear_color(ri, gi, bi, ai);
-
-    if      (key == "syntax_control")
-      G.color_scheme.syntax_control = c;
-    else if (key == "syntax_type")
-      G.color_scheme.syntax_type = c;
-    else if (key == "syntax_specifier")
-      G.color_scheme.syntax_specifier = c;
-    else if (key == "syntax_definition_keyword")
-      G.color_scheme.syntax_definition_keyword = c;
-    else if (key == "syntax_definition")
-      G.color_scheme.syntax_definition = c;
-    else if (key == "syntax_function")
-      G.color_scheme.syntax_function = c;
-    else if (key == "syntax_macro")
-      G.color_scheme.syntax_macro = c;
-    else if (key == "syntax_constant")
-      G.color_scheme.syntax_constant = c;
-    else if (key == "syntax_number")
-      G.color_scheme.syntax_number = c;
-    else if (key == "syntax_string")
-      G.color_scheme.syntax_string = c;
-    else if (key == "syntax_comment")
-      G.color_scheme.syntax_comment = c;
-    else if (key == "syntax_operator")
-      G.color_scheme.syntax_operator = c;
-    else if (key == "syntax_text")
-      G.color_scheme.syntax_text = c;
-    else if (key == "gutter_text")
-      G.color_scheme.gutter_text = c;
-    else if (key == "gutter_background")
-      G.color_scheme.gutter_background = c;
-    else if (key == "line_highlight")
-      G.color_scheme.line_highlight = c;
-    else if (key == "line_highlight_inactive")
-      G.color_scheme.line_highlight_inactive = c;
-    else if (key == "line_highlight_pop")
-      G.color_scheme.line_highlight_pop = c;
-    else if (key == "marker_inactive")
-      G.color_scheme.marker_inactive = c;
-    else if (key == "search_term_text")
-      G.color_scheme.search_term_text = c;
-    else if (key == "search_term_background")
-      G.color_scheme.search_term_background = c;
-    else if (key == "autocomplete_background")
-      G.color_scheme.autocomplete_background = c;
-    else if (key == "autocomplete_highlight")
-      G.color_scheme.autocomplete_highlight = c;
-    else if (key == "menu_background")
-      G.color_scheme.menu_background = c;
-    else if (key == "menu_highlight")
-      G.color_scheme.menu_highlight = c;
-    else if (key == "background")
-      G.color_scheme.background = c;
-    else if (key == "git_blame")
-      G.color_scheme.git_blame = c;
-    // some special colors
-    else if (key == "shadow_color") {
-      shadow_color = shadow_color2 = c;
-      shadow_color2.a = 0;
-    }
-    else {
-      if (!quiet)
-        status_message_set("Unknown color %s in colorscheme file %s\n", key, path);
-      break;
-    }
-  }
-  util_free(file);
-  if (!quiet)
-    status_message_set("Updated color scheme");
-}
-
-static Path get_colorscheme_path() {
-  Path p = G.install_dir.copy();
-  p.push("assets/default.cmantic-colorscheme");
-  return p;
-}
-
-static void state_init();
-
-static void do_update(float dt);
-static void do_render();
-static Key get_input(bool *window_active);
-static void test();
-static void test_update();
-static void handle_pending_removes();
-static void handle_input(Key key);
-
-#ifdef OS_WINDOWS
-int wmain(int, const wchar_t *[], wchar_t *[])
-#else
-int main(int, const char *[])
-#endif
-{
-  util_init();
-  state_init();
-
-  #ifdef DEBUG
-  test();
-  #endif
-
-  bool window_active = true;
-  for (uint loop_idx = 0;; ++loop_idx) {
-
-    static u32 ticks = SDL_GetTicks();
-    const float dt = clamp((float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 0.3f, 3.0f);
-    ticks = SDL_GetTicks();
-
-    Key key = get_input(&window_active);
-    if (!window_active)
-      continue;
-
-    TIMING_BEGIN(TIMING_MAIN_LOOP);
-
-    if (key)
-      handle_input(key);
-
-    #ifdef DEBUG
-    test_update();
-    #endif
-
-    TIMING_BEGIN(TIMING_UPDATE);
-    do_update(dt);
-    TIMING_END(TIMING_UPDATE);
-
-    TIMING_BEGIN(TIMING_RENDER);
-    do_render();
-    TIMING_END(TIMING_RENDER);
-
-    // do_pet_update_and_draw(dt);
-
-    render_quads();
-    render_textured_quads(G.pet_texture);
-    render_text();
-
-    handle_pending_removes();
-
-    SDL_GL_SwapWindow(G.window);
-
-    G.flags.cursor_dirty = false;
-
-    // reset performance timers
-    TIMING_END(TIMING_MAIN_LOOP);
-    #ifdef DEBUG
-      if (loop_idx%100 == 0)
-        print_perf_info();
-      update_perf_info();
-    #endif
-  }
-}
-
-// Coroutine stuff
-#define yield(name) do {step = name; return;} while(0); name:
-#define yield_break do {step = {}; return;} while(0)
-
 /***************************************************************
 ***************************************************************
 *                                                            **
@@ -1052,7 +1033,7 @@ static Array<String> get_goto_definition_suggestions() {
 
 static Array<String> get_goto_all_definitions_suggestions() {
   Array<String> result;
-  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.project_definitions, slice), true, &result);
+  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.project_definitions, slice), false, &result);
   return result;
 }
 
