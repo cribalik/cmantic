@@ -1,5 +1,13 @@
 /*
  * TODO:
+ * Delete multiline string
+ * (rel)load buffer that no longer exists
+ * visual jump when horizontal scrolling
+ * sometimes double indent 
+ * C#: parse templated method
+ * Multiline dw
+
+ * support go inline functions (it classifies the return type as function name)
  * visual jump to line
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)

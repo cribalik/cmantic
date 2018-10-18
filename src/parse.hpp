@@ -898,12 +898,13 @@ static bool parse_string(Slice line, int &x, TokenInfo &t) {
   return true;
 }
 
-static bool parse_triple_string(Slice line, Array<StringBuffer> lines, int &x, int &y, TokenInfo &t) {
+static bool parse_multiline_string(Slice line, Array<StringBuffer> lines, int &x, int &y, TokenInfo &t, const char *quote) {
+  int quote_len = strlen(quote);
   char c = line[x];
-  if (!line.begins_with(x, "\"\"\""))
+  if (!line.begins_with(x, quote))
     return false;
 
-  NEXT_CHAR(3);
+  NEXT_CHAR(quote_len);
   // goto matching end block
   for (;;) {
     // EOF
@@ -919,8 +920,8 @@ static bool parse_triple_string(Slice line, Array<StringBuffer> lines, int &x, i
       continue;
     }
     // End block
-    if (line.begins_with(x, "\"\"\"")) {
-      NEXT_CHAR(3);
+    if (line.begins_with(x, quote)) {
+      NEXT_CHAR(quote_len);
       break;
     }
     NEXT_CHAR(1);
@@ -975,7 +976,7 @@ static ParseResult python_parse(const Array<StringBuffer> lines) {
       goto token_done;
 
     // triple quoted string
-    if (parse_triple_string(line, lines, x, y, t))
+    if (parse_multiline_string(line, lines, x, y, t, "\"\"\""))
       goto token_done;
 
     // string
@@ -1130,7 +1131,7 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
       goto token_done;
 
     // triple quoted string
-    if (parse_triple_string(line, lines, x, y, t))
+    if (parse_multiline_string(line, lines, x, y, t, "\"\"\""))
       goto token_done;
 
     // number
@@ -1233,6 +1234,10 @@ static ParseResult go_parse(const Array<StringBuffer> lines) {
 
     // number
     if (parse_number(line, x, t))
+      goto token_done;
+
+    // tick string
+    if (parse_multiline_string(line, lines, x, y, t, "`"))
       goto token_done;
 
     // string
