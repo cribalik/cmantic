@@ -168,6 +168,7 @@ static Keyword csharp_keywords[] = {
   {"NULL", KEYWORD_CONSTANT},
   {"null", KEYWORD_CONSTANT},
   {"this", KEYWORD_CONSTANT},
+  {"value", KEYWORD_CONSTANT},
 
   // types
 
@@ -199,6 +200,7 @@ static Keyword csharp_keywords[] = {
   {"va_list", KEYWORD_TYPE},
   {"IEnumerator", KEYWORD_TYPE},
   {"byte", KEYWORD_TYPE},
+  {"string", KEYWORD_TYPE},
 
   // function
 
@@ -249,6 +251,8 @@ static Keyword csharp_keywords[] = {
   {"delete", KEYWORD_SPECIFIER},
   {"new", KEYWORD_SPECIFIER},
   {"using", KEYWORD_SPECIFIER},
+  {"get", KEYWORD_SPECIFIER},
+  {"set", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -1843,9 +1847,8 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
           goto token_def_done;
         }
 
-        if (i+2 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace" || ti.str == "interface") &&
-            tokens[i+1].token == TOKEN_IDENTIFIER &&
-            tokens[i+2].token == '{') {
+        if (i+1 < tokens.size && (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "interface") &&
+            tokens[i+1].token == TOKEN_IDENTIFIER) {
           definitions += tokens[i+1].r;
           goto token_def_done;
         }

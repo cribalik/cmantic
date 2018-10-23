@@ -1,7 +1,7 @@
 syntax_control          #78dce8
-syntax_type             #ff6188
+syntax_type             #ffa0e7
 syntax_specifier        #78dce8
-syntax_definition_keyword #a9dc76
+syntax_definition_keyword #00fbca
 syntax_definition       #fc9867
 syntax_function         #fc9867
 syntax_macro            #ab9df2

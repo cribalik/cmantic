@@ -6,6 +6,9 @@
  * sometimes double indent 
  * C#: parse templated method
  * Multiline dw
+ * Action area 'w' should only apply to current identifier range (not whitespace after it)
+
+ * get rid of some modes now that we have proper prompts (MODE_DELETE for example)
 
  * support go inline functions (it classifies the return type as function name)
  * visual jump to line
@@ -272,7 +275,8 @@ static void handle_pending_removes();
 static void handle_input(Key key);
 
 #ifdef OS_WINDOWS
-int wmain(int, const wchar_t *[], wchar_t *[])
+// int wmain(int, const wchar_t *[], wchar_t *[])
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 int main(int, const char *[])
 #endif
@@ -2690,7 +2694,7 @@ static void handle_input(Key key) {
 
   case MODE_DELETE: {
     do_delete_movement(key);
-    mode_normal();
+    mode_normal(true);
     break;}
 
   case MODE_INSERT: {
