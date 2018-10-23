@@ -1920,6 +1920,28 @@ static void range_to_clipboard(BufferData &buffer, View<Pos> from, View<Pos> to)
 ***************************************************************
 ***************************************************************/
 
+static void menu_option_line_margin() {
+  COROUTINE_BEGIN;
+  mode_prompt(Slice::create("New line margin"), menu_option_line_margin, PROMPT_INT);
+  yield(check_prompt_result);
+  if (!G.prompt_success) {
+    mode_normal(true);
+    yield_break;
+  }
+
+  if (G.prompt_result.integer <= 0) {
+    status_message_set("line margin must be > 0");
+    mode_normal();
+    yield_break;
+  }
+
+  G.line_margin = G.prompt_result.integer;
+  status_message_set("line margin set to %i", G.line_margin);
+  mode_normal();
+
+  COROUTINE_END;
+}
+
 static void menu_option_save() {
   save_buffer(G.editing_pane->buffer.data);
 }
@@ -2188,6 +2210,11 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("expand to column"),
     Slice::create("Add spaces on the current markers until they align up"),
     menu_option_expand_columns
+  },
+  {
+    Slice::create("set line margin"),
+    Slice::create("Set the number of pixels of empty space between lines"),
+    menu_option_line_margin
   },
 };
 
