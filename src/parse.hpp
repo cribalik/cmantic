@@ -255,6 +255,7 @@ static Keyword csharp_keywords[] = {
   {"using", KEYWORD_SPECIFIER},
   {"get", KEYWORD_SPECIFIER},
   {"set", KEYWORD_SPECIFIER},
+  {"partial", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -1891,7 +1892,7 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
               j = skip_c_style_generics_args(j+1, tokens);
               if (j == -1)
                 goto token_def_done;
-              if (j < tokens.size && tokens[j].token == '(')
+              if (j < tokens.size && (tokens[j].str == "(" || tokens[j].str == "{"))
                 definitions += {tokens[identifier_idx].a, tokens[identifier_idx].b};
             }
           }
