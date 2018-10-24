@@ -69,6 +69,8 @@ static Keyword cpp_keywords[] = {
   {"i8", KEYWORD_TYPE},
   {"va_list", KEYWORD_TYPE},
   {"IEnumerator", KEYWORD_TYPE},
+  {"IEnumerable", KEYWORD_TYPE},
+  {"Action", KEYWORD_TYPE},
   {"byte", KEYWORD_TYPE},
 
   // function
@@ -1500,6 +1502,27 @@ static ParseResult textfile_parse(const Array<StringBuffer> lines) {
   return {tokens, {}, identifiers};
 }
 
+// returns the index after a generic arglist, or the same index if there was none, or -1 if there was an error
+static int skip_c_style_generics_args(int i, Array<TokenInfo> tokens) {
+  int j = i;
+  // since we assume the current identifier is the type, we must check for templates here
+  if (j < tokens.size && tokens[j].str == "<") {
+    ++j;
+    int depth = 1;
+    for (; j < tokens.size && depth; ++j) {
+      // this isn't bulletproof, but we want something to keep us from parsing the rest of the file
+      // every time we encounter an expression like `x < 3`
+      if (tokens[j].token != TOKEN_IDENTIFIER && tokens[j].str != "," && tokens[j].str != "<" && tokens[j].str != ">")
+        return -1;
+      if (tokens[j].str == "<") ++depth;
+      if (tokens[j].str == ">") --depth;
+    }
+    if (depth)
+      return -1;
+  }
+  return j;
+}
+
 static ParseResult cpp_parse(const Array<StringBuffer> lines) {
   Array<TokenInfo> tokens = {};
   Array<String> identifiers = {};
@@ -1655,19 +1678,10 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
             goto token_def_done;
 
           {
-            int j = i+1;
             // since we assume the current identifier is the type, we must check for templates here
-            if (j < tokens.size && tokens[j].str == "<") {
-              ++j;
-              for (int depth = 1; j < tokens.size && depth; ++j) {
-                // this isn't bulletproof, but we want something to keep us from parsing the rest of the file
-                // every time we encounter an expression like `x < 3`
-                if (tokens[j].token != TOKEN_IDENTIFIER && tokens[j].str != "," && tokens[j].str != "<" && tokens[j].str != ">")
-                  goto token_def_done;
-                if (tokens[j].str == "<") ++depth;
-                if (tokens[j].str == ">") --depth;
-              }
-            }
+            int j = skip_c_style_generics_args(i+1, tokens);
+            if (j == -1)
+              goto token_def_done;
 
             // skip pointer and references
             for (; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
@@ -1860,19 +1874,10 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
             goto token_def_done;
 
           {
-            int j = i+1;
             // since we assume the current identifier is the type, we must check for templates here
-            if (j < tokens.size && tokens[j].str == "<") {
-              ++j;
-              for (int depth = 1; j < tokens.size && depth; ++j) {
-                // this isn't bulletproof, but we want something to keep us from parsing the rest of the file
-                // every time we encounter an expression like `x < 3`
-                if (tokens[j].token != TOKEN_IDENTIFIER && tokens[j].str != "," && tokens[j].str != "<" && tokens[j].str != ">")
-                  goto token_def_done;
-                if (tokens[j].str == "<") ++depth;
-                if (tokens[j].str == ">") --depth;
-              }
-            }
+            int j = skip_c_style_generics_args(i+1, tokens);
+            if (j == -1)
+              goto token_def_done;
 
             // skip pointer and references
             for (; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
@@ -1881,18 +1886,13 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
               goto token_def_done;
             }
 
-            if (j+1 < tokens.size &&
-                tokens[j].token == TOKEN_IDENTIFIER &&
-                tokens[j+1].token == '(') {
-              definitions += {tokens[j].a, tokens[j].b};
-            }
-            else if (j+3 < tokens.size &&
-                     tokens[j].token == TOKEN_IDENTIFIER &&
-                     tokens[j+1].token == TOKEN_OPERATOR &&
-                     tokens[j+1].str == "::" &&
-                     tokens[j+2].token == TOKEN_IDENTIFIER &&
-                     tokens[j+3].token == '(') {
-              definitions += {tokens[j].a, tokens[j+2].b};
+            if (j+1 < tokens.size && tokens[j].token == TOKEN_IDENTIFIER) {
+              int identifier_idx = j;
+              j = skip_c_style_generics_args(j+1, tokens);
+              if (j == -1)
+                goto token_def_done;
+              if (j < tokens.size && tokens[j].token == '(')
+                definitions += {tokens[identifier_idx].a, tokens[identifier_idx].b};
             }
           }
         }
