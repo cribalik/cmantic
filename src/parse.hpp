@@ -1301,7 +1301,7 @@ static ParseResult go_parse(const Array<StringBuffer> lines) {
               if (tokens[i].str == ")") --depth;
               if (depth == 0) break;
             }
-            if (i+1 < tokens.size && tokens[i+1].token == TOKEN_IDENTIFIER) {
+            if (i+2 < tokens.size && tokens[i+1].token == TOKEN_IDENTIFIER && tokens[i+2].str == "(") {
               definitions += tokens[i+1].r;
               break;
             }

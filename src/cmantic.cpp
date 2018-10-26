@@ -10,7 +10,6 @@
 
  * get rid of some modes now that we have proper prompts (MODE_DELETE for example)
 
- * support go inline functions (it classifies the return type as function name)
  * visual jump to line
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
