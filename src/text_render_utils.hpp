@@ -26,6 +26,7 @@ struct TextCanvas {
   void render_str(Pos p, const Color *text_color, const Color *background_color, int xclip0, int xclip1, Slice s);
   void render_char(Pos p, Color text_color, const Color *background_color, char c);
   void fill(Color text, Color background);
+  void fill(Rect r, Color background_color, Color text_color);
   void fill_background(Rect r, Color c);
   void fill_background(Range r, Color c);
   void fill_textcolor(Rect r, Color c);
@@ -287,6 +288,14 @@ void TextCanvas::fill_background(Rect r, Color c) {
   for (int y = a.y0; y < a.y1; ++y)
   for (int x = a.x0; x < a.x1; ++x)
     background_colors[y*this->w + x] = c;
+}
+
+void TextCanvas::fill(Rect r, Color background_color, Color text_color) {
+  Area a = _normalize_rect(r);
+  for (int y = a.y0; y < a.y1; ++y)
+  for (int x = a.x0; x < a.x1; ++x)
+    background_colors[y*this->w + x] = background_color,
+    text_colors[y*this->w + x] = text_color;
 }
 
 void TextCanvas::render_char(Pos p, Color text_color, const Color *background_color, char c) {

@@ -604,13 +604,13 @@ void Pane::render_edit() {
     // draw visual start marker
     if (G.visual_start.buffer == buffer.data)
       for (Pos pos : G.visual_start.cursors)
-        canvas.fill_background(Rect{d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color);
+        canvas.fill(Rect{d.to_visual_pos(pos), {1, 1}}, G.default_marker_background_color.color, *background_color);
 
     // draw marker
     for (Cursor c : b.cursors) {
       if (G.selected_pane == this)
         // canvas.fill_background(Rect{buf2char(pos), {1, 1}}, from_hsl(fmodf(i*360.0f/b.markers.size, 360.0f), 0.7f, 0.7f));
-        canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color);
+        canvas.fill(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.default_marker_background_color.color, *background_color);
       else if (G.bottom_pane != this)
         canvas.fill_background(Rect{d.to_visual_pos(c.pos), {1, 1}}, G.color_scheme.marker_inactive);
     }
