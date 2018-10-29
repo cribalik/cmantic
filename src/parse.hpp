@@ -256,6 +256,8 @@ static Keyword csharp_keywords[] = {
   {"get", KEYWORD_SPECIFIER},
   {"set", KEYWORD_SPECIFIER},
   {"partial", KEYWORD_SPECIFIER},
+  {"out", KEYWORD_SPECIFIER},
+  {"ref", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -298,6 +300,10 @@ static Keyword csharp_keywords[] = {
   {"yield", KEYWORD_CONTROL},
   {"foreach", KEYWORD_CONTROL},
   {"default", KEYWORD_CONTROL},
+  {"try", KEYWORD_CONTROL},
+  {"catch", KEYWORD_CONTROL},
+  {"finally", KEYWORD_CONTROL},
+  {"with", KEYWORD_CONTROL},
 };
 
 static Keyword python_keywords[] = {
@@ -906,12 +912,12 @@ static bool parse_string(Slice line, int &x, TokenInfo &t) {
 }
 
 static bool parse_multiline_string(Slice line, Array<StringBuffer> lines, int &x, int &y, TokenInfo &t, const char *quote) {
-  int quote_len = strlen(quote);
+  Slice q = Slice::create(quote);
   char c = line[x];
-  if (!line.begins_with(x, quote))
+  if (!line.begins_with(x, q))
     return false;
 
-  NEXT_CHAR(quote_len);
+  NEXT_CHAR(q.length);
   // goto matching end block
   for (;;) {
     // EOF
@@ -927,8 +933,8 @@ static bool parse_multiline_string(Slice line, Array<StringBuffer> lines, int &x
       continue;
     }
     // End block
-    if (line.begins_with(x, quote)) {
-      NEXT_CHAR(quote_len);
+    if (line.begins_with(x, q)) {
+      NEXT_CHAR(q.length);
       break;
     }
     NEXT_CHAR(1);
@@ -1559,11 +1565,13 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
       t.token = TOKEN_STRING;
       NEXT_CHAR(2);
       TokenInfo iden = {};
-      if (!parse_identifier(line, x, iden))
+      int x0 = x;
+      if (!parse_identifier(line, x, iden)) {
+        log_warn("Failed to parse identifier on {}\n", (Slice)line(x,-1));
         continue;
-      log_warn("Identifier is {}\n", (Slice)iden.str);
-      String end_of_string = String::createf("){}\"", (Slice)iden.str);
-      log_warn("Looking for {}\n", end_of_string.slice);
+      }
+      Slice identifier = line(x0, x);
+      String end_of_string = String::createf("){}\"", identifier);
       while (!line.find(x, end_of_string.slice, &x)) {
         ++y;
         if (y == lines.size)
@@ -1571,6 +1579,7 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
         line = lines[y].slice;
         x = 0;
       }
+      NEXT_CHAR(end_of_string.length);
       raw_string_done:;
       util_free(end_of_string);
       goto token_done;
@@ -1707,12 +1716,34 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
           }
         }
 
-        // if preprocessor command, jump to next line
+        // handle preprocessor command
         token_def_done:
         if (ti.token == TOKEN_IDENTIFIER && ti.str[0] == '#') {
-          int prev_y = ti.a.y;
-          while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
-            ++i;
+          // parse #if 0-style comment
+          if (i+1 < tokens.size && tokens[i].str == "#if" && (tokens[i+1].str == "0" || tokens[i+1].str == "false")) {
+            i += 2;
+            int i0 = i;
+            int depth = 1;
+            for (; i < tokens.size && depth; ++i) {
+              if (tokens[i].str.begins_with("#if"))
+                ++depth;
+              else if (tokens[i].str == "#endif")
+                --depth;
+            }
+            int i1 = i-1;
+            if (i1 > i0) {
+              TokenInfo t = {TOKEN_BLOCK_COMMENT, tokens[i0].a, tokens[i1].b};
+              tokens.replace(i0, i1-i0, &t, 1);
+            }
+          }
+          // skip parsing preprocessor commands for now
+          // TODO: check for \ at end of line
+          // Maybe we should do this in the tokenizer instead?
+          else {
+            int prev_y = ti.a.y;
+            while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
+              ++i;
+          }
         }
         break;}
       default:
@@ -1901,9 +1932,31 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
         // if preprocessor command, jump to next line
         token_def_done:
         if (ti.token == TOKEN_IDENTIFIER && ti.str[0] == '#') {
-          int prev_y = ti.a.y;
-          while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
-            ++i;
+          // parse #if 0-style comment
+          if (i+1 < tokens.size && tokens[i].str == "#if" && (tokens[i+1].str == "0" || tokens[i+1].str == "false")) {
+            i += 2;
+            int i0 = i;
+            int depth = 1;
+            for (; i < tokens.size && depth; ++i) {
+              if (tokens[i].str.begins_with("#if"))
+                ++depth;
+              else if (tokens[i].str == "#endif")
+                --depth;
+            }
+            int i1 = i-1;
+            if (i1 > i0) {
+              TokenInfo t = {TOKEN_BLOCK_COMMENT, tokens[i0].a, tokens[i1].b};
+              tokens.replace(i0, i1-i0, &t, 1);
+            }
+          }
+          // skip parsing preprocessor commands for now
+          // TODO: check for \ at end of line
+          // Maybe we should do this in the tokenizer instead?
+          else {
+            int prev_y = ti.a.y;
+            while (i+1 < tokens.size && tokens[i+1].a.y == prev_y)
+              ++i;
+          }
         }
         break;}
       default:

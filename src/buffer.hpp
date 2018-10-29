@@ -428,14 +428,18 @@ void swap_range(BufferData &buffer, Pos &a, Pos &b) {
   buffer.advance(a);
 }
 
+static void clamp_cursor(Pos &p, Pos, Pos);
+static void clamp_cursor(Cursor &c, Pos a, Pos b);
+
 #define UPDATE_CURSORS(name, move_function) \
 static void name(BufferData *buffer, Pos a, Pos b) { \
   if (buffer == &G.status_message_buffer) { \
-    move_function(G.status_message_pane.buffer.cursors[0].pos, a, b); \
+    move_function(G.status_message_pane.buffer.cursors[0], a, b); \
     return; \
   } \
+  \
   if (buffer == &G.menu_buffer) { \
-    move_function(G.menu_pane.buffer.cursors[0].pos, a, b); \
+    move_function(G.menu_pane.buffer.cursors[0], a, b); \
     return; \
   } \
   \
@@ -468,6 +472,7 @@ static void name(BufferData *buffer, Pos a, Pos b) { \
 
 UPDATE_CURSORS(move_cursors_on_insert, move_on_insert)
 UPDATE_CURSORS(move_cursors_on_delete, move_on_delete)
+UPDATE_CURSORS(clamp_cursors, clamp_cursor)
 
 TokenInfo* BufferData::find_start_of_identifier(Pos pos) {
   advance_r(pos);
@@ -1771,6 +1776,16 @@ String BufferData::get_merged_range(Range r) const {
   return result;
 }
 
+static BufferData *_clamp_cursor_current_buffer;
+static void clamp_cursor(Pos &p, Pos, Pos) {
+  p.y = clamp(p.y, 0, _clamp_cursor_current_buffer->lines.size-1);
+  p.x = clamp(p.x, 0, _clamp_cursor_current_buffer->lines[p.y].length);
+}
+static void clamp_cursor(Cursor &c, Pos a, Pos b) {
+  clamp_cursor(c.pos, a, b);
+  c.ghost_x = c.x;
+}
+
 bool BufferData::reload(BufferData *b) {
   if (!b->filename.chars)
     return false;
@@ -1778,6 +1793,10 @@ bool BufferData::reload(BufferData *b) {
   util_free(*b);
   bool succ = BufferData::from_file(filename.slice, b);
   util_free(filename);
+
+  _clamp_cursor_current_buffer = b;
+  clamp_cursors(b, {}, {});
+
   return succ;
 }
 

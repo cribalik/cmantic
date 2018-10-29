@@ -367,6 +367,8 @@ struct Utf8Iter {
   bool find_r(int offset, char c, int *result) const; \
   Slice token(int *offset, char c) const; \
   Slice token(int *offset, const char *c) const; \
+  bool begins_with(Slice s) const; \
+  bool begins_with(const char *str) const; \
   bool begins_with(int offset, String s) const; \
   bool begins_with(int offset, Slice s) const; \
   bool begins_with(int offset, StringBuffer s) const; \
@@ -405,6 +407,8 @@ struct Slice {
   static bool find(const char *chars, int length, char c, int *result);
   static bool find_r(const char *chars, int length, Slice &s, int *result);
   static bool find_r(const char *chars, int length, char c, int *result);
+  static bool begins_with(const char *chars, int length, Slice &s);
+  static bool begins_with(const char *chars, int length, const char *str);
   static bool begins_with(const char *chars, int length, int offset, Slice &s);
   static bool begins_with(const char *chars, int length, int offset, const char *str, int n);
   static bool begins_with(const char *chars, int length, int offset, const char *str);
@@ -789,6 +793,14 @@ union Array {
     memmove(items+i+n, items+i, (size-i-n)*sizeof(T));
   }
 
+  void replace(int i, int num_to_replace, const T *t, int n) {
+    if (num_to_replace > n)
+      remove_slow(i, num_to_replace - n);
+    else if (n > num_to_replace)
+      insertn(i, n - num_to_replace);
+    memcpy(items + i, t, n * sizeof(T));
+  }
+
   void push() {
     pushn(1);
     items[size-1] = T();
@@ -1161,6 +1173,8 @@ static const void *memmem(const void *needle, int needle_len, const void *haysta
   bool classname::find_r(int offset, char c, int *result) const {return Slice::find_r(chars, offset, c, result);} \
   Slice classname::token(int *offset, char c) const {return Slice::token(chars, length, offset, c);} \
   Slice classname::token(int *offset, const char *c) const {return Slice::token(chars, length, offset, c);} \
+  bool classname::begins_with(Slice s) const {return Slice::begins_with(chars, length, TO_STR(s));} \
+  bool classname::begins_with(const char *str) const {return Slice::begins_with(chars, length, str);} \
   bool classname::begins_with(int offset, String s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, Slice s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
   bool classname::begins_with(int offset, StringBuffer s) const {return Slice::begins_with(chars, length, offset, TO_STR(s));} \
@@ -1417,6 +1431,15 @@ bool Slice::find_r(const char *chars, int length, char c, int *result) {
       return true;
     }
   return false;
+}
+
+bool Slice::begins_with(const char *chars, int length, Slice &s) {
+  return length >= s.length && !memcmp(s.chars, chars, s.length);
+}
+
+bool Slice::begins_with(const char *chars, int length, const char *str) {
+  int n = strlen(str);
+  return length >= n && !memcmp(str, chars, n);
 }
 
 bool Slice::begins_with(const char *chars, int length, int offset, Slice &s) {
