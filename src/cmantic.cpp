@@ -146,6 +146,9 @@ enum Mode {
 struct State {
   /* @renderer rendering state */
   SDL_Window *window;
+  bool debug_mode;
+  float dt; // this will be clamped so it's not too large
+  float real_dt; // this is the real dt (not clamped)
   int font_width;
   int font_height;
   int line_margin;
@@ -274,8 +277,8 @@ static void handle_pending_removes();
 static void handle_input(Key key);
 
 #ifdef OS_WINDOWS
-// int wmain(int, const wchar_t *[], wchar_t *[])
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+int wmain(int, const wchar_t *[], wchar_t *[])
+// int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 int main(int, const char *[])
 #endif
@@ -291,7 +294,8 @@ int main(int, const char *[])
   for (uint loop_idx = 0;; ++loop_idx) {
 
     static u32 ticks = SDL_GetTicks();
-    const float dt = clamp((float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 0.3f, 3.0f);
+    G.real_dt = (float)(SDL_GetTicks() - ticks) / 1000.0f * 60.0f, 
+    G.dt = at_most(G.real_dt, 3.0f);
     ticks = SDL_GetTicks();
 
     Key key = get_input(&window_active);
@@ -308,7 +312,7 @@ int main(int, const char *[])
     #endif
 
     TIMING_BEGIN(TIMING_UPDATE);
-    do_update(dt);
+    do_update(G.dt);
     TIMING_END(TIMING_UPDATE);
 
     TIMING_BEGIN(TIMING_RENDER);
@@ -316,6 +320,14 @@ int main(int, const char *[])
     TIMING_END(TIMING_RENDER);
 
     // do_pet_update_and_draw(dt);
+    if (G.debug_mode) {
+      static String last_fps;
+      if (loop_idx % 100 == 0) {
+        util_free(last_fps);
+        last_fps = String::createf("fps: %f", 60.0f/G.real_dt);
+      }
+      push_text(last_fps.chars, G.win_width - 100, G.win_height - 5, true, COLOR_WHITE, 20);
+    }
 
     render_quads();
     render_textured_quads(G.pet_texture);
@@ -323,7 +335,9 @@ int main(int, const char *[])
 
     handle_pending_removes();
 
+    glFinish();
     SDL_GL_SwapWindow(G.window);
+    glFinish();
 
     G.flags.cursor_dirty = false;
 
@@ -2797,9 +2811,7 @@ static void handle_input(Key key) {
       break;
 
     case '?':
-      // buffer.data->print_undo_actions();
-      // log_info("%i %i\n", buffer.data->_next_undo_action, buffer.data->_last_save_undo_action);
-      log_info("%f %f\n", G.editing_pane->width_weight, G.editing_pane->height_weight);
+      G.debug_mode = !G.debug_mode;
       break;
 
     case 'x':

@@ -435,7 +435,11 @@ static int graphics_init(SDL_Window **window) {
   }
   gl_ok_or_die;
 
-  SDL_GL_SetSwapInterval(1);
+  // try adaptive vsync, otherwise standard vsync
+  if (SDL_GL_SetSwapInterval(-1) == -1) {
+    fprintf(stderr, "Setting adaptive vsync failed - falling back to standard vsync\n");
+    SDL_GL_SetSwapInterval(1);
+  }
 
   // load gl functions
   *(void**) (&glEnableVertexAttribArray) = (void*)SDL_GL_GetProcAddress("glEnableVertexAttribArray");

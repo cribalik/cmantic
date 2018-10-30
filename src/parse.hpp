@@ -512,6 +512,8 @@ static Keyword go_keywords[] = {
   {"complex64",  KEYWORD_TYPE},
   {"complex128", KEYWORD_TYPE},
   {"error",      KEYWORD_TYPE},
+  {"string",     KEYWORD_TYPE},
+  {"bool",       KEYWORD_TYPE},
 
   // specifiers
 
@@ -569,6 +571,8 @@ static Keyword go_keywords[] = {
   {"except",   KEYWORD_CONTROL},
   {"end",      KEYWORD_CONTROL},
   {"elseif",   KEYWORD_CONTROL},
+  {"fallthrough", KEYWORD_CONTROL},
+  {"range", KEYWORD_CONTROL},
 };
 
 static Keyword bash_keywords[] = {
@@ -1234,10 +1238,37 @@ static ParseResult go_parse(const Array<StringBuffer> lines) {
     }
 
     // line comment
-    // line comment
     if (line.begins_with(x, "//")) {
       t.token = TOKEN_LINE_COMMENT;
       x = line.length;
+      goto token_done;
+    }
+
+    // block comment
+    if (line.begins_with(x, "/*")) {
+      t.token = TOKEN_BLOCK_COMMENT;
+      NEXT_CHAR(2);
+      // goto matching end block
+      for (;;) {
+        // EOF
+        if (y >= lines.size)
+          goto token_done;
+        // EOL
+        if (x >= line.length) {
+          ++y;
+          if (y == lines.size)
+            break;
+          line = lines[y].slice;
+          x = 0;
+          continue;
+        }
+        // End block
+        if (line.begins_with(x, "*/")) {
+          NEXT_CHAR(2);
+          break;
+        }
+        NEXT_CHAR(1);
+      }
       goto token_done;
     }
 
