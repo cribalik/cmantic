@@ -1523,39 +1523,52 @@ bool BufferData::find(Slice s, bool stay, Pos *p) {
 }
 
 bool BufferView::find_and_move_r(char c, bool stay) {
-  collapse_cursors();
-  Pos p = cursors[0].pos;
-  if (!data->find_r(c, stay, &p))
-    return false;
-  move_to(p);
-  return true;
+  bool success = false;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos p = cursors[i].pos;
+    if (!data->find_r(c, stay, &p))
+      continue;
+    success = true;
+    move_to(i, p);
+  }
+  return success;
 }
 
 bool BufferView::find_and_move_r(Slice s, bool stay) {
-  collapse_cursors();
-  Pos p = cursors[0].pos;
-  if (!data->find_r(s, stay, &p))
-    return false;
-  move_to(p);
-  return true;
+  bool success = false;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos p = cursors[i].pos;
+    if (!data->find_r(s, stay, &p))
+      continue;
+    success = true;
+    move_to(i, p);
+  }
+  return success;
 }
 
+// returns success if at least one cursor jumps
 bool BufferView::find_and_move(char c, bool stay) {
-  collapse_cursors();
-  Pos p = cursors[0].pos;
-  if (!data->find(c, stay, &p))
-    return false;
-  move_to(p);
-  return true;
+  bool success = false;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos p = cursors[i].pos;
+    if (!data->find(c, stay, &p))
+      continue;
+    success = true;
+    move_to(i, p);
+  }
+  return success;
 }
 
 bool BufferView::find_and_move(Slice s, bool stay) {
-  collapse_cursors();
-  Pos p = cursors[0].pos;
-  if (!data->find(s, stay, &p))
-    return false;
-  move_to(p);
-  return true;
+  bool success = false;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos p = cursors[i].pos;
+    if (!data->find(s, stay, &p))
+      continue;
+    success = true;
+    move_to(i, p);
+  }
+  return success;
 }
 
 void BufferView::remove_trailing_whitespace() {

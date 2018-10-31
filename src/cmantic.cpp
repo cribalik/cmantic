@@ -7,6 +7,7 @@
  * C#: parse templated method
  * Multiline dw
  * Action area 'w' should only apply to current identifier range (not whitespace after it)
+ * Paste line puts line below
 
  * get rid of some modes now that we have proper prompts (MODE_DELETE for example)
 
@@ -277,8 +278,8 @@ static void handle_pending_removes();
 static void handle_input(Key key);
 
 #ifdef OS_WINDOWS
-int wmain(int, const wchar_t *[], wchar_t *[])
-// int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+// int wmain(int, const wchar_t *[], wchar_t *[])
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 int main(int, const char *[])
 #endif
@@ -911,8 +912,6 @@ static Array<String> get_search_suggestions() {
 
 static void mode_search() {
   mode_cleanup();
-
-  G.editing_pane->buffer.collapse_cursors();
 
   G.mode = MODE_SEARCH;
   G.bottom_pane_color.reset();
@@ -2645,6 +2644,7 @@ static void handle_input(Key key) {
     break;
 
   case MODE_SEARCH: {
+    // RETURN: accept autocomplete
     if (key == KEY_RETURN) {
       Slice *opt = G.menu_pane.menu_get_selection();
       if (opt) {
@@ -2652,6 +2652,8 @@ static void handle_input(Key key) {
         G.search_term = String::create(*opt);
       }
     }
+
+    // RETURN/ESCAPE: perform search
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
       if (!G.menu_buffer.lines[0].length) {
         util_free(G.search_term);
@@ -2661,7 +2663,7 @@ static void handle_input(Key key) {
         buffer.jumplist_push();
         G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
         if (G.search_failed) {
-          buffer.move_to(G.search_begin_pos);
+          // buffer.move_to(G.search_begin_pos);
           status_message_set("'{}' not found", (Slice)G.search_term.slice);
           mode_normal();
         }
@@ -2671,6 +2673,7 @@ static void handle_input(Key key) {
         }
       }
     }
+    // insert
     else {
       G.search_term_background_color.reset();
       handle_menu_insert(key);
