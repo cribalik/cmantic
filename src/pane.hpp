@@ -498,7 +498,7 @@ void Pane::render_edit() {
 
   // TODO: cleanup. this is super hacky, since we change the bounds, and then call numchars_x which depends on bounds
   Rect orig_bounds = bounds;
-  const int header_height = 25;
+  const int header_height = 20;
   bounds.y += header_height;
   bounds.h -= header_height;
 

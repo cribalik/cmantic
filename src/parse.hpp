@@ -1706,7 +1706,8 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
 
         if (i+2 < tokens.size &&
             (ti.str == "struct" || ti.str == "enum" || ti.str == "class" || ti.str == "union" || ti.str == "namespace") &&
-            tokens[i+1].token == TOKEN_IDENTIFIER) {
+            tokens[i+1].token == TOKEN_IDENTIFIER &&
+            (tokens[i+2].str == "{" || tokens[i+2].str == ":")) {
           definitions += tokens[i+1].r;
           goto token_def_done;
         }
