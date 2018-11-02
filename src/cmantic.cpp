@@ -1959,14 +1959,6 @@ static void menu_option_show_tab_type() {
     status_message_set("Tabs is %i spaces", G.editing_pane->buffer.data->tab_type);
 }
 
-static void menu_option_print_definitions() {
-  BufferData &b = *G.editing_pane->buffer.data;
-  for (Range r : b.parser.definitions) {
-    Slice s = b.getslice(r);
-    printf("%.*s\n", s.length, s.chars);
-  }
-}
-
 static void menu_option_chdir() {
   mode_cwd();
 }
@@ -2154,14 +2146,9 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     menu_option_save
   },
   {
-    Slice::create("show tab type"),
+    Slice::create("show indentation"),
     Slice::create("Show if tab type is spaces or tab"),
     menu_option_show_tab_type
-  },
-  {
-    Slice::create("show definitions"),
-    Slice::create("Show all definitions in current buffer"),
-    menu_option_print_definitions
   },
   {
     Slice::create("change directory"),
