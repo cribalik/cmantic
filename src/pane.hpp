@@ -111,8 +111,7 @@ struct Pane {
   void render_as_dropdown();
   void render_goto_definition();
   void render_menu();
-  void render_single_line();
-  void render_menu_popup();
+  void render_single_line(int font_size);
   void render_syntax_highlight(TextCanvas &canvas, int y1);
   int calc_top_visible_row() const;
   int calc_left_visible_column() const;
@@ -138,7 +137,7 @@ struct Pane {
   int slot2pixely(int y) const;
   Pos slot2global(Pos p) const;
   Pos buf2char(Pos p) const;
-  Pos buf2pixel(Pos p) const;
+  Pos buf2pixel(Pos p, int font_width, int line_height) const;
 
   static void init_edit(Pane &p, BufferData *b, Color *background_color, Color *text_color, Color *active_highlight_background_color, Color *line_highlight_inactive, bool is_dynamic);
 };
@@ -183,7 +182,7 @@ void Pane::render_as_dropdown() {
 
   TextCanvas canvas;
   int y_max = this->numchars_y();
-  canvas.init(this->numchars_x(), this->numchars_y());
+  canvas.init(this->numchars_x(), this->numchars_y(), G.font_height, G.line_margin);
   canvas.background = *this->background_color;
   canvas.fill(Utf8char{' '});
   canvas.fill(*this->text_color, *this->background_color);
@@ -344,7 +343,7 @@ void Pane::render() {
       render_menu();
       break;
     case PANETYPE_STATUSMESSAGE:
-      render_single_line();
+      render_single_line(G.font_height);
       break;
     case PANETYPE_DROPDOWN:
       render_as_dropdown();
@@ -366,14 +365,14 @@ void Pane::update_suggestions() {
   menu.current_suggestion = 0;
 }
 
-void Pane::render_single_line() {
+void Pane::render_single_line(int font_size) {
   BufferView &b = buffer;
   // TODO: scrolling in x
   Pos buf_offset = {menu.prefix.length+2, 0};
 
   // render the editing line
   TextCanvas canvas;
-  canvas.init(this->numchars_x(), 1);
+  canvas.init(this->numchars_x(), 1, font_size, G.line_margin);
   canvas.fill(*this->text_color, *this->background_color);
   canvas.background = *this->background_color;
   canvas.margin = this->margin;
@@ -395,7 +394,48 @@ void Pane::render_single_line() {
   util_free(canvas);
 }
 
-void Pane::render_menu_popup() {
+void Pane::render_menu() {
+  const int font_height = 14;
+  margin = 8;
+  const int line_height = font_height + margin;
+  const int font_width = graphics_get_font_advance(font_height);
+  int num_lines = at_most(menu.suggestions.size, (G.win_height - 10)/line_height) + 1;
+  int width = clamp((int)(G.win_width*0.8), 5, font_width * 120);
+  const int num_chars = (width - 2*margin)/font_width;
+  if (num_chars < 0)
+    return;
+  int height = num_lines*line_height + margin;
+  int x = G.win_width/2 - width/2;
+  int y = G.win_height * 0.1f;
+
+  // draw background
+  push_square_quad(Rect{x, y, width, height}, *background_color);
+  render_shadow_bottom_right(x, y, width, height, 5);
+  y += margin;
+  x += margin;
+  width -= 2*margin;
+  height -= 2*margin;
+
+  // render menu prefix
+  int _x = x;
+  String prefix = String::createf("{}: ", (Slice)menu.prefix);
+  int n = min(prefix.length, num_chars);
+  push_textn(prefix.chars, n, _x, y + font_height, false, G.color_scheme.gutter_text, font_height);
+  _x += n * font_width;
+  util_free(prefix);
+
+  // render input line
+  n = min(buffer.data->lines[0].length, num_chars - _x/font_width);
+  push_textn(buffer.data->lines[0].chars, n, _x, y + font_height, false, *text_color, font_height);
+  _x += n * font_width;
+
+  // render marker
+  push_square_quad(Rect{_x, y, font_width, font_height}, G.marker_background_color.color);
+  height -= line_height;
+  --num_lines;
+  y += line_height;
+
+  // render popup
   if (menu.is_verbose) {
     if (!menu.verbose_suggestions.size)
       return;
@@ -405,40 +445,24 @@ void Pane::render_menu_popup() {
     if (!menu.suggestions.size)
       return;
 
-    // resize dropdown pane
-    int width = ARRAY_MAXVAL_BY(menu.suggestions, length);
-    int height = at_most(menu.suggestions.size, pixel2chary(G.win_height) - 10);
-    if (height <= 0)
-      return;
+    // draw highlighted line
+    push_square_quad(Rect{x - margin/2, y + menu.current_suggestion*line_height - margin/2, width + margin, line_height}, *active_highlight_background_color);
 
-    TextCanvas canvas;
-    canvas.init(width, height);
-    canvas.fill(*text_color, *background_color);
-    canvas.background = *background_color;
-    canvas.margin = margin;
+    // draw text
+    y += font_height;
+    for (int i = 0, n = at_most(menu.suggestions.size, num_lines); i < n; ++i) {
+      push_textn(menu.suggestions[i].chars, min(menu.suggestions[i].length, num_chars), x, y, false, *text_color, font_height);
+      // draw hairline
+      // if (i < n-1)
+        // push_square_quad(Rect{x, y, width, 1}, blend(*background_color, COLOR_WHITE, 0.1));
 
-    // position this pane
-    Pos p = bounds.p;
-    p.y -= char2pixely(height) + margin;
+      y += line_height;
+    }
 
-    for (int i = 0; i < at_most(menu.suggestions.size, height); ++i)
-      canvas.render_str({0, i}, text_color, NULL, 0, -1, menu.suggestions[i].slice);
-
-    // highlight
-    canvas.fill_background(Rect{0, menu.current_suggestion, {-1, 1}}, *active_highlight_background_color);
-
-    canvas.render(p);
-    util_free(canvas);
   }
-
 
   render_quads();
   render_text();
-}
-
-void Pane::render_menu() {
-  render_single_line();
-  render_menu_popup();
 }
 
 static void render_dropdown(Pane *pane) {
@@ -474,11 +498,11 @@ static void render_dropdown(Pane *pane) {
   // resize dropdown pane
   int max_width = ARRAY_MAXVAL_BY(G.dropdown_buffer.lines, length);
 
-  G.dropdown_pane.bounds.size = char2pixel(max_width, G.dropdown_buffer.lines.size-1) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
+  G.dropdown_pane.bounds.size = char2pixel(max_width, G.dropdown_buffer.lines.size-1, G.font_width, G.line_height) + Pos{G.dropdown_pane.margin*2, G.dropdown_pane.margin*2};
   G.dropdown_pane.bounds.h = at_most(G.dropdown_pane.bounds.h, G.win_height - 10*G.line_height);
 
   // position pane
-  Pos p = pane->buf2pixel(identifier_start);
+  Pos p = pane->buf2pixel(identifier_start, G.font_width, G.line_height);
   p.y += G.line_height;
   G.dropdown_pane.bounds.p = p;
 
@@ -516,7 +540,7 @@ void Pane::render_edit() {
   this->_gutter_width = at_least(calc_num_chars(buf_y1) + 3, 6);
   if (_gutter_width && numchars_y()) {
     TextCanvas gutter;
-    gutter.init(_gutter_width, numchars_y());
+    gutter.init(_gutter_width, numchars_y(), G.font_height, G.line_margin);
     gutter.background = *background_color;
     for (int y = 0, line = buf_offset.y; line < buf_y1; ++y, ++line)
       if (line < d.lines.size)
@@ -538,7 +562,7 @@ void Pane::render_edit() {
   TIMING_BEGIN(TIMING_PANE_BUFFER);
   if (buffer_viewport.w > 0 && numchars_y() > 0) {
     TextCanvas canvas;
-    canvas.init(buffer_viewport.w, numchars_y());
+    canvas.init(buffer_viewport.w, numchars_y(), G.font_height, G.line_margin);
     canvas.fill(*text_color, *background_color);
     canvas.background = *background_color;
     canvas.margin = margin;
@@ -632,7 +656,7 @@ void Pane::render_edit() {
   // render filename
   const Slice filename = d.name();
   const int header_text_size = header_height - 6;
-  push_text(filename.chars, bounds.x + G.font_width, bounds.y + get_text_offset_y(header_text_size) - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
+  push_text(filename.chars, bounds.x + G.font_width, bounds.y - 3, false, d.modified() ? COLOR_ORANGE : COLOR_WHITE, header_text_size);
   push_square_quad({bounds.p, {bounds.w, -header_height}}, G.color_scheme.menu_background);
 
   // shadow
@@ -671,11 +695,11 @@ void Pane::render_edit() {
   bounds.h += header_height;
 }
 
-Pos Pane::buf2pixel(Pos p) const {
+Pos Pane::buf2pixel(Pos p, int font_width, int line_height) const {
   p = buffer.data->to_visual_pos(p);
   p.x -= this->calc_left_visible_column();
   p.y -= this->calc_top_visible_row();
-  p = char2pixel(p) + this->bounds.p;
+  p = char2pixel(p, font_width, line_height) + this->bounds.p;
   p.x += this->_gutter_width * G.font_width;
   return p;
 }

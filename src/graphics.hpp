@@ -170,11 +170,10 @@ struct RotatingColor {
 
 static int graphics_text_init(const char *ttf_file, int default_font_size);
 static void render_textatlas(int x, int y, int w, int h);
-static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color, int font_size = 0);
+static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color);
 static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color, int font_size = 0);
 static void push_textf(int pos_x, int pos_y, bool center, Color color, const char *fmt, ...);
 static void render_text();
-static int get_text_offset_y(int font_height);
 
 /**************
  *    QUAD    *
@@ -367,13 +366,11 @@ static struct GraphicsTextState {
   GLuint shader;
 } graphics_text_state;
 
-static void graphics_set_font_options(const char *font_file = 0, int font_size = 0) {
+static void graphics_set_font_options(const char *font_file = 0) {
   if (font_file) {
     util_free(graphics_text_state.font_file);
     graphics_text_state.font_file = String::create(font_file);
   }
-  if (font_size)
-    graphics_text_state.font_size = font_size;
 }
 
 // only makes sense for mono fonts
@@ -717,7 +714,7 @@ static int graphics_text_init(const char *ttf_file, int default_font_size) {
   // gl_ok_or_die;
   glActiveTexture(GL_TEXTURE0);
 
-  graphics_set_font_options(ttf_file, default_font_size);
+  graphics_set_font_options(ttf_file);
   return 0;
 }
 
@@ -761,8 +758,6 @@ static void render_textatlas(int x, int y, int w, int h, int font_size) {
 
 static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color, int font_size) {
   assert(graphics_text_state.initialized);
-  if (!font_size)
-    font_size = graphics_text_state.font_size;
 
   GraphicsTextState::FontData *font_data;
   if (!get_or_create_fontdata(graphics_text_state.font_file.slice, font_size, &font_data))
@@ -770,8 +765,6 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
 
   if (!str)
     return;
-
-  // allocate new memory if needed
 
   if (center) {
     // calc string width
@@ -781,6 +774,8 @@ static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center
     pos_x -= (int)(strw / 2.0f);
     /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
   }
+
+  pos_y += (int)(-font_size*3.3f/15.0f); // TODO: get this from truetype?
 
   for (int i = 0; i < n; ++i) {
     // assert(str[i] >= GraphicsTextState::FIRST_CHAR && str[i] <= GraphicsTextState::LAST_CHAR);
@@ -861,10 +856,6 @@ static void render_text() {
   // clear
   gl_ok_or_die;
   TIMING_END(TIMING_PANE_PUSH_TEXT_QUADS);
-}
-
-static int get_text_offset_y(int font_height) {
-  return (int)(-font_height*3.3f/15.0f); // TODO: get this from truetype?
 }
 
 static GLuint graphics_compile_shader_from_file(const char* vertex_filename, const char* fragment_filename) {

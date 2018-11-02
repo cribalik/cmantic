@@ -1735,7 +1735,15 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
             if (j+1 < tokens.size &&
                 tokens[j].token == TOKEN_IDENTIFIER &&
                 tokens[j+1].token == '(') {
-              definitions += {tokens[j].a, tokens[j].b};
+              // walk through param list, and check that it is followed by a '{'
+              int depth = 1;
+              int k = j+2;
+              for (; k < tokens.size && depth; ++k) {
+                if (tokens[k].token == '(') ++depth;
+                if (tokens[k].token == ')') --depth;
+              }
+              if (depth == 0 && k < tokens.size && tokens[k].token == '{')
+                definitions += {tokens[j].a, tokens[j].b};
             }
             else if (j+3 < tokens.size &&
                      tokens[j].token == TOKEN_IDENTIFIER &&

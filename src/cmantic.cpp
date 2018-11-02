@@ -327,7 +327,7 @@ int main(int, const char *[])
         util_free(last_fps);
         last_fps = String::createf("fps: %f", 60.0f/G.real_dt);
       }
-      push_text(last_fps.chars, G.win_width - 100, G.win_height - 5, true, COLOR_WHITE, 20);
+      push_text(last_fps.chars, G.win_width - 100, G.win_height, true, COLOR_WHITE, 20);
     }
 
     render_quads();
@@ -914,12 +914,10 @@ static void mode_search() {
   mode_cleanup();
 
   G.mode = MODE_SEARCH;
-  G.bottom_pane_color.reset();
   G.selected_pane = &G.menu_pane;
   G.search_begin_pos = G.editing_pane->buffer.cursors[0].pos;
   G.search_failed = 0;
 
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(Slice::create("search"), get_search_suggestions);
 
   G.menu_pane.buffer.empty();
@@ -989,7 +987,6 @@ static void mode_cwd() {
   G.mode = MODE_CWD;
 
   G.selected_pane = &G.menu_pane;
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(Slice::create("chdir"), get_cwd_suggestions);
   G.menu_pane.buffer.insert(G.current_working_directory.string.slice);
   G.menu_pane.buffer.insert(Utf8char::create(Path::separator));
@@ -1008,7 +1005,6 @@ static void mode_prompt(Slice msg, void (*callback)(void), PromptType type) {
   G.prompt_result = {};
 
   G.selected_pane = &G.menu_pane;
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(msg);
 }
 
@@ -1069,7 +1065,6 @@ static void mode_goto_all_definitions() {
   G.editing_pane->buffer.collapse_cursors();
   G.goto_definition_begin_pos = G.editing_pane->buffer.cursors[0].pos;
 
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(Slice::create("goto def"), get_goto_all_definitions_suggestions);
   G.menu_pane.update_suggestions();
   if (G.definition_positions.size)
@@ -1084,7 +1079,6 @@ static void mode_goto_definition() {
   G.editing_pane->buffer.collapse_cursors();
   G.goto_definition_begin_pos = G.editing_pane->buffer.cursors[0].pos;
 
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(Slice::create("goto def"), get_goto_definition_suggestions);
   G.menu_pane.update_suggestions();
   if (G.definition_positions.size)
@@ -1112,9 +1106,7 @@ static Array<String> get_filesearch_suggestions() {
 static void mode_filesearch() {
   mode_cleanup();
   G.mode = MODE_FILESEARCH;
-  G.bottom_pane_color.reset();
   G.selected_pane = &G.menu_pane;
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(Slice::create("open"), get_filesearch_suggestions);
   G.menu_pane.update_suggestions();
 }
@@ -1177,8 +1169,6 @@ static void mode_menu() {
   mode_cleanup();
   G.mode = MODE_MENU;
   G.selected_pane = &G.menu_pane;
-  G.bottom_pane_color.reset();
-  G.bottom_pane = &G.menu_pane;
   G.menu_pane.menu_init(Slice::create("menu"), get_menu_suggestions);
   G.menu_pane.update_suggestions();
 }
@@ -2939,12 +2929,12 @@ static void handle_input(Key key) {
 
     case '+':
       G.font_height = at_most(G.font_height+1, 50);
-      graphics_set_font_options(G.ttf_file.string.chars, G.font_height);
+      graphics_set_font_options(G.ttf_file.string.chars);
       break;
 
     case '-':
       G.font_height = at_least(G.font_height-1, 7);
-      graphics_set_font_options(G.ttf_file.string.chars, G.font_height);
+      graphics_set_font_options(G.ttf_file.string.chars);
       break;
 
     case 'q': {
@@ -3312,6 +3302,8 @@ static void do_render() {
   }
 
   G.bottom_pane->render();
+  if (G.selected_pane == &G.menu_pane)
+    G.menu_pane.render();
   TIMING_END(TIMING_PANE_RENDER);
   #endif
 }

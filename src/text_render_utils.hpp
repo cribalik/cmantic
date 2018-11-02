@@ -19,6 +19,9 @@ struct TextCanvas {
   int margin;
   bool draw_shadow;
   Pos offset;
+  int font_size;
+  int font_width;
+  int line_height;
 
   void render_strf(Pos p, const Color *text_color, const Color *background_color, int x0, int x1, const char *fmt, ...);
   void render(Pos offset);
@@ -35,10 +38,13 @@ struct TextCanvas {
   void blend_textcolor_additive(Range range, Color c);
   void invert_color(Pos p);
   void fill(Utf8char c);
-  void resize(int w, int h);
-  void init(int w, int h);
+  void resize(int w, int h, int font_size, int line_margin);
+  void init(int w, int h, int font_size, int line_margin);
   bool _normalize_range(Pos &a, Pos &b);
   Area _normalize_rect(Rect &r);
+  Pos char2pixel(int x, int y) {return Pos{x * font_width, y * line_height};}
+  int char2pixelx(int x) {return x * font_width;}
+  int char2pixely(int y) {return y * line_height;}
 };
 
 void util_free(TextCanvas &c) {
@@ -47,13 +53,8 @@ void util_free(TextCanvas &c) {
   delete [] c.text_colors;
 }
 
-static int char2pixelx(int x);
-static int char2pixely(int y);
-static Pos char2pixel(int x, int y);
-static Pos char2pixel(Pos p);
-
-static int pixel2charx(int x);
-static int pixel2chary(int y);
+static Pos char2pixel(int x, int y, int font_width, int line_height) {return Pos{x * font_width, y * line_height};}
+static Pos char2pixel(Pos p, int font_width, int line_height) {return char2pixel(p.x, p.y, font_width, line_height);}
 
 #endif /* TEXT_RENDER_UTIL_HEADER */
 
@@ -66,47 +67,26 @@ static int pixel2chary(int y);
 
 #ifdef TEXT_RENDER_UTIL_IMPL
 
-static Pos char2pixel(Pos p) {
-  return char2pixel(p.x, p.y);
-}
-
-static int char2pixelx(int x) {
-  return x*G.font_width;
-}
-
-static int char2pixely(int y) {
-  return y*G.line_height;
-}
-
-static Pos char2pixel(int x, int y) {
-  return {char2pixelx(x), char2pixely(y)};
-}
-
-static int pixel2charx(int x) {
-  return x/G.font_width;
-}
-
-static int pixel2chary(int y) {
-  return y/G.line_height;
-}
-
-void TextCanvas::init(int width, int height) {
+void TextCanvas::init(int width, int height, int font_size, int line_margin) {
   (*this) = {};
   this->w = width;
   this->h = height;
   this->chars = new Utf8char[w*h]();
   this->background_colors = new Color[w*h]();
   this->text_colors = new Color[w*h]();
+  this->font_size = font_size;
+  this->font_width = graphics_get_font_advance(font_size);
+  this->line_height = this->font_size + line_margin; 
 }
 
-void TextCanvas::resize(int width, int height) {
+void TextCanvas::resize(int width, int height, int font_size, int line_margin) {
   if (this->chars)
     delete [] this->chars;
   if (this->background_colors)
     delete [] this->background_colors;
   if (this->text_colors)
     delete [] this->text_colors;
-  this->init(width, height);
+  this->init(width, height, font_size, line_margin);
 }
 
 void TextCanvas::fill(Utf8char c) {
@@ -399,16 +379,15 @@ void TextCanvas::render(Pos pos) {
   }
 
   // render text
-  const int text_offset_y = get_text_offset_y(G.font_height);
   for (int row = 0; row < h; ++row) {
     G.tmp_render_buffer.clear();
     G.tmp_render_buffer.append(&chars[row*w], w);
-    int y = char2pixely(row+1) + text_offset_y + pos.y;
+    int y = char2pixely(row+1) + pos.y;
     for (int x0 = 0, x1 = 1; x1 <= w; ++x1) {
       if (x1 < w && text_colors[row*w + x1] == text_colors[row*w + x0])
         continue;
       int x = char2pixelx(x0) + pos.x;
-      push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, text_colors[row*w + x0]);
+      push_textn(G.tmp_render_buffer.chars + x0, x1 - x0, x, y, false, text_colors[row*w + x0], font_size);
       x0 = x1;
     }
   }
