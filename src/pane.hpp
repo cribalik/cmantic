@@ -408,6 +408,7 @@ void Pane::render_menu() {
   int x = G.win_width/2 - width/2;
   int y = G.win_height * 0.1f;
 
+  // TODO: clean this stuff up
   // draw background
   push_square_quad(Rect{x, y, width, height}, *background_color);
   render_shadow_bottom_right(x, y, width, height, 5);
@@ -425,7 +426,7 @@ void Pane::render_menu() {
   util_free(prefix);
 
   // render input line
-  n = min(buffer.data->lines[0].length, num_chars - _x/font_width);
+  n = min(buffer.data->lines[0].length, num_chars - (_x-x)/font_width);
   push_textn(buffer.data->lines[0].chars, n, _x, y + font_height, false, *text_color, font_height);
   _x += n * font_width;
 

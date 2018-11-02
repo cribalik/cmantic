@@ -4,7 +4,6 @@
  * (rel)load buffer that no longer exists
  * visual jump when horizontal scrolling
  * sometimes double indent 
- * C#: parse templated method
  * Multiline dw
  * Action area 'w' should only apply to current identifier range (not whitespace after it)
  * Paste line puts line below
