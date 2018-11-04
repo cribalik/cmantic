@@ -168,7 +168,7 @@ struct RotatingColor {
  *    TEXT    *
  *************/
 
-static int graphics_text_init(const char *ttf_file, int default_font_size);
+static int graphics_text_init(const char *ttf_file);
 static void render_textatlas(int x, int y, int w, int h);
 static void push_textn(const char *str, int n, int pos_x, int pos_y, bool center, Color color);
 static void push_text(const char *str, int pos_x, int pos_y, bool center, Color color, int font_size = 0);
@@ -637,7 +637,7 @@ static GLuint graphics_compile_shader(const char *vertex_shader_src, const char 
   return result;
 }
 
-static int graphics_text_init(const char *ttf_file, int default_font_size) {
+static int graphics_text_init(const char *ttf_file) {
   assert(graphics_state.initialized);
   graphics_text_state.initialized = true;
 

@@ -406,7 +406,7 @@ void Pane::render_menu() {
     return;
   int height = num_lines*line_height + margin;
   int x = G.win_width/2 - width/2;
-  int y = G.win_height * 0.1f;
+  int y = (int)(G.win_height * 0.1f);
 
   // TODO: clean this stuff up
   // draw background
@@ -451,7 +451,7 @@ void Pane::render_menu() {
 
     // draw text
     y += font_height;
-    for (int i = 0, n = at_most(menu.suggestions.size, num_lines); i < n; ++i) {
+    for (int i = 0, end = at_most(menu.suggestions.size, num_lines); i < end; ++i) {
       push_textn(menu.suggestions[i].chars, min(menu.suggestions[i].length, num_chars), x, y, false, *text_color, font_height);
       // draw hairline
       // if (i < n-1)

@@ -1190,7 +1190,7 @@ static void state_init() {
   if (graphics_init(&G.window))
     exit(1);
   G.font_height = 14;
-  if (graphics_text_init(G.ttf_file.string.chars, G.font_height))
+  if (graphics_text_init(G.ttf_file.string.chars))
     exit(1);
   if (graphics_quad_init())
     exit(1);

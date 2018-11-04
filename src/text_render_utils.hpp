@@ -67,26 +67,26 @@ static Pos char2pixel(Pos p, int font_width, int line_height) {return char2pixel
 
 #ifdef TEXT_RENDER_UTIL_IMPL
 
-void TextCanvas::init(int width, int height, int font_size, int line_margin) {
+void TextCanvas::init(int width, int height, int font_size_, int line_margin) {
   (*this) = {};
   this->w = width;
   this->h = height;
   this->chars = new Utf8char[w*h]();
   this->background_colors = new Color[w*h]();
   this->text_colors = new Color[w*h]();
-  this->font_size = font_size;
-  this->font_width = graphics_get_font_advance(font_size);
+  this->font_size = font_size_;
+  this->font_width = graphics_get_font_advance(font_size_);
   this->line_height = this->font_size + line_margin; 
 }
 
-void TextCanvas::resize(int width, int height, int font_size, int line_margin) {
+void TextCanvas::resize(int width, int height, int font_size_, int line_margin) {
   if (this->chars)
     delete [] this->chars;
   if (this->background_colors)
     delete [] this->background_colors;
   if (this->text_colors)
     delete [] this->text_colors;
-  this->init(width, height, font_size, line_margin);
+  this->init(width, height, font_size_, line_margin);
 }
 
 void TextCanvas::fill(Utf8char c) {
