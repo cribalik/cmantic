@@ -258,6 +258,9 @@ static Keyword csharp_keywords[] = {
   {"partial", KEYWORD_SPECIFIER},
   {"out", KEYWORD_SPECIFIER},
   {"ref", KEYWORD_SPECIFIER},
+  {"sealed", KEYWORD_SPECIFIER},
+  {"internal", KEYWORD_SPECIFIER},
+  {"readonly", KEYWORD_SPECIFIER},
 
   // declarations
 
@@ -805,7 +808,7 @@ static bool is_number_modifier(char c) {
 }
 
 static bool is_identifier_head(char c) {
-  return isalpha(c) || c == '_' || c == '#';
+  return isalpha(c) || c == '_' || c == '#' || c == '$';
 }
 
 static bool is_identifier_head(Utf8char c) {
@@ -1953,7 +1956,7 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
 
             // skip pointer and references
             for (; j < tokens.size && tokens[j].token == TOKEN_OPERATOR; ++j) {
-              if (tokens[j].str == "*" || tokens[j].str == "&")
+              if (tokens[j].str == "*" || tokens[j].str == "&" || tokens[j].str == "[" || tokens[j].str == "]")
                 continue;
               goto token_def_done;
             }

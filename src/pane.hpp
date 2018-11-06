@@ -620,10 +620,11 @@ void Pane::render_edit() {
     }
 
     // if there is a search term, highlight that as well
-    if (G.search_term.length > 0) {
+    if (G.search_term.size) {
       Pos pos = {0, buf_offset.y};
-      while (d.find(G.search_term.slice, false, &pos) && pos.y < buf_y1)
-        canvas.fill_background(Rect{d.to_visual_pos(pos), G.search_term.length, 1}, G.search_term_background_color.color);
+      Range range;
+      while (d.find(G.search_term, false, &pos, &range) && pos.y < buf_y1)
+        canvas.fill(Range{d.to_visual_pos(range.a), d.to_visual_pos(range.b)}, G.search_term_background_color.color, *background_color);
     }
 
     // draw visual start marker

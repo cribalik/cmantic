@@ -188,8 +188,10 @@ struct BufferData {
   Pos to_visual_pos(Pos p);
   bool find_r(Slice s, int stay, Pos *pos);
   bool find_r(char c, int stay, Pos *pos);
+  bool find_r(Array<TokenInfo> search, bool stay, Pos *pos, Range *result);
   bool find(Slice s, bool stay, Pos *pos);
   bool find(char c, bool stay, Pos *pos);
+  bool find(Array<TokenInfo> search, bool stay, Pos *pos, Range *result);
   TokenInfo* find_start_of_identifier(Pos p);
   void insert(Array<Cursor> &cursors, Slice s);
   void insert(Array<Cursor> &cursors, Pos p, Slice s, int cursor_idx = -1, bool re_parse = true);
@@ -300,8 +302,10 @@ struct BufferView {
   void update();
   bool find_and_move(Slice s, bool stay);
   bool find_and_move(char c, bool stay);
+  bool find_and_move(Array<TokenInfo> search, bool stay);
   bool find_and_move_r(Slice s, bool stay);
   bool find_and_move_r(char c, bool stay);
+  bool find_and_move_r(Array<TokenInfo> search, bool stay);
   int advance();
   int advance(Pos &p) {return data->advance(p);}
   int advance(int marker_idx);
@@ -440,6 +444,11 @@ static void name(BufferData *buffer, Pos a, Pos b) { \
   \
   if (buffer == &G.menu_buffer) { \
     move_function(G.menu_pane.buffer.cursors[0], a, b); \
+    return; \
+  } \
+  \
+  if (buffer == &G.search_buffer) { \
+    move_function(G.search_pane.buffer.cursors[0], a, b); \
     return; \
   } \
   \
@@ -1464,6 +1473,60 @@ bool BufferData::find_r(char s, int stay, Pos *p) {
   return false;
 }
 
+static bool search_pattern_matches(TokenInfo search, TokenInfo test) {
+  if      (search.str == "$n")
+    return test.token == TOKEN_NUMBER;
+  else if (search.str == "$s")
+    return test.token == TOKEN_STRING;
+  else if (search.str == "$i")
+    return test.token == TOKEN_IDENTIFIER;
+  else if (search.str == "$x")
+    return true;
+  // if it's a string, only compare contents of string
+  else if (search.token == TOKEN_STRING && test.token == TOKEN_STRING) {
+    // TODO: how do we do this properly?
+    int a = 0,b = 0;
+    while (a < search.str.length && (search.str[a] == '\'' || search.str[a] == '`' || search.str[a] == '"')) ++a;
+    b = a;
+    while (b < search.str.length && (search.str[b] != '\'' || search.str[b] != '`' || search.str[b] != '"')) ++b;
+    if (a >= b)
+      return false;
+    Slice s = search.str(a,b-1);
+
+    a = 0;
+    while (a < test.str.length && (test.str[a] == '\'' || test.str[a] == '`' || test.str[a] == '"')) ++a;
+    b = a;
+    while (b < test.str.length && (test.str[b] != '\'' || test.str[b] != '`' || test.str[b] != '"')) ++b;
+    if (a >= b)
+      return false;
+    Slice t = test.str(a,b-1);
+
+    return s == t;
+  }
+  else
+    return search.token == test.token && search.str == test.str;
+}
+
+bool BufferData::find_r(Array<TokenInfo> tokens, bool stay, Pos *p, Range *result) {
+  // TODO: implement stay
+  TokenInfo *a = gettoken(*p);
+  if (!stay)
+    --a;
+
+  for (; a >= parser.tokens.begin(); --a) {
+    for (int i = 0; i < tokens.size; ++i)
+      if (!search_pattern_matches(tokens[i], a[i]))
+        goto next;
+    *p = a->a;
+    if (result)
+      *result = Range{a[0].a, a[tokens.size-1].b};
+    return true;
+
+    next:;
+  }
+  return false;
+}
+
 bool BufferData::find(char s, bool stay, Pos *p) {
   int x, y;
 
@@ -1488,6 +1551,25 @@ bool BufferData::find(char s, bool stay, Pos *p) {
       p->y = y;
       return true;
     }
+  }
+  return false;
+}
+
+bool BufferData::find(Array<TokenInfo> tokens, bool stay, Pos *p, Range *result) {
+  TokenInfo *a = gettoken(*p);
+  if (!stay)
+    ++a;
+
+  for (; a + tokens.size < parser.tokens.end(); ++a) {
+    for (int i = 0; i < tokens.size; ++i)
+      if (!search_pattern_matches(tokens[i], a[i]))
+        goto next;
+    *p = a->a;
+    if (result)
+      *result = Range{a[0].a, a[tokens.size-1].b};
+    return true;
+
+    next:;
   }
   return false;
 }
@@ -1534,6 +1616,18 @@ bool BufferView::find_and_move_r(char c, bool stay) {
   return success;
 }
 
+bool BufferView::find_and_move_r(Array<TokenInfo> search, bool stay) {
+  bool success = false;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos p = cursors[i].pos;
+    if (!data->find_r(search, stay, &p, 0))
+      continue;
+    success = true;
+    move_to(i, p);
+  }
+  return success;
+}
+
 bool BufferView::find_and_move_r(Slice s, bool stay) {
   bool success = false;
   for (int i = 0; i < cursors.size; ++i) {
@@ -1564,6 +1658,18 @@ bool BufferView::find_and_move(Slice s, bool stay) {
   for (int i = 0; i < cursors.size; ++i) {
     Pos p = cursors[i].pos;
     if (!data->find(s, stay, &p))
+      continue;
+    success = true;
+    move_to(i, p);
+  }
+  return success;
+}
+
+bool BufferView::find_and_move(Array<TokenInfo> search, bool stay) {
+  bool success = false;
+  for (int i = 0; i < cursors.size; ++i) {
+    Pos p = cursors[i].pos;
+    if (!data->find(search, stay, &p, 0))
       continue;
     success = true;
     move_to(i, p);

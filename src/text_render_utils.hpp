@@ -30,6 +30,7 @@ struct TextCanvas {
   void render_char(Pos p, Color text_color, const Color *background_color, char c);
   void fill(Color text, Color background);
   void fill(Rect r, Color background_color, Color text_color);
+  void fill(Range r, Color background_color, Color text_color);
   void fill_background(Rect r, Color c);
   void fill_background(Range r, Color c);
   void fill_textcolor(Rect r, Color c);
@@ -246,6 +247,38 @@ void TextCanvas::fill_background(Range range, Color c) {
       this->background_colors[y*this->w + x] = c;
   for (int x = 0; x < b.x; ++x)
     this->background_colors[y*this->w + x] = c;
+}
+
+// fills a to b but only inside the bounds 
+void TextCanvas::fill(Range range, Color background_color, Color text_color) {
+  Pos a = range.a;
+  Pos b = range.b;
+  if (!_normalize_range(a, b))
+    return;
+
+  if (a.y == b.y) {
+    for (int x = a.x; x < b.x; ++x) {
+      this->background_colors[a.y*this->w + x] = background_color;
+      this->text_colors[a.y*this->w + x] = text_color;
+    }
+    return;
+  }
+
+  int y = a.y;
+  for (int x = a.x; x < w; ++x) {
+    this->background_colors[y*this->w + x] = background_color;
+    this->text_colors[y*this->w + x] = text_color;
+  }
+  for (++y; y < b.y; ++y) {
+    for (int x = 0; x < w; ++x) {
+      this->background_colors[y*this->w + x] = background_color;
+      this->text_colors[y*this->w + x] = text_color;
+    }
+  }
+  for (int x = 0; x < b.x; ++x) {
+    this->background_colors[y*this->w + x] = background_color;
+    this->text_colors[y*this->w + x] = text_color;
+  }
 }
 
 Area TextCanvas::_normalize_rect(Rect &r) {

@@ -181,6 +181,8 @@ struct State {
 
   Pane menu_pane;
   BufferData menu_buffer;
+  Pane search_pane;
+  BufferData search_buffer;
   Pane status_message_pane;
   BufferData status_message_buffer;
   Pane dropdown_pane;
@@ -189,8 +191,6 @@ struct State {
   BufferData build_result_buffer;
 
   float activation_meter;
-
-  String search_term;
 
   // instead of removing stuff on the spot, which can cause issues, we push them to these lists and delete them at the end of the frame
   Array<BufferData*> buffers_to_remove;
@@ -225,8 +225,9 @@ struct State {
   Array<Pos> definition_positions;
 
   /* search state */
-  int search_failed;
+  bool search_failed;
   Pos search_begin_pos;
+  Array<TokenInfo> search_term;
 
   /* file tree state */
   Array<Path> files;
@@ -326,7 +327,10 @@ int main(int, const char *[])
         util_free(last_fps);
         last_fps = String::createf("fps: %f", 60.0f/G.real_dt);
       }
-      push_text(last_fps.chars, G.win_width - 100, G.win_height, true, COLOR_WHITE, 20);
+      int h = G.win_height;
+      push_text(last_fps.chars, G.win_width - 100, h, true, COLOR_WHITE, 20), h -= 22;
+      if (G.search_term.size)
+        push_textn(G.search_term[0].str.chars, G.search_term[0].str.length, G.win_width - 100, h, true, COLOR_WHITE, 20), h -= 22;
     }
 
     render_quads();
@@ -749,10 +753,12 @@ static bool movement_default(BufferView &buffer, int key) {
       break;}
 
     case 'n':
+      if (!G.search_term.size)
+        break;
       G.search_term_background_color.reset();
       buffer.jumplist_push();
-      if (!buffer.find_and_move(G.search_term.slice, false))
-        status_message_set("'{}' not found", (Slice)G.menu_buffer[0].slice);
+      if (!buffer.find_and_move(G.search_term, false))
+        status_message_set("not found");
       else
         buffer.jumplist_push();
       break;
@@ -818,10 +824,12 @@ static bool movement_default(BufferView &buffer, int key) {
       break;
 
     case 'N':
+      if (!G.search_term.size)
+        break;
       G.search_term_background_color.reset();
       buffer.jumplist_push();
-      if (!buffer.find_and_move_r(G.search_term.slice, false))
-        status_message_set("'{}' not found", (Slice)G.search_term.slice);
+      if (!buffer.find_and_move_r(G.search_term, false))
+        status_message_set("not found");
       else
         buffer.jumplist_push();
       break;
@@ -857,9 +865,9 @@ static bool movement_default(BufferView &buffer, int key) {
       if (t->token != TOKEN_IDENTIFIER)
         break;
       G.search_term_background_color.reset();
-      util_free(G.search_term);
-      G.search_term = String::create(t->str);
-      buffer.find_and_move(G.search_term.slice, false);
+      G.search_pane.buffer.empty();
+      G.search_pane.buffer.insert(t->str);
+      buffer.find_and_move(G.search_term, false);
       break;}
 
     case '#': {
@@ -869,9 +877,9 @@ static bool movement_default(BufferView &buffer, int key) {
       if (t->token != TOKEN_IDENTIFIER)
         break;
       G.search_term_background_color.reset();
-      util_free(G.search_term);
-      G.search_term = String::create(t->str);
-      buffer.find_and_move_r(G.search_term.slice, false);
+      G.search_pane.buffer.empty();
+      G.search_pane.buffer.insert(t->str);
+      buffer.find_and_move_r(G.search_term, false);
       break;}
 
     default:
@@ -893,7 +901,7 @@ static bool movement_default(BufferView &buffer, int key) {
 static void mode_cleanup() {
   G.flags.cursor_dirty = true;
 
-  if (G.mode == MODE_FILESEARCH || G.mode == MODE_SEARCH || G.mode == MODE_CWD)
+  if (G.mode == MODE_FILESEARCH || G.mode == MODE_CWD)
     G.menu_pane.buffer.empty();
 
   if (G.mode == MODE_GOTO_DEFINITION)
@@ -905,7 +913,11 @@ static void mode_cleanup() {
 
 static Array<String> get_search_suggestions() {
   Array<String> result;
-  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.editing_pane->buffer.data->parser.identifiers, slice), false, &result);
+  TokenInfo *t = G.search_buffer.find_start_of_identifier(G.search_pane.buffer.cursors[0].pos);
+  if (!t)
+    return {};
+
+  easy_fuzzy_match(t->str, VIEW(G.editing_pane->buffer.data->parser.identifiers, slice), false, &result);
   return result;
 }
 
@@ -913,13 +925,15 @@ static void mode_search() {
   mode_cleanup();
 
   G.mode = MODE_SEARCH;
-  G.selected_pane = &G.menu_pane;
+  G.selected_pane = &G.search_pane;
   G.search_begin_pos = G.editing_pane->buffer.cursors[0].pos;
-  G.search_failed = 0;
+  G.search_failed = false;
 
-  G.menu_pane.menu_init(Slice::create("search"), get_search_suggestions);
+  G.search_pane.menu_init(Slice::create("search"), get_search_suggestions);
+  G.search_buffer.language = G.editing_pane->buffer.data->language;
+  util_free(G.search_term);
 
-  G.menu_pane.buffer.empty();
+  G.search_pane.buffer.empty();
 }
 
 static Array<String> get_cwd_suggestions() {
@@ -1298,7 +1312,7 @@ static void state_init() {
   G.build_result_buffer.disable_undo();
   G.buffers += &G.build_result_buffer;
 
-  // search pane
+  // menu pane
   G.menu_pane.type = PANETYPE_MENU;
   G.menu_pane.buffer = BufferView::create(&G.menu_buffer);
   G.menu_pane.buffer.empty();
@@ -1306,6 +1320,15 @@ static void state_init() {
   G.menu_pane.text_color = &G.color_scheme.syntax_text;
   G.menu_pane.active_highlight_background_color = &G.color_scheme.autocomplete_highlight;
   G.menu_pane.margin = 5;
+
+  // search pane
+  G.search_pane.type = PANETYPE_MENU;
+  G.search_pane.buffer = BufferView::create(&G.search_buffer);
+  G.search_pane.buffer.empty();
+  G.search_pane.background_color = &G.bottom_pane_color.color;
+  G.search_pane.text_color = &G.color_scheme.syntax_text;
+  G.search_pane.active_highlight_background_color = &G.color_scheme.autocomplete_highlight;
+  G.search_pane.margin = 5;
 
   // dropdown pane
   G.dropdown_pane.type = PANETYPE_DROPDOWN;
@@ -1536,8 +1559,8 @@ static void do_visual_jump() {
         matches += it.p;
 
     // set character as search term, so we can jump to the next one with 'n'
-    util_free(G.search_term);
-    G.search_term = String::create(&target, 1);
+    G.search_pane.buffer.empty();
+    G.search_pane.buffer.insert(Utf8char::create(target));
 
     // now go inside-out
     _pos_to_distance_compare = G.editing_pane->buffer.cursors[0].pos;
@@ -2261,41 +2284,41 @@ static bool insert_default(Pane &p, Key key) {
   return false;
 }
 
-static void handle_menu_insert(int key) {
+static void handle_menu_insert(Pane *p, int key) {
   switch (key) {
 
     case KEY_ARROW_DOWN:
     case CONTROL('j'):
-      if (G.menu_pane.menu.is_verbose)
-        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion+1, 0, G.menu_pane.menu.verbose_suggestions.size-1);
+      if (p->menu.is_verbose)
+        p->menu.current_suggestion = clamp(p->menu.current_suggestion+1, 0, p->menu.verbose_suggestions.size-1);
       else
-        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion+1, 0, G.menu_pane.menu.suggestions.size-1);
+        p->menu.current_suggestion = clamp(p->menu.current_suggestion+1, 0, p->menu.suggestions.size-1);
       break;
 
     case KEY_ARROW_UP:
     case CONTROL('k'):
-      if (G.menu_pane.menu.is_verbose)
-        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion-1, 0, G.menu_pane.menu.verbose_suggestions.size-1);
+      if (p->menu.is_verbose)
+        p->menu.current_suggestion = clamp(p->menu.current_suggestion-1, 0, p->menu.verbose_suggestions.size-1);
       else
-        G.menu_pane.menu.current_suggestion = clamp(G.menu_pane.menu.current_suggestion-1, 0, G.menu_pane.menu.suggestions.size-1);
+        p->menu.current_suggestion = clamp(p->menu.current_suggestion-1, 0, p->menu.suggestions.size-1);
       break;
 
     case KEY_TAB: {
-      Slice *s = G.menu_pane.menu_get_selection();
+      Slice *s = p->menu_get_selection();
       if (s) {
-        G.menu_pane.buffer.empty();
-        G.menu_pane.buffer.insert(*s);
+        p->buffer.empty();
+        p->buffer.insert(*s);
       } else {
-        G.menu_pane.buffer.insert_tab();
+        p->buffer.insert_tab();
       }
       break;}
 
     default:
-      insert_default(G.menu_pane, key);
+      insert_default(*p, key);
       break;
   }
   if (G.flags.cursor_dirty) {
-    G.menu_pane.update_suggestions();
+    p->update_suggestions();
   }
 }
 
@@ -2355,7 +2378,7 @@ static void handle_input(Key key) {
       G.menu_pane.update_suggestions();
     }
     else
-      handle_menu_insert(key);
+      handle_menu_insert(&G.menu_pane, key);
     break;
 
   case MODE_PROMPT:
@@ -2414,7 +2437,7 @@ static void handle_input(Key key) {
       goto prompt_done;
     }
     else
-      handle_menu_insert(key);
+      handle_menu_insert(&G.menu_pane, key);
 
     prompt_keepgoing:
     G.prompt_success = false;
@@ -2501,7 +2524,7 @@ static void handle_input(Key key) {
     else if (key == KEY_BACKSPACE && G.menu_buffer[0].length == 0)
       mode_normal(true);
     else
-      handle_menu_insert(key);
+      handle_menu_insert(&G.menu_pane, key);
     break;
 
   case MODE_GOTO_DEFINITION: {
@@ -2527,7 +2550,7 @@ static void handle_input(Key key) {
       break;
     }
 
-    handle_menu_insert(key);
+    handle_menu_insert(&G.menu_pane, key);
 
     // update selection
     int i = G.menu_pane.menu_get_selection_idx();
@@ -2561,7 +2584,7 @@ static void handle_input(Key key) {
       break;
     }
 
-    handle_menu_insert(key);
+    handle_menu_insert(&G.menu_pane, key);
 
     // update selection
     #if 0
@@ -2615,32 +2638,42 @@ static void handle_input(Key key) {
       break;
     }
     else {
-      handle_menu_insert(key);
+      handle_menu_insert(&G.menu_pane, key);
     }
     break;
 
   case MODE_SEARCH: {
     // RETURN: accept autocomplete
     if (key == KEY_RETURN) {
-      Slice *opt = G.menu_pane.menu_get_selection();
+      Slice *opt = G.search_pane.menu_get_selection();
       if (opt) {
-        util_free(G.search_term);
-        G.search_term = String::create(*opt);
+        G.search_pane.buffer.empty();
+        G.search_pane.buffer.insert(*opt);
       }
     }
 
     // RETURN/ESCAPE: perform search
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
-      if (!G.menu_buffer.lines[0].length) {
+      if (!G.search_buffer.lines[0].length) {
         util_free(G.search_term);
         mode_normal(true);
       }
       else {
         buffer.jumplist_push();
-        G.search_failed = !buffer.find_and_move(G.search_term.slice, true);
+
+        // Move out the search token list
+        util_free(G.search_term);
+        G.search_term = G.search_buffer.parser.tokens;
+        // Drop the eof
+        assert(G.search_term.size);
+        assert(G.search_term.last().token == TOKEN_EOF);
+        --G.search_term.size;
+        G.search_buffer.parser.tokens = {};
+
+        G.search_failed = !buffer.find_and_move(G.search_term, true);
         if (G.search_failed) {
           // buffer.move_to(G.search_begin_pos);
-          status_message_set("'{}' not found", (Slice)G.search_term.slice);
+          status_message_set("'{}' not found", (Slice)G.search_buffer.lines[0].slice);
           mode_normal();
         }
         else {
@@ -2649,15 +2682,18 @@ static void handle_input(Key key) {
         }
       }
     }
+    else if (key == KEY_TAB && G.search_pane.menu_get_selection()) {
+      Slice selection = *G.search_pane.menu_get_selection();
+      TokenInfo *t = G.search_buffer.find_start_of_identifier(G.search_pane.buffer.cursors[0].pos);
+      if (!t)
+        break;
+      G.search_pane.buffer.remove_range(t->r, 0);
+      G.search_pane.buffer.insert(selection, 0);
+    }
     // insert
     else {
       G.search_term_background_color.reset();
-      handle_menu_insert(key);
-
-      if (G.flags.cursor_dirty) {
-        util_free(G.search_term);
-        G.search_term = String::create(G.menu_buffer.lines[0].slice);
-      }
+      handle_menu_insert(&G.search_pane, key);
     }
     break;}
 
@@ -3290,6 +3326,8 @@ static void do_render() {
   G.bottom_pane->render();
   if (G.selected_pane == &G.menu_pane)
     G.menu_pane.render();
+  if (G.selected_pane == &G.search_pane)
+    G.search_pane.render();
   TIMING_END(TIMING_PANE_RENDER);
   #endif
 }
