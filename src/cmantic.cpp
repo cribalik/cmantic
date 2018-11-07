@@ -2643,16 +2643,19 @@ static void handle_input(Key key) {
     break;
 
   case MODE_SEARCH: {
-    // RETURN: accept autocomplete
-    if (key == KEY_RETURN) {
-      Slice *opt = G.search_pane.menu_get_selection();
-      if (opt) {
-        G.search_pane.buffer.empty();
-        G.search_pane.buffer.insert(*opt);
+    // RETURN or TAB: accept autocomplete 
+    if (key == KEY_RETURN || key == KEY_TAB) {
+      Slice *selection = G.search_pane.menu_get_selection();
+      if (selection) {
+        TokenInfo *t = G.search_buffer.find_start_of_identifier(G.search_pane.buffer.cursors[0].pos);
+        if (t) {
+          G.search_pane.buffer.remove_range(t->r, 0);
+          G.search_pane.buffer.insert(*selection, 0);
+        }
       }
     }
 
-    // RETURN/ESCAPE: perform search
+    // RETURN or ESCAPE: perform search
     if (key == KEY_RETURN || key == KEY_ESCAPE) {
       if (!G.search_buffer.lines[0].length) {
         util_free(G.search_term);
@@ -2681,14 +2684,6 @@ static void handle_input(Key key) {
           mode_normal(true);
         }
       }
-    }
-    else if (key == KEY_TAB && G.search_pane.menu_get_selection()) {
-      Slice selection = *G.search_pane.menu_get_selection();
-      TokenInfo *t = G.search_buffer.find_start_of_identifier(G.search_pane.buffer.cursors[0].pos);
-      if (!t)
-        break;
-      G.search_pane.buffer.remove_range(t->r, 0);
-      G.search_pane.buffer.insert(selection, 0);
     }
     // insert
     else {

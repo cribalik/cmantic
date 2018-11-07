@@ -1966,7 +1966,21 @@ static ParseResult csharp_parse(const Array<StringBuffer> lines) {
               j = skip_c_style_generics_args(j+1, tokens);
               if (j == -1)
                 goto token_def_done;
-              if (j < tokens.size && (tokens[j].str == "(" || tokens[j].str == "{"))
+
+              // if parameter list, walk past it
+              if (j < tokens.size && tokens[j].str == "(") {
+                int depth = 1;
+                int k = j+1;
+                for (; k < tokens.size && depth; ++k) {
+                  if (tokens[k].token == '(') ++depth;
+                  if (tokens[k].token == ')') --depth;
+                }
+                if (depth)
+                  goto token_def_done;
+
+                j = k;
+              }
+              if (j < tokens.size && tokens[j].str == "{")
                 definitions += {tokens[identifier_idx].a, tokens[identifier_idx].b};
             }
           }
