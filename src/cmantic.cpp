@@ -757,10 +757,27 @@ static bool movement_default(BufferView &buffer, int key) {
         break;
       G.search_term_background_color.reset();
       buffer.jumplist_push();
-      if (!buffer.find_and_move(G.search_term, false))
-        status_message_set("not found");
-      else
-        buffer.jumplist_push();
+      if (!buffer.find_and_move(G.search_term, false)) {
+        if (!buffer.find_and_move(G.search_buffer.lines[0].slice, false)) {
+          status_message_set("not found");
+          break;
+        }
+      }
+      buffer.jumplist_push();
+      break;
+
+    case 'N':
+      if (!G.search_term.size)
+        break;
+      G.search_term_background_color.reset();
+      buffer.jumplist_push();
+      if (!buffer.find_and_move_r(G.search_term, false)) {
+        if (!buffer.find_and_move_r(G.search_buffer.lines[0].slice, false)) {
+          status_message_set("not found");
+          break;
+        }
+      }
+      buffer.jumplist_push();
       break;
 
     case 'J':
@@ -821,17 +838,6 @@ static bool movement_default(BufferView &buffer, int key) {
 
     case 'H':
       buffer.goto_beginline();
-      break;
-
-    case 'N':
-      if (!G.search_term.size)
-        break;
-      G.search_term_background_color.reset();
-      buffer.jumplist_push();
-      if (!buffer.find_and_move_r(G.search_term, false))
-        status_message_set("not found");
-      else
-        buffer.jumplist_push();
       break;
 
     case '{':
@@ -2667,26 +2673,30 @@ static void handle_input(Key key) {
         // Move out the search token list
         util_free(G.search_term);
         G.search_term = G.search_buffer.parser.tokens;
+        G.search_buffer.parser.tokens = {};
+
         // Drop the eof
         assert(G.search_term.size);
         assert(G.search_term.last().token == TOKEN_EOF);
         --G.search_term.size;
-        G.search_buffer.parser.tokens = {};
 
         G.search_failed = !buffer.find_and_move(G.search_term, true);
         if (G.search_failed) {
-          // buffer.move_to(G.search_begin_pos);
-          status_message_set("'{}' not found", (Slice)G.search_buffer.lines[0].slice);
-          mode_normal();
+          // If syntax search failed, try text search. TODO: have separate search modes
+          G.search_failed = !buffer.find_and_move(G.search_buffer.lines[0].slice, true);
+          if (G.search_failed) {
+            // buffer.move_to(G.search_begin_pos);
+            status_message_set("'{}' not found", (Slice)G.search_buffer.lines[0].slice);
+            mode_normal();
+            break;
+          }
         }
-        else {
-          buffer.jumplist_push();
-          mode_normal(true);
-        }
+        buffer.jumplist_push();
+        mode_normal(true);
       }
     }
     // insert
-    else {
+    else if (key != KEY_TAB) {
       G.search_term_background_color.reset();
       handle_menu_insert(&G.search_pane, key);
     }
