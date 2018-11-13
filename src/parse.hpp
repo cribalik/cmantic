@@ -1154,6 +1154,10 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     if (parse_multiline_string(line, lines, x, y, t, "\"\"\""))
       goto token_done;
 
+    // backtick string
+    if (parse_multiline_string(line, lines, x, y, t, "`"))
+      goto token_done;
+
     // number
     if (parse_number(line, x, t))
       goto token_done;
