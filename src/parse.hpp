@@ -37,7 +37,6 @@ static Keyword cpp_keywords[] = {
   {"true", KEYWORD_CONSTANT},
   {"false", KEYWORD_CONSTANT},
   {"NULL", KEYWORD_CONSTANT},
-  {"null", KEYWORD_CONSTANT},
   {"this", KEYWORD_CONSTANT},
 
   // types
@@ -59,6 +58,7 @@ static Keyword cpp_keywords[] = {
   {"int32_t", KEYWORD_TYPE},
   {"int16_t", KEYWORD_TYPE},
   {"int8_t", KEYWORD_TYPE},
+  {"uint", KEYWORD_TYPE},
   {"u64", KEYWORD_TYPE},
   {"u32", KEYWORD_TYPE},
   {"u16", KEYWORD_TYPE},
@@ -68,9 +68,6 @@ static Keyword cpp_keywords[] = {
   {"i16", KEYWORD_TYPE},
   {"i8", KEYWORD_TYPE},
   {"va_list", KEYWORD_TYPE},
-  {"IEnumerator", KEYWORD_TYPE},
-  {"IEnumerable", KEYWORD_TYPE},
-  {"Action", KEYWORD_TYPE},
   {"byte", KEYWORD_TYPE},
 
   // function
@@ -119,6 +116,9 @@ static Keyword cpp_keywords[] = {
   {"delete", KEYWORD_SPECIFIER},
   {"new", KEYWORD_SPECIFIER},
   {"auto", KEYWORD_SPECIFIER},
+  {"sizeof", KEYWORD_SPECIFIER},
+  {"alignof", KEYWORD_SPECIFIER},
+  {"constexpr", KEYWORD_SPECIFIER},
 
   // declarations
 
