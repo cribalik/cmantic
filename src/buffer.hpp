@@ -1052,6 +1052,8 @@ Language language_from_filename(Slice filename) {
     language = LANGUAGE_CMANTIC_COLORSCHEME;
   else if (filename.ends_with(".go"))
     language = LANGUAGE_GOLANG;
+  else if (filename.ends_with(".tf"))
+    language = LANGUAGE_TERRAFORM;
   return language;
 }
 

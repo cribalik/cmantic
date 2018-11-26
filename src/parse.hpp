@@ -634,6 +634,49 @@ static Keyword bash_keywords[] = {
   {"break", KEYWORD_CONTROL},
 };
 
+static Keyword terraform_keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"null", KEYWORD_CONSTANT},
+
+  // types
+
+  // function
+
+  // specifiers
+
+  // declarations
+
+  {"data", KEYWORD_DEFINITION},
+  {"resource", KEYWORD_DEFINITION},
+  {"variable", KEYWORD_DEFINITION},
+  {"output", KEYWORD_DEFINITION},
+
+  // macro
+
+  // flow control
+
+  {"switch", KEYWORD_CONTROL},
+  {"case", KEYWORD_CONTROL},
+  {"in", KEYWORD_CONTROL},
+  {"esac", KEYWORD_CONTROL},
+  {"if", KEYWORD_CONTROL},
+  {"elif", KEYWORD_CONTROL},
+  {"else", KEYWORD_CONTROL},
+  {"fi", KEYWORD_CONTROL},
+  {"for", KEYWORD_CONTROL},
+  {"then", KEYWORD_CONTROL},
+  {"while", KEYWORD_CONTROL},
+  {"do", KEYWORD_CONTROL},
+  {"done", KEYWORD_CONTROL},
+  {"return", KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break", KEYWORD_CONTROL},
+};
+
 template<int N>
 static bool is_keyword(Slice str, Keyword (&keywords)[N]) {
   for (int i = 0; i < N; ++i)
@@ -722,6 +765,32 @@ static const Slice python_operators[] = {
 };
 
 static const Slice julia_operators[] = {
+  {(char*)"===", 3},
+  {(char*)"!==", 3},
+  {(char*)"<<=", 3},
+  {(char*)">>=", 3},
+  {(char*)"||", 2},
+  {(char*)"&&", 2},
+  {(char*)"==", 2},
+  {(char*)"!=", 2},
+  {(char*)"<<", 2},
+  {(char*)">>", 2},
+  {(char*)"++", 2},
+  {(char*)"::", 2},
+  {(char*)"--", 2},
+  {(char*)"+", 1},
+  {(char*)"-", 1},
+  {(char*)"*", 1},
+  {(char*)"/", 1},
+  {(char*)"&", 1},
+  {(char*)"%", 1},
+  {(char*)"=", 1},
+  {(char*)":", 1},
+  {(char*)"<", 1},
+  {(char*)">", 1},
+};
+
+static const Slice terraform_operators[] = {
   {(char*)"===", 3},
   {(char*)"!==", 3},
   {(char*)"<<=", 3},
@@ -1154,6 +1223,10 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
     if (parse_multiline_string(line, lines, x, y, t, "\"\"\""))
       goto token_done;
 
+    // backtick string
+    if (parse_multiline_string(line, lines, x, y, t, "`"))
+      goto token_done;
+
     // number
     if (parse_number(line, x, t))
       goto token_done;
@@ -1200,6 +1273,106 @@ static ParseResult julia_parse(const Array<StringBuffer> lines) {
       case TOKEN_IDENTIFIER:
         if (i+1 < tokens.size && (ti.str == "function" || ti.str == "struct" || ti.str == "const" || ti.str == "immutable")) {
           definitions += tokens[i+1].r;
+          break;
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+  return {tokens, definitions, identifiers};
+}
+
+static ParseResult terraform_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
+
+    // line comment
+    if (c == '#') {
+      t.token = TOKEN_LINE_COMMENT;
+      x = line.length;
+      goto token_done;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // string
+    if (parse_string(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(terraform_operators); ++i) {
+      if (line.begins_with(x, terraform_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(terraform_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  // find definitions
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo ti = tokens[i];
+    switch (ti.token) {
+      case TOKEN_IDENTIFIER:
+        if (i+1 < tokens.size && (ti.str == "resource" || ti.str == "data" || ti.str == "variable" || ti.str == "output")) {
+          if (i+2 < tokens.size && tokens[i+1].token == TOKEN_STRING && tokens[i+2].token == TOKEN_STRING)
+            definitions += tokens[i+2].r;
+          else
+            definitions += tokens[i+1].r;
           break;
         }
         break;
@@ -2032,6 +2205,7 @@ enum Language {
   LANGUAGE_BASH,
   LANGUAGE_CMANTIC_COLORSCHEME,
   LANGUAGE_GOLANG,
+  LANGUAGE_TERRAFORM,
   NUM_LANGUAGES
 };
 
@@ -2051,6 +2225,7 @@ LanguageSettings language_settings[] = {
   {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse,        Slice::create("Shell")},  // LANGUAGE_BASH
   {StaticArray<Keyword>{},                                            {},                  colorscheme_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
   {StaticArray<Keyword>{go_keywords, ARRAY_LEN(go_keywords)},         Slice::create("//"), go_parse,          Slice::create("Go")},  // LANGUAGE_GOLANG
+  {StaticArray<Keyword>{terraform_keywords, ARRAY_LEN(terraform_keywords)},         Slice::create("#"), terraform_parse,          Slice::create("Terraform")},  // LANGUAGE_TERRAFORM
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 
