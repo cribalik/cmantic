@@ -11,6 +11,18 @@ enum PerfChecks {
   NUM_TIMINGS,
 };
 
+static PerfCheckData my_perfcheck_data[] = {
+  {"MAIN_LOOP"},
+  {"UPDATE"},
+  {"RENDER"},
+  {"PANE_RENDER"},
+  {"PANE_GUTTER"},
+  {"PANE_BUFFER"},
+  {"PANE_PUSH_QUADS"},
+  {"PANE_PUSH_TEXT_QUADS"},
+};
+STATIC_ASSERT(ARRAY_LEN(my_perfcheck_data) == NUM_TIMINGS, all_perfchecks_defined);
+
 struct PerfCheckData {
   const char *name;
   u64 t;
@@ -25,18 +37,6 @@ struct PerfCheckData {
   #define TIMING_BEGIN(index)
   #define TIMING_END(index)
 #endif
-
-static PerfCheckData my_perfcheck_data[] = {
-  {"MAIN_LOOP"},
-  {"UPDATE"},
-  {"RENDER"},
-  {"PANE_RENDER"},
-  {"PANE_GUTTER"},
-  {"PANE_BUFFER"},
-  {"PANE_PUSH_QUADS"},
-  {"PANE_PUSH_TEXT_QUADS"},
-};
-STATIC_ASSERT(ARRAY_LEN(my_perfcheck_data) == NUM_TIMINGS, all_perfchecks_defined);
 
 static void update_perf_info() {
   for (int i = 0; i < NUM_TIMINGS; ++i)
