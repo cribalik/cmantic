@@ -1,5 +1,6 @@
 /*
  * TODO:
+ * Code tree view
  * Delete multiline string
  * (rel)load buffer that no longer exists
  * visual jump when horizontal scrolling
