@@ -2,6 +2,7 @@
  * TODO:
  * Texture flicker
  * 'dL' when at end of line
+ * Code tree view
  * Delete multiline string
  * (rel)load buffer that no longer exists
  * visual jump when horizontal scrolling
@@ -1963,8 +1964,8 @@ static void menu_option_line_margin() {
     yield_break;
   }
 
-  if (G.prompt_result.integer <= 0) {
-    status_message_set("line margin must be > 0");
+  if (G.prompt_result.integer < 0) {
+    status_message_set("line margin must be >= 0");
     mode_normal();
     yield_break;
   }

@@ -699,7 +699,7 @@ static int graphics_text_init(const char *ttf_file) {
   void main () {
     vec4 c = clamp(fcolor, 0.0, 1.0);
     float alpha = c.w * texture(tex, ftpos).x;
-    alpha = pow(alpha, 0.83);
+    alpha = pow(alpha, 1);
     color = vec4(to_srgb(c.xyz), alpha);
   }
 
