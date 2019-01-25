@@ -11,6 +11,12 @@ enum PerfChecks {
   NUM_TIMINGS,
 };
 
+struct PerfCheckData {
+  const char *name;
+  u64 t;
+  int depth;
+};
+
 static PerfCheckData my_perfcheck_data[] = {
   {"MAIN_LOOP"},
   {"UPDATE"},
@@ -22,12 +28,6 @@ static PerfCheckData my_perfcheck_data[] = {
   {"PANE_PUSH_TEXT_QUADS"},
 };
 STATIC_ASSERT(ARRAY_LEN(my_perfcheck_data) == NUM_TIMINGS, all_perfchecks_defined);
-
-struct PerfCheckData {
-  const char *name;
-  u64 t;
-  int depth;
-};
 
 #ifdef DEBUG
   static StaticArray<PerfCheckData> perfcheck_data;

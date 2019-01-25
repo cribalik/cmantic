@@ -2969,6 +2969,7 @@ static void handle_input(Key key) {
       graphics_set_font_options(G.ttf_file.string.chars);
       break;
 
+    #if 0
     case 'q': {
       // check if there are any unsaved buffers
       for (BufferData *b : G.buffers) {
@@ -2983,6 +2984,7 @@ static void handle_input(Key key) {
 
       quit_done:
       break;}
+    #endif
 
     case CONTROL('b'):
       do_build();
