@@ -390,7 +390,7 @@ static Keyword python_keywords[] = {
 
   // flow control
 
-  {"in", KEYWORD_SPECIFIER},
+  {"in", KEYWORD_CONTROL},
   {"switch", KEYWORD_CONTROL},
   {"case", KEYWORD_CONTROL},
   {"if", KEYWORD_CONTROL},
@@ -411,6 +411,7 @@ static Keyword python_keywords[] = {
   {"with", KEYWORD_CONTROL},
   {"try", KEYWORD_CONTROL},
   {"except", KEYWORD_CONTROL},
+  {"del", KEYWORD_CONTROL},
 };
 
 static Keyword julia_keywords[] = {
