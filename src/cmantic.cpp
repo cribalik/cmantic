@@ -1,5 +1,7 @@
 /*
  * TODO:
+ * Texture flicker
+ * 'dL' when at end of line
  * Code tree view
  * Delete multiline string
  * (rel)load buffer that no longer exists
@@ -1327,6 +1329,7 @@ static void state_init() {
   G.menu_pane.text_color = &G.color_scheme.syntax_text;
   G.menu_pane.active_highlight_background_color = &G.color_scheme.autocomplete_highlight;
   G.menu_pane.margin = 5;
+  G.menu_buffer.disable_undo();
 
   // search pane
   G.search_pane.type = PANETYPE_MENU;
@@ -1336,6 +1339,7 @@ static void state_init() {
   G.search_pane.text_color = &G.color_scheme.syntax_text;
   G.search_pane.active_highlight_background_color = &G.color_scheme.autocomplete_highlight;
   G.search_pane.margin = 5;
+  G.search_buffer.disable_undo();
 
   // dropdown pane
   G.dropdown_pane.type = PANETYPE_DROPDOWN;
