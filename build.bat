@@ -9,17 +9,12 @@ IF NOT EXIST .\build\x86 mkdir .\build\x86
 
 rem build tools
 cl %compiler_flags% -I3party -Iinclude tools\coroutines.cpp -link %linker_flags% SDL2.lib opengl32.lib -debug
-cl %compiler_flags% -I3party -Iinclude tools\analyze_sprite_image.cpp -link %linker_flags% SDL2.lib opengl32.lib -debug
-
-rem build assets
-analyze_sprite_image.exe assets\sprites.bmp > assets\sprite_positions
 
 rem preprocess
 coroutines.exe src\cmantic.cpp src\out.cpp
 
 rem compile
 cl %compiler_flags% -I3party -Iinclude .\src\out.cpp -Fecmantic_build.exe -link %linker_flags% SDL2.lib opengl32.lib -debug
-
 
 del src\out.cpp
 copy cmantic_build.exe cmantic.exe

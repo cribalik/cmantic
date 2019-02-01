@@ -1,8 +1,12 @@
 /*
  * TODO:
- * Texture flicker
+ * HIGH:
+ * Optimize tokenization
+ * Project-wide search
+ * Project-wide goto definition
+ * Differentiate raw-text search and syntactic search
+
  * 'dL' when at end of line
- * Code tree view
  * Delete multiline string
  * (rel)load buffer that no longer exists
  * visual jump when horizontal scrolling
@@ -13,6 +17,7 @@
 
  * get rid of some modes now that we have proper prompts (MODE_DELETE for example)
 
+ * Code tree view
  * visual jump to line
  * replace with selection
  * remove string member from stringbuffer, because it is unsafe (string will free the wrong amount of mem)
@@ -133,8 +138,6 @@ enum Mode {
   MODE_NORMAL,
   MODE_INSERT,
   MODE_MENU,
-  MODE_DELETE,
-  MODE_GOTO,
   MODE_SEARCH,
   MODE_YANK,
   MODE_FILESEARCH,
@@ -142,7 +145,6 @@ enum Mode {
   MODE_GOTO_ALL_DEFINITIONS,
   MODE_CWD,
   MODE_PROMPT,
-  MODE_REPLACE,
   MODE_COUNT
 };
 
@@ -168,7 +170,7 @@ struct State {
   PoppedColor bottom_pane_color;
   PoppedColor visual_jump_color;
   PoppedColor visual_jump_background_color;
-  Color* keyword_colors[KEYWORD_COUNT];
+  Color* keyword_colors[KEYWORD_COUNT]; // maps keyword enum to entry in color_scheme
 
   ColorScheme color_scheme;
 
@@ -250,11 +252,6 @@ struct State {
   /* visual jump */
   Pane *current_visual_jump_pane;
   Array<Pos> visual_jump_positions;
-
-  /* idle game state */
-  TextureHandle pet_texture;
-  Array<Rect> pet_sprites;
-  int pet_index;
 };
 static State G;
 
@@ -281,8 +278,8 @@ static void handle_pending_removes();
 static void handle_input(Key key);
 
 #ifdef OS_WINDOWS
-// int wmain(int, const wchar_t *[], wchar_t *[])
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+int wmain(int, const wchar_t *[], wchar_t *[])
+// int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 int main(int, const char *[])
 #endif
@@ -323,7 +320,6 @@ int main(int, const char *[])
     do_render();
     TIMING_END(TIMING_RENDER);
 
-    // do_pet_update_and_draw(dt);
     if (G.debug_mode) {
       static String last_fps;
       if (loop_idx % 100 == 0) {
@@ -337,7 +333,6 @@ int main(int, const char *[])
     }
 
     render_quads();
-    render_textured_quads(G.pet_texture);
     render_text();
 
     handle_pending_removes();
@@ -1026,8 +1021,15 @@ static void mode_prompt(Slice msg, void (*callback)(void), PromptType type) {
   G.prompt_callback = callback;
   G.prompt_result = {};
 
-  G.selected_pane = &G.menu_pane;
-  G.menu_pane.menu_init(msg);
+  // if input is only single char, use the status as prompt
+  if (type == PROMPT_KEY || type == PROMPT_BOOLEAN) {
+    status_message_set("{}", (Slice)msg);
+  }
+  // otherwise use the main menu
+  else {
+    G.selected_pane = &G.menu_pane;
+    G.menu_pane.menu_init(msg);
+  }
 }
 
 static Array<String> get_goto_definition_suggestions() {
@@ -1133,29 +1135,10 @@ static void mode_filesearch() {
   G.menu_pane.update_suggestions();
 }
 
-static void mode_goto() {
-  mode_cleanup();
-  G.mode = MODE_GOTO;
-  G.goto_line_number = 0;
-  status_message_set("goto");
-}
-
-static void mode_replace() {
-  mode_cleanup();
-  G.mode = MODE_REPLACE;
-  status_message_set("replace");
-}
-
 static void mode_yank() {
   mode_cleanup();
   G.mode = MODE_YANK;
   status_message_set("yank");
-}
-
-static void mode_delete() {
-  mode_cleanup();
-  G.mode = MODE_DELETE;
-  status_message_set("delete");
 }
 
 static void mode_normal(bool force_set_message = false) {
@@ -1219,26 +1202,6 @@ static void state_init() {
     exit(1);
   if (graphics_textured_quad_init())
     exit(1);
-
-  if (!load_texture_from_file("assets/sprites.bmp", &G.pet_texture))
-    exit(1);
-  G.pet_index = rand() % 3;
-
-  // parse sprite meta data
-  {
-    String file;
-    if (!File::get_contents("assets/sprite_positions", &file)) {
-      log_err("Failed to read assets/sprite_positions\n");
-      exit(1);
-    }
-    int i = 0;
-    for (Slice row; row = file.token(&i, '\n'), row.length;) {
-      Rect r;
-      sscanf(row.chars, "%i %i %i %i", &r.x, &r.y, &r.w, &r.h);
-      G.pet_sprites += r;
-    }
-    util_free(file);
-  }
 
   SDL_GetWindowSize(G.window, &G.win_width, &G.win_height);
 
@@ -1546,6 +1509,140 @@ static Key get_input(bool *window_active) {
   return KEY_NONE;
 }
 
+static bool get_action_selection(BufferView &buffer, Key key, Array<Range> *result);
+static void do_delete_movement(Key key) {
+  BufferView &buffer = G.editing_pane->buffer;
+
+  // TODO: is it more performant to check if it is a movement command first?
+  buffer.action_begin();
+  Array<Cursor> cursors = buffer.cursors.copy_shallow();
+
+  // first try selection (p for parameter, d for line etc)
+  Array<Range> selections = {};
+  if (get_action_selection(buffer, key, &selections)) {
+    for (int i = 0; i < selections.size; ++i)
+      buffer.remove_range(selections[i].a, selections[i].b, i);
+    util_free(selections);
+  }
+  else if (movement_default(buffer, key)) {
+    if (cursors.size != buffer.cursors.size)
+      goto done;
+    // delete movement range
+    for (int i = 0; i < cursors.size; ++i) {
+      Pos a = cursors[i].pos;
+      Pos b = buffer.cursors[i].pos;
+      if (b < a)
+        swap_range(*buffer.data,a,b);
+      buffer.remove_range(a, b, i);
+    }
+  }
+  else {
+    goto done;
+  }
+
+  done:
+  buffer.action_end();
+  util_free(cursors);
+}
+
+static void do_goto() {
+  COROUTINE_BEGIN;
+
+  G.goto_line_number = 0;
+
+  mode_prompt(Slice::create("goto"), do_goto, PROMPT_KEY);
+  yield(wait_for_initial_key);
+  if (!G.prompt_success) {
+    mode_normal(true);
+    yield_break;
+  }
+
+  Key key = G.prompt_result.key;
+  BufferView &buffer = G.editing_pane->buffer;
+  buffer.collapse_cursors();
+  if (key >= '0' && key <= '9') {
+    buffer.jumplist_push();
+    G.goto_line_number *= 10;
+    G.goto_line_number += key - '0';
+    buffer.move_to_y(0, G.goto_line_number-1);
+    status_message_set("goto %u", G.goto_line_number);
+    buffer.jumplist_push();
+    yield_break;
+  }
+
+  switch (key) {
+    case 't':
+      buffer.jumplist_push();
+      buffer.move_to(0, 0);
+      buffer.jumplist_push();
+      break;
+    case 'b':
+      buffer.jumplist_push();
+      buffer.move_to(0, buffer.data->num_lines()-1);
+      buffer.jumplist_push();
+      break;
+    case 'd': {
+      // goto definition
+      TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
+      if (!t)
+        break;
+      if (t->token != TOKEN_IDENTIFIER)
+        break;
+
+      // TODO: what if we have multiple matches?
+      Range *def = buffer.data->getdefinition(t->str);
+      if (!def)
+        break;
+
+      // G.editing_pane->add_subpane(buffer.data, def->a);
+      buffer.jumplist_push();
+      buffer.move_to(def->a);
+      buffer.jumplist_push();
+      break;}
+  }
+  G.goto_line_number = 0;
+  mode_normal(true);
+
+  COROUTINE_END;
+}
+
+static void do_delete_movement() {
+  COROUTINE_BEGIN;
+
+  mode_prompt(Slice::create("delete"), do_delete_movement, PROMPT_KEY);
+  yield(wait_for_initial_key);
+  if (!G.prompt_success) {
+    mode_normal(true);
+    yield_break;
+  }
+
+  do_delete_movement(G.prompt_result.key);
+  mode_normal(true);
+  COROUTINE_END;
+}
+
+static bool do_paste();
+static void do_replace() {
+  COROUTINE_BEGIN;
+
+  mode_prompt(Slice::create("replace"), do_replace, PROMPT_KEY);
+  yield(wait_for_initial_key);
+  if (!G.prompt_success) {
+    mode_normal(true);
+    yield_break;
+  }
+
+  BufferView &buffer = G.editing_pane->buffer;
+  buffer.action_begin();
+  do_delete_movement(G.prompt_result.key);
+  do_paste();
+  buffer.action_end();
+
+  mode_normal(true);
+  COROUTINE_END;
+}
+
+
 Pos _pos_to_distance_compare;
 static int pos_distance_compare(const void *a, const void *b) {
   return abs(((Pos*)a)->y - _pos_to_distance_compare.y) - abs(((Pos*)b)->y - _pos_to_distance_compare.y);
@@ -1772,46 +1869,6 @@ static bool get_action_selection(BufferView &buffer, Key key, Array<Range> *resu
 
   fail:
   util_free(selections);
-  return false;
-}
-
-static bool do_delete_movement(Key key) {
-  BufferView &buffer = G.editing_pane->buffer;
-
-  // TODO: is it more performant to check if it is a movement command first?
-  buffer.action_begin();
-  Array<Cursor> cursors = buffer.cursors.copy_shallow();
-
-  // first try selection (p for parameter, d for line etc)
-  Array<Range> selections = {};
-  if (get_action_selection(buffer, key, &selections)) {
-    for (int i = 0; i < selections.size; ++i)
-      buffer.remove_range(selections[i].a, selections[i].b, i);
-    util_free(selections);
-  }
-  else if (movement_default(buffer, key)) {
-    if (cursors.size != buffer.cursors.size)
-      goto fail;
-    // delete movement range
-    for (int i = 0; i < cursors.size; ++i) {
-      Pos a = cursors[i].pos;
-      Pos b = buffer.cursors[i].pos;
-      if (b < a)
-        swap_range(*buffer.data,a,b);
-      buffer.remove_range(a, b, i);
-    }
-  }
-  else {
-    goto fail;
-  }
-
-  buffer.action_end();
-  util_free(cursors);
-  return true;
-
-  fail:
-  buffer.action_end();
-  util_free(cursors);
   return false;
 }
 
@@ -2140,11 +2197,6 @@ static void menu_option_blame() {
   COROUTINE_END;
 }
 
-static void menu_option_next_pet() {
-  ++G.pet_index;
-  status_message_set("Changed to pet %i", (G.pet_index % 3) + 1);
-}
-
 static void menu_option_expand_columns() {
   BufferView &b = G.editing_pane->buffer;
   b.action_begin();
@@ -2222,11 +2274,6 @@ static struct {MenuOption opt; void(*fun)();} menu_options[] = {
     Slice::create("set indent"),
     Slice::create("set indentation. > 0 for spaces, 0 for tabs"),
     menu_option_set_indent
-  },
-  {
-    Slice::create("next pet"),
-    Slice::create("Switch to the next pet"),
-    menu_option_next_pet
   },
   {
     Slice::create("expand to column"),
@@ -2335,6 +2382,7 @@ static void handle_menu_insert(Pane *p, int key) {
 
 static void handle_input(Key key) { 
   BufferView &buffer = G.editing_pane->buffer;
+  BufferData &buffer_data = *G.editing_pane->buffer.data;
 
   switch (G.mode) {
   case MODE_CWD:
@@ -2456,52 +2504,6 @@ static void handle_input(Key key) {
 
     prompt_done:
     G.prompt_callback();
-    break;
-
-  case MODE_GOTO:
-    buffer.collapse_cursors();
-    if (key >= '0' && key <= '9') {
-      buffer.jumplist_push();
-      G.goto_line_number *= 10;
-      G.goto_line_number += key - '0';
-      buffer.move_to_y(0, G.goto_line_number-1);
-      status_message_set("goto %u", G.goto_line_number);
-      buffer.jumplist_push();
-      break;
-    }
-
-    switch (key) {
-      case 't':
-        buffer.jumplist_push();
-        buffer.move_to(0, 0);
-        buffer.jumplist_push();
-        break;
-      case 'b':
-        buffer.jumplist_push();
-        buffer.move_to(0, buffer.data->num_lines()-1);
-        buffer.jumplist_push();
-        break;
-      case 'd': {
-        // goto definition
-        TokenInfo *t = buffer.data->gettoken(buffer.cursors[0].pos);
-        if (!t)
-          break;
-        if (t->token != TOKEN_IDENTIFIER)
-          break;
-
-        // TODO: what if we have multiple matches?
-        Range *def = buffer.data->getdefinition(t->str);
-        if (!def)
-          break;
-
-        // G.editing_pane->add_subpane(buffer.data, def->a);
-        buffer.jumplist_push();
-        buffer.move_to(def->a);
-        buffer.jumplist_push();
-        break;}
-    }
-    G.goto_line_number = 0;
-    mode_normal(true);
     break;
 
   case MODE_COUNT:
@@ -2707,14 +2709,6 @@ static void handle_input(Key key) {
     }
     break;}
 
-  case MODE_REPLACE: {
-    buffer.action_begin();
-    do_delete_movement(key);
-    do_paste();
-    buffer.action_end();
-    mode_normal(true);
-    break;}
-
   case MODE_YANK: {
     // TODO: is it more performant to check if it is a movement command first?
 
@@ -2755,11 +2749,6 @@ static void handle_input(Key key) {
   
     yank_done:;
     mode_normal();
-    break;}
-
-  case MODE_DELETE: {
-    do_delete_movement(key);
-    mode_normal(true);
     break;}
 
   case MODE_INSERT: {
@@ -2832,7 +2821,7 @@ static void handle_input(Key key) {
         do_paste();
         util_free(G.visual_start);
       }
-      mode_replace();
+      do_replace();
       break;
 
     case '?':
@@ -2918,7 +2907,8 @@ static void handle_input(Key key) {
           int y0 = min(G.visual_start.cursors[i].y, buffer.cursors[i].y);
           int y1 = max(G.visual_start.cursors[i].y, buffer.cursors[i].y);
           for (int y = y0; y <= y1; ++y)
-            buffer.add_indent(y, 1);
+            if (buffer_data.lines[y].length > 0)
+              buffer.add_indent(y, 1);
         }
       }
       else
@@ -3125,7 +3115,7 @@ static void handle_input(Key key) {
       break;
 
     case 'g':
-      mode_goto();
+      do_goto();
       break;
 
     case 'o':
@@ -3195,7 +3185,7 @@ static void handle_input(Key key) {
         break;
       }
 
-      mode_delete();
+      do_delete_movement();
       break;
 
     case 'S':
