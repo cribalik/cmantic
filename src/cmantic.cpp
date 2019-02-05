@@ -1,10 +1,17 @@
 /*
  * TODO:
  * HIGH:
- * Optimize tokenization
+ * fuzzy match path for ctrl-p
+ * fix tab-completion in ctrl-p (doesn't work properly with relative paths)
+ * Oversample font
+ * Multiple #if 0 is broken
+ * Lazy tokenization
  * Project-wide search
  * Project-wide goto definition
  * Differentiate raw-text search and syntactic search
+ * File tree
+ * Create new file
+ * Rename file
 
  * 'dL' when at end of line
  * Delete multiline string
@@ -278,8 +285,8 @@ static void handle_pending_removes();
 static void handle_input(Key key);
 
 #ifdef OS_WINDOWS
-int wmain(int, const wchar_t *[], wchar_t *[])
-// int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+// int wmain(int, const wchar_t *[], wchar_t *[])
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 int main(int, const char *[])
 #endif
