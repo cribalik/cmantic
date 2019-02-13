@@ -2,6 +2,7 @@
  * TODO:
  * HIGH:
  * fuzzy match path for ctrl-p
+ * search-and-replace
  * fix tab-completion in ctrl-p (doesn't work properly with relative paths)
  * Oversample font
  * Multiple #if 0 is broken
