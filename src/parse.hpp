@@ -635,6 +635,64 @@ static Keyword bash_keywords[] = {
   {"break", KEYWORD_CONTROL},
 };
 
+static Keyword makefile_keywords[] = {
+
+  // constants
+
+  {"true", KEYWORD_CONSTANT},
+  {"false", KEYWORD_CONSTANT},
+  {"unset", KEYWORD_CONSTANT},
+
+  // types
+
+  // function
+
+  // specifiers
+
+  {"static", KEYWORD_SPECIFIER},
+  {"const", KEYWORD_SPECIFIER},
+  {"extern", KEYWORD_SPECIFIER},
+  {"nothrow", KEYWORD_SPECIFIER},
+  {"noexcept", KEYWORD_SPECIFIER},
+  {"public", KEYWORD_SPECIFIER},
+  {"private", KEYWORD_SPECIFIER},
+  {"in", KEYWORD_SPECIFIER},
+  {"delegate", KEYWORD_SPECIFIER},
+  {"protected", KEYWORD_SPECIFIER},
+  {"override", KEYWORD_SPECIFIER},
+  {"virtual", KEYWORD_SPECIFIER},
+  {"abstract", KEYWORD_SPECIFIER},
+
+  // declarations
+
+  {"export", KEYWORD_DEFINITION},
+  {"function", KEYWORD_DEFINITION},
+
+  // macro
+
+  // flow control
+
+  {"switch", KEYWORD_CONTROL},
+  {"ifeq", KEYWORD_CONTROL},
+  {"endif", KEYWORD_CONTROL},
+  {"shell", KEYWORD_CONTROL},
+  {"case", KEYWORD_CONTROL},
+  {"in", KEYWORD_CONTROL},
+  {"esac", KEYWORD_CONTROL},
+  {"if", KEYWORD_CONTROL},
+  {"elif", KEYWORD_CONTROL},
+  {"else", KEYWORD_CONTROL},
+  {"fi", KEYWORD_CONTROL},
+  {"for", KEYWORD_CONTROL},
+  {"then", KEYWORD_CONTROL},
+  {"while", KEYWORD_CONTROL},
+  {"do", KEYWORD_CONTROL},
+  {"done", KEYWORD_CONTROL},
+  {"return", KEYWORD_CONTROL},
+  {"continue", KEYWORD_CONTROL},
+  {"break", KEYWORD_CONTROL},
+};
+
 static Keyword terraform_keywords[] = {
 
   // constants
@@ -852,6 +910,29 @@ static const Slice bash_operators[] = {
   {(char*)">>", 2},
   {(char*)"++", 2},
   {(char*)"::", 2},
+  {(char*)"--", 2},
+  {(char*)"+", 1},
+  {(char*)"-", 1},
+  {(char*)"*", 1},
+  {(char*)"/", 1},
+  {(char*)"&", 1},
+  {(char*)"%", 1},
+  {(char*)"=", 1},
+  {(char*)":", 1},
+  {(char*)"<", 1},
+  {(char*)">", 1},
+};
+
+static const Slice makefile_operators[] = {
+  {(char*)"||", 2},
+  {(char*)"&&", 2},
+  {(char*)"==", 2},
+  {(char*)"!=", 2},
+  {(char*)"<<", 2},
+  {(char*)">>", 2},
+  {(char*)"++", 2},
+  {(char*)"::", 2},
+  {(char*)":=", 2},
   {(char*)"--", 2},
   {(char*)"+", 1},
   {(char*)"-", 1},
@@ -1594,6 +1675,10 @@ static ParseResult bash_parse(const Array<StringBuffer> lines) {
     if (parse_number(line, x, t))
       goto token_done;
 
+    // multiline string
+    if (parse_multiline_string(line, lines, x, y, t, "'"))
+      goto token_done;
+
     // string
     if (parse_string(line, x, t))
       goto token_done;
@@ -1638,6 +1723,123 @@ static ParseResult bash_parse(const Array<StringBuffer> lines) {
           definitions += ti[1].r, ++i;
         else if (i+1 < tokens.size && (ti[1].str == "=" || ti[1].str == "(") && (i == 0 || ti[-1].a.y < ti[0].a.y))
           definitions += ti[0].r, ++i;
+        break;
+
+      default:
+        break;
+    }
+  }
+  return {tokens, definitions, identifiers};
+}
+
+static ParseResult makefile_parse(const Array<StringBuffer> lines) {
+  Array<TokenInfo> tokens = {};
+  Array<String> identifiers = {};
+  Array<Range> definitions = {};
+
+  int x = 0;
+  int y = 0;
+
+  // parse
+  for (;;) {
+    TokenInfo t = {TOKEN_NULL, x, y};
+    if (y >= lines.size)
+      break;
+    Slice line = lines[y].slice;
+
+    // endline
+    char c;
+    if (x >= lines[y].length) {
+      ++y, x = 0;
+      continue;
+    }
+    c = line[x];
+
+    // whitespace
+    if (isspace(c)) {
+      NEXT_CHAR(1);
+      continue;
+    }
+
+    // line comment
+    if (c == '#') {
+      t.token = TOKEN_LINE_COMMENT;
+      x = line.length;
+      goto token_done;
+    }
+
+    // identifier
+    if (parse_identifier(line, x, t, "0123456789", "-+"))
+      goto token_done;
+
+    // number
+    if (parse_number(line, x, t))
+      goto token_done;
+
+    // multiline string
+    if (parse_multiline_string(line, lines, x, y, t, "'"))
+      goto token_done;
+
+    // string
+    if (parse_string(line, x, t))
+      goto token_done;
+
+    // operators
+    for (int i = 0; i < (int)ARRAY_LEN(makefile_operators); ++i) {
+      if (line.begins_with(x, makefile_operators[i])) {
+        t.token = TOKEN_OPERATOR;
+        NEXT_CHAR(makefile_operators[i].length);
+        goto token_done;
+      }
+    }
+
+    // single char token
+    t.token = (Token)c;
+    NEXT_CHAR(1);
+
+    token_done:;
+    if (t.token != TOKEN_NULL) {
+      t.b = {x,y};
+      if (t.a.y == t.b.y)
+        t.str = lines[t.a.y](t.a.x, t.b.x);
+      tokens += t;
+
+      // add to identifier list
+      if (t.token == TOKEN_IDENTIFIER) {
+        Slice identifier = line(t.a.x, t.b.x);
+        if (!identifiers.find(identifier))
+          identifiers += String::create(identifier);
+      }
+    }
+  }
+
+  tokens += {TOKEN_EOF, 0, lines.size, 0, lines.size};
+
+  // find definitions
+  for (int i = 0; i < tokens.size; ++i) {
+    TokenInfo *ti = tokens+i;
+    switch (ti->token) {
+      case TOKEN_IDENTIFIER:
+        if      (i+1 < tokens.size && (ti->str == "function" || ti->str == "export"))
+          definitions += ti[1].r, ++i;
+        // variable definitions
+        // x := 1
+        // x = 1
+        else if (i+1 < tokens.size && (ti[1].str == ":" || ti[1].str == ":=" || ti[1].str == "=") && (i == 0 || ti[-1].a.y < ti[0].a.y))
+          definitions += ti[0].r, ++i;
+        // function of style
+        // x() {}
+        else if (i+1 < tokens.size && ti[1].str == "(" && (i == 0 || ti[-1].a.y < ti[0].a.y)) {
+          // walk through param list, and check that it is followed by a '{'
+          int depth = 1;
+          int j = i+2;
+          for (; j < tokens.size && depth; ++j) {
+            if (tokens[j].token == '(') ++depth;
+            if (tokens[j].token == ')') --depth;
+          }
+          if (depth == 0 && j < tokens.size && tokens[j].token == '{')
+            definitions += {tokens[i].a, tokens[i].b};
+        }
         break;
 
       default:
@@ -2207,6 +2409,7 @@ enum Language {
   LANGUAGE_CMANTIC_COLORSCHEME,
   LANGUAGE_GOLANG,
   LANGUAGE_TERRAFORM,
+  LANGUAGE_MAKEFILE,
   NUM_LANGUAGES
 };
 
@@ -2218,15 +2421,16 @@ struct LanguageSettings {
   Slice name;
 };
 LanguageSettings language_settings[] = {
-  {StaticArray<Keyword>{},                                            {},                  textfile_parse,    Slice::create("")},  // LANGUAGE_NULL
-  {StaticArray<Keyword>{cpp_keywords, ARRAY_LEN(cpp_keywords)},       Slice::create("//"), cpp_parse,         Slice::create("C/C++")}, // LANGUAGE_C
-  {StaticArray<Keyword>{csharp_keywords, ARRAY_LEN(csharp_keywords)}, Slice::create("//"), csharp_parse,      Slice::create("C#")}, // LANGUAGE_CSHARP
-  {StaticArray<Keyword>{python_keywords, ARRAY_LEN(python_keywords)}, Slice::create("#"),  python_parse,      Slice::create("Python")},  // LANGUAGE_PYTHON
-  {StaticArray<Keyword>{julia_keywords, ARRAY_LEN(julia_keywords)},   Slice::create("#"),  julia_parse,       Slice::create("Julia")},  // LANGUAGE_JULIA
-  {StaticArray<Keyword>{bash_keywords, ARRAY_LEN(bash_keywords)},     Slice::create("#"),  bash_parse,        Slice::create("Shell")},  // LANGUAGE_BASH
-  {StaticArray<Keyword>{},                                            {},                  colorscheme_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
-  {StaticArray<Keyword>{go_keywords, ARRAY_LEN(go_keywords)},         Slice::create("//"), go_parse,          Slice::create("Go")},  // LANGUAGE_GOLANG
-  {StaticArray<Keyword>{terraform_keywords, ARRAY_LEN(terraform_keywords)},         Slice::create("#"), terraform_parse,          Slice::create("Terraform")},  // LANGUAGE_TERRAFORM
+  {StaticArray<Keyword>{},           {},                  textfile_parse,    Slice::create("")},  // LANGUAGE_NULL
+  {static_array(cpp_keywords),       Slice::create("//"), cpp_parse,         Slice::create("C/C++")}, // LANGUAGE_C
+  {static_array(csharp_keywords),    Slice::create("//"), csharp_parse,      Slice::create("C#")}, // LANGUAGE_CSHARP
+  {static_array(python_keywords),    Slice::create("#"),  python_parse,      Slice::create("Python")},  // LANGUAGE_PYTHON
+  {static_array(julia_keywords),     Slice::create("#"),  julia_parse,       Slice::create("Julia")},  // LANGUAGE_JULIA
+  {static_array(bash_keywords),      Slice::create("#"),  bash_parse,        Slice::create("Shell")},  // LANGUAGE_BASH
+  {{},                               {},                  colorscheme_parse, Slice::create("Cmantic-colorscheme")},  // LANGUAGE_CMANTIC_COLORSCHEME
+  {static_array(go_keywords),        Slice::create("//"), go_parse,          Slice::create("Go")},  // LANGUAGE_GOLANG
+  {static_array(terraform_keywords), Slice::create("#"), terraform_parse,          Slice::create("Terraform")},  // LANGUAGE_TERRAFORM
+  {static_array(makefile_keywords),  Slice::create("#"), makefile_parse,          Slice::create("Makefile")},  // LANGUAGE_MAKEFILE
 };
 STATIC_ASSERT(ARRAY_LEN(language_settings) == NUM_LANGUAGES, all_language_settings_defined);
 

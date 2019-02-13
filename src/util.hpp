@@ -106,6 +106,10 @@ struct StaticArray {
   }
 };
 
+template<class T, int N>
+static StaticArray<T> static_array(T (&items)[N]) {
+  return {items, N};
+}
 template<class T>
 static StaticArray<T> static_array(T *items, int n) {
   return {items, n};

@@ -1047,7 +1047,7 @@ Language language_from_filename(Slice filename) {
   else if (filename.ends_with(".sh"))
     language = LANGUAGE_BASH;
   else if (Path::name(filename) == "Makefile" || Path::name(filename) == "makefile")
-    language = LANGUAGE_BASH; // bash will have to do for makefiles
+    language = LANGUAGE_MAKEFILE;
   else if (filename.ends_with(".cmantic-colorscheme"))
     language = LANGUAGE_CMANTIC_COLORSCHEME;
   else if (filename.ends_with(".go"))
