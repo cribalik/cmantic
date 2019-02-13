@@ -674,6 +674,8 @@ static Keyword makefile_keywords[] = {
 
   {"switch", KEYWORD_CONTROL},
   {"ifeq", KEYWORD_CONTROL},
+  {"ifdef", KEYWORD_CONTROL},
+  {"ifndef", KEYWORD_CONTROL},
   {"endif", KEYWORD_CONTROL},
   {"shell", KEYWORD_CONTROL},
   {"case", KEYWORD_CONTROL},
@@ -933,11 +935,13 @@ static const Slice makefile_operators[] = {
   {(char*)"++", 2},
   {(char*)"::", 2},
   {(char*)":=", 2},
+  {(char*)"?=", 2},
   {(char*)"--", 2},
   {(char*)"+", 1},
   {(char*)"-", 1},
   {(char*)"*", 1},
   {(char*)"/", 1},
+  {(char*)"@", 1},
   {(char*)"&", 1},
   {(char*)"%", 1},
   {(char*)"=", 1},
@@ -1825,7 +1829,7 @@ static ParseResult makefile_parse(const Array<StringBuffer> lines) {
         // variable definitions
         // x := 1
         // x = 1
-        else if (i+1 < tokens.size && (ti[1].str == ":" || ti[1].str == ":=" || ti[1].str == "=") && (i == 0 || ti[-1].a.y < ti[0].a.y))
+        else if (i+1 < tokens.size && (ti[1].str == ":" || ti[1].str == ":=" || ti[1].str == "=" || ti[1].str == "?=") && (i == 0 || ti[-1].a.y < ti[0].a.y))
           definitions += ti[0].r, ++i;
         // function of style
         // x() {}

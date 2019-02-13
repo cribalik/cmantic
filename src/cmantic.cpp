@@ -230,9 +230,6 @@ struct State {
   /* status message state */
   bool status_message_was_set;
 
-  /* goto state */
-  unsigned int goto_line_number; /* unsigned in order to prevent undefined behavior on wrap around */
-
   /* goto_definition state */
   Pos goto_definition_begin_pos;
   Array<Pos> definition_positions;
@@ -1556,7 +1553,8 @@ static void do_delete_movement(Key key) {
 static void do_goto() {
   COROUTINE_BEGIN;
 
-  G.goto_line_number = 0;
+  static int goto_line_number;
+  goto_line_number = 0;
 
   mode_prompt(Slice::create("goto"), do_goto, PROMPT_KEY);
   yield(wait_for_initial_key);
@@ -1564,20 +1562,30 @@ static void do_goto() {
     mode_normal(true);
     yield_break;
   }
-
   Key key = G.prompt_result.key;
-  BufferView &buffer = G.editing_pane->buffer;
-  buffer.collapse_cursors();
+
   if (key >= '0' && key <= '9') {
-    buffer.jumplist_push();
-    G.goto_line_number *= 10;
-    G.goto_line_number += key - '0';
-    buffer.move_to_y(0, G.goto_line_number-1);
-    status_message_set("goto %u", G.goto_line_number);
-    buffer.jumplist_push();
+    G.editing_pane->buffer.jumplist_push();
+    while (key >= '0' && key <= '9') {
+      static String status_message;
+      goto_line_number *= 10;
+      goto_line_number += key - '0';
+      G.editing_pane->buffer.move_to_y(0, goto_line_number-1);
+      util_free(status_message);
+      status_message = String::createf("goto %u", goto_line_number);
+      mode_prompt(status_message.slice, do_goto, PROMPT_KEY);
+      yield(wait_for_another_number);
+
+      if (!G.prompt_success)
+        break;
+      key = G.prompt_result.key;
+    }
+    G.editing_pane->buffer.jumplist_push();
+    mode_normal(true);
     yield_break;
   }
 
+  BufferView &buffer = G.editing_pane->buffer;
   switch (key) {
     case 't':
       buffer.jumplist_push();
@@ -1608,7 +1616,6 @@ static void do_goto() {
       buffer.jumplist_push();
       break;}
   }
-  G.goto_line_number = 0;
   mode_normal(true);
 
   COROUTINE_END;
