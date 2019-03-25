@@ -290,8 +290,8 @@ static void handle_pending_removes();
 static void handle_input(Key key);
 
 #ifdef OS_WINDOWS
-// int wmain(int, const wchar_t *[], wchar_t *[])
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+int wmain(int, const wchar_t *[], wchar_t *[])
+// int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
 int main(int, const char *[])
 #endif
