@@ -1577,6 +1577,7 @@ static void do_delete_movement(Key key) {
 static void do_goto() {
   COROUTINE_BEGIN;
 
+  Key key;
   static int goto_line_number;
   goto_line_number = 0;
 
@@ -1586,7 +1587,7 @@ static void do_goto() {
     mode_normal(true);
     yield_break;
   }
-  Key key = G.prompt_result.key;
+  key = G.prompt_result.key;
 
   if (key >= '0' && key <= '9') {
     G.editing_pane->buffer.jumplist_push();
