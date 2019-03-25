@@ -147,6 +147,9 @@ static Keyword cpp_keywords[] = {
   // flow control
 
   {"switch", KEYWORD_CONTROL},
+  {"try", KEYWORD_CONTROL},
+  {"catch", KEYWORD_CONTROL},
+  {"throw", KEYWORD_CONTROL},
   {"case", KEYWORD_CONTROL},
   {"if", KEYWORD_CONTROL},
   {"else", KEYWORD_CONTROL},
@@ -243,6 +246,7 @@ static Keyword csharp_keywords[] = {
   {"nothrow", KEYWORD_SPECIFIER},
   {"noexcept", KEYWORD_SPECIFIER},
   {"public", KEYWORD_SPECIFIER},
+  {"unsafe", KEYWORD_SPECIFIER},
   {"private", KEYWORD_SPECIFIER},
   {"in", KEYWORD_SPECIFIER},
   {"delegate", KEYWORD_SPECIFIER},
@@ -302,6 +306,7 @@ static Keyword csharp_keywords[] = {
   {"goto", KEYWORD_CONTROL},
   {"yield", KEYWORD_CONTROL},
   {"foreach", KEYWORD_CONTROL},
+  {"throw", KEYWORD_CONTROL},
   {"default", KEYWORD_CONTROL},
   {"try", KEYWORD_CONTROL},
   {"catch", KEYWORD_CONTROL},

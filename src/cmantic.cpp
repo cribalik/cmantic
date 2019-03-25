@@ -156,6 +156,12 @@ enum Mode {
   MODE_COUNT
 };
 
+struct ProjectDefinitionToFile {
+  int end_idx;
+  Path file;
+};
+void util_free(ProjectDefinitionToFile) {}
+
 struct State {
   /* @renderer rendering state */
   SDL_Window *window;
@@ -190,6 +196,7 @@ struct State {
   Pane *selected_pane; // the pane that the marker currently is on, could be everything from editing pane, to menu pane, to filesearch pane
   Pane *editing_pane; // the pane that is currently being edited on, regardless if you happen to be in filesearch or menu
   Array<BufferData*> buffers;
+  Array<ProjectDefinitionToFile> project_definitions_to_file;
   Array<String> project_definitions;
 
   Pane menu_pane;
@@ -486,6 +493,7 @@ static void filetree_init() {
 
   // parse tree
   util_free(G.project_definitions);
+  util_free(G.project_definitions_to_file);
   int num_indexed = 0;
   for (Path p : G.files) {
     Language l = language_from_filename(p.string.slice);
@@ -498,6 +506,7 @@ static void filetree_init() {
     ParseResult pr = parse(lines, l);
     for (Range r : pr.definitions)
       G.project_definitions += lines[r.a.y](r.a.x, r.b.x).copy();
+    G.project_definitions_to_file += ProjectDefinitionToFile{G.project_definitions.size, p};
     pr.definitions = {};
     util_free(pr);
     util_free(lines);
@@ -1081,8 +1090,23 @@ static Array<String> get_goto_definition_suggestions() {
 }
 
 static Array<String> get_goto_all_definitions_suggestions() {
-  Array<String> result;
-  easy_fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.project_definitions, slice), false, &result);
+  if (!G.project_definitions_to_file.size)
+    return {};
+
+  StackArray<FuzzyMatch, 15> matches = {};
+  int n = fuzzy_match(G.menu_buffer.lines[0].slice, VIEW(G.project_definitions, slice), view(matches), false);
+  Array<String> result = {};
+  for (int i = 0; i < n; ++i) {
+    // find the corresponding filename
+    Path path = G.project_definitions_to_file[G.project_definitions_to_file.size-1].file;
+    for (int j = 0; j < G.project_definitions_to_file.size-1; ++j) {
+      if (G.project_definitions_to_file[j].end_idx > matches[i].idx) {
+        path = G.project_definitions_to_file[j].file;
+        break;
+      }
+    }
+    result += String::createf("{}    [{}]", (Slice)matches[i].str, (Slice)path.name());
+  }
   return result;
 }
 
