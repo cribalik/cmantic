@@ -2130,8 +2130,13 @@ static ParseResult cpp_parse(const Array<StringBuffer> lines) {
                 if (tokens[k].token == '(') ++depth;
                 if (tokens[k].token == ')') --depth;
               }
-              if (depth == 0 && k < tokens.size && tokens[k].token == '{')
-                definitions += {tokens[j].a, tokens[j].b};
+              // check for keywords after param list like "override"
+              if (depth == 0) {
+                while (k < tokens.size && tokens[k].token == TOKEN_IDENTIFIER && is_keyword(tokens[k].str, cpp_keywords))
+                  ++k;
+                if (depth == 0 && k < tokens.size && tokens[k].token == '{')
+                  definitions += {tokens[j].a, tokens[j].b};
+              }
             }
             else if (j+3 < tokens.size &&
                      tokens[j].token == TOKEN_IDENTIFIER &&
